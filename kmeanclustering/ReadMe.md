@@ -7,7 +7,7 @@ K-means is a popular unsupervised machine learning algorithm used for clustering
 ## Algorithm Steps
 
 1. **Initialization:**
-   - Randomly select k data points as initial centroids.
+   - Select k data points as initial centroids.
 
 2. **Assignment:**
    - Assign each data point to the nearest centroid, creating k clusters.
