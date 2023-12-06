@@ -4,6 +4,7 @@
 
 This repository contains a simple implementation of the linear regression algorithm from scratch using Python and NumPy. Linear regression is a fundamental machine learning algorithm used for predicting a continuous target variable based on one or more input features.
 
+
 ## Background
 
 ### What is Linear Regression?
@@ -23,7 +24,6 @@ where:
 - \( x_1, x_2, \ldots, x_n \) are the input features.
 
 The objective is to find the values of \( \theta \) that minimize the mean squared error (MSE) between the predicted and actual values.
-
 
 
 ## Implementation Details
