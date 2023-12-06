@@ -35,7 +35,8 @@ The core of the implementation is the `LinearRegression` class, which encapsulat
 
 4. **Prediction:** Use the `predict` method to make predictions on new data.
 
-   The optimization objective (mean squared error) is given by the formula:
+
+The optimization objective (mean squared error) is given by the formula:
 
 \[ J(\theta) = \frac{1}{2m} \sum_{i=1}^{m} (h_\theta(x^{(i)}) - y^{(i)})^2 \]
 
