@@ -33,7 +33,7 @@ The Logistic Regression algorithm is implemented in Python using NumPy for numer
 
 ### File Structure
 
-- `LogisticRegression.py`: Main implementation of the Logistic Regression algorithm.
+- `LogisticRegressionAlgo.py`: Main implementation of the Logistic Regression algorithm.
 - `unitTestLogReg.py`: Unit tests for the Logistic Regression class.
 
 ## Usage
@@ -45,7 +45,6 @@ To use the Logistic Regression algorithm, follow these steps:
 3. Train the model using the `fit` method with your training data.
 4. Make predictions using the `predict` method.
 
-Refer to the [example](#example) section for a detailed demonstration.
 
 ## Example
 
