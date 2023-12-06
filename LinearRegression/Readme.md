@@ -41,7 +41,7 @@ The optimization objective (mean squared error) is given by the formula:
 $\[ J(\theta) = \frac{1}{2m} \sum_{i=1}^{m} (h_\theta(x^{(i)}) - y^{(i)})^2 \]$
 
 where:
-- $\( J(\theta) \)$ is the cost function.
+- $[\( J(\theta) \)]$ is the cost function.
 - $\( m \)$ is the number of training examples.
 - $\( h_\theta(x) \)$ is the hypothesis function.
 - $\( x^{(i)} \)$ are the input features for the $\( i \)$-th example.
