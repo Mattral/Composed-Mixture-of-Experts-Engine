@@ -50,7 +50,7 @@ Decision Trees for regression predict continuous values by averaging target valu
 
   ### Decision Tree Regressor
 
-- **File:** DecisionTreeRegression.py
+- **File**: DecisionTreeRegression.py
 - **Description:**
   - Implements a Decision Tree Regressor from scratch.
   - Capable of training on a dataset and making regression predictions.
