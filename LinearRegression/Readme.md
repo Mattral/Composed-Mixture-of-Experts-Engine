@@ -13,8 +13,8 @@ Linear Regression is a supervised machine learning algorithm used for predicting
 ### How does Linear Regression work?
 
 The linear equation is represented as:
-$
-$\[ y = \theta_0 + \theta_1 \cdot x_1 + \theta_2 \cdot x_2 + \ldots + \theta_n \cdot x_n \]$$
+
+$$\[ y = \theta_0 + \theta_1 \cdot x_1 + \theta_2 \cdot x_2 + \ldots + \theta_n \cdot x_n \]$$
 
 where:
 - \( y \) is the predicted output,
