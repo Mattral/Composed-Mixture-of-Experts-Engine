@@ -41,11 +41,11 @@ The optimization objective (mean squared error) is given by the formula:
 $\[ J(\theta) = \frac{1}{2m} \sum_{i=1}^{m} (h_\theta(x^{(i)}) - y^{(i)})^2 \]$
 
 where:
-- \( J(\theta) \) is the cost function.
-- \( m \) is the number of training examples.
-- \( h_\theta(x) \) is the hypothesis function.
-- \( x^{(i)} \) are the input features for the \( i \)-th example.
-- \( y^{(i)} \) is the target variable for the \( i \)-th example.
+- $\( J(\theta) \)$ is the cost function.
+- $\( m \)$ is the number of training examples.
+- $\( h_\theta(x) \)$ is the hypothesis function.
+- $\( x^{(i)} \)$ are the input features for the $\( i \)$-th example.
+- $\( y^{(i)} \)$ is the target variable for the \( i \)$-th example.
 
 
 ## Usage
@@ -81,7 +81,7 @@ plt.show()
 
 The linear regression model predicts the target variable \( y \) using the formula:
 
-\[ y = \theta_0 + \theta_1 \cdot x \]
+$\[ y = \theta_0 + \theta_1 \cdot x \]$
 
 ### CSV Data Example
 
