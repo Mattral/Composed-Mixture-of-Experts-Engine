@@ -37,7 +37,7 @@ K-means is a popular unsupervised machine learning algorithm used for clustering
 
 - **Euclidean Distance:** Assign each data point to the cluster with the nearest centroid based on Euclidean distance:
   ```math
-  $$\[ \text{labels}[i] = \arg \min_j \| X[i] - \text{centroids}[j] \|_2 \]$$
+  $\[ \text{labels}[i] = \arg \min_j \| X[i] - \text{centroids}[j] \|_2 \]$
   ```
 ### Step 3: Update Centroids
 
@@ -47,7 +47,7 @@ K-means is a popular unsupervised machine learning algorithm used for clustering
 ### Step 4: Convergence Check
 
 - **Convergence Criterion:** Check for convergence by comparing the change in centroids:
-  $$\[ \|\text{new\_centroids} - \text{centroids}\|_2 < \text{tol} \]$$
+  $\[ \|\text{new\_centroids} - \text{centroids}\|_2 < \text{tol} \]$
 
 ## Experimentation
 
