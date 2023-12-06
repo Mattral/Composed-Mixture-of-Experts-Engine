@@ -82,3 +82,25 @@ plt.show()
 The linear regression model predicts the target variable \( y \) using the formula:
 
 \[ y = \theta_0 + \theta_1 \cdot x \]
+
+### CSV Data Example
+
+```python
+import pandas as pd
+from LinearRegressionAlgo import LinearRegression
+
+# Read data from a CSV file
+csv_file_path = 'your_dataset.csv'
+data = pd.read_csv(csv_file_path)
+X_csv = data[['feature']].values
+y_csv = data['target'].values
+
+# Create and train the linear regression model using CSV data
+model_csv = LinearRegression(learning_rate=0.01, num_iterations=1000)
+model_csv.fit(X_csv, y_csv)
+
+# Make predictions using CSV data
+predictions_csv = model_csv.predict(X_csv)
+
+```
+
