@@ -1,3 +1,30 @@
+"""
+Decision Tree and Random Forest Classifier Implementation
+
+This script implements a basic Decision Tree and Random Forest Classifier from scratch
+using NumPy and pandas. It also utilizes the scikit-learn library for some functionalities.
+
+The DecisionTreeClassifier class implements a basic decision tree for classification tasks.
+The RandomForestClassifier class builds an ensemble of decision trees to improve predictive performance.
+
+Note: This implementation is for educational purposes. For real-world applications, it is recommended
+to use the scikit-learn library, which is optimized and well-tested.
+
+Requirements:
+- NumPy
+- pandas
+- scikit-learn
+- matplotlib
+
+Usage:
+1. Load the Titanic dataset (CSV file assumed to be named 'titanic.csv').
+2. Preprocess the data, handling missing values, and encoding categorical variables.
+3. Extract features and labels.
+4. Create an instance of RandomForestClassifier and fit it to the training data.
+5. Evaluate the model on the test set.
+
+"""
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -9,6 +36,24 @@ from sklearn.tree import DecisionTreeClassifier as SklearnDecisionTreeClassifier
 
 class DecisionTreeClassifier:
     def __init__(self, max_depth=None):
+        """
+        Decision Tree Classifier Implementation.
+
+        Parameters:
+        - max_depth: int or None, optional (default=None)
+            The maximum depth of the tree. If None, nodes are expanded until
+            they contain less than the minimum samples required to split.
+
+        Attributes:
+        - max_depth: int or None
+            The specified maximum depth of the tree.
+        - tree: sklearn.tree.DecisionTreeClassifier
+            The underlying scikit-learn DecisionTreeClassifier model.
+        - num_classes: int
+            The number of unique classes in the target variable.
+        - feature_importances_: numpy array
+            Feature importances computed from the underlying Decision Tree model.
+        """
         self.max_depth = max_depth
         self.tree = None
         self.num_classes = None
@@ -17,6 +62,18 @@ class DecisionTreeClassifier:
         self.feature_importances_ = np.zeros(1)
 
     def fit(self, X, y):
+        """
+        Fit the Decision Tree Classifier to the training data.
+
+        Parameters:
+        - X: numpy array, shape (n_samples, n_features)
+            The training input samples.
+        - y: numpy array, shape (n_samples,)
+            The target values.
+
+        Returns:
+        - None
+        """
         self.num_classes = len(np.unique(y))
         self.tree = SklearnDecisionTreeClassifier(max_depth=self.max_depth)
         self.tree.fit(X, y)
@@ -107,12 +164,45 @@ class DecisionTreeClassifier:
 
 class RandomForestClassifier:
     def __init__(self, n_trees=100, max_depth=None):
+        """
+        Random Forest Classifier Implementation.
+
+        Parameters:
+        - n_trees: int, optional (default=100)
+            The number of trees in the forest.
+        - max_depth: int or None, optional (default=None)
+            The maximum depth of the trees. If None, nodes are expanded until
+            they contain less than the minimum samples required to split.
+
+        Attributes:
+        - n_trees: int
+            The specified number of trees in the forest.
+        - max_depth: int or None
+            The specified maximum depth of the trees.
+        - trees: list of DecisionTreeClassifier
+            The list of DecisionTreeClassifier models forming the Random Forest.
+        - feature_importances_: list of numpy arrays
+            Feature importances computed from each Decision Tree in the forest.
+        """
         self.n_trees = n_trees
         self.max_depth = max_depth
         self.trees = []
         self.feature_importances_ = []
 
     def fit(self, X, y):
+
+        """
+        Fit the Random Forest Classifier to the training data.
+
+        Parameters:
+        - X: numpy array, shape (n_samples, n_features)
+            The training input samples.
+        - y: numpy array, shape (n_samples,)
+            The target values.
+
+        Returns:
+        - None
+        """
         for i in range(self.n_trees):
             tree = DecisionTreeClassifier(max_depth=self.max_depth)
             indices = np.random.choice(len(X), len(X), replace=True)
