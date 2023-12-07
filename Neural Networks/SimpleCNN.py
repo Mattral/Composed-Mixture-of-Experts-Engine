@@ -1,13 +1,29 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-
 class Conv2D:
     def __init__(self, in_channels, out_channels, kernel_size):
+        """
+        Initialize a 2D convolutional layer.
+
+        Parameters:
+        - in_channels (int): Number of input channels.
+        - out_channels (int): Number of output channels.
+        - kernel_size (int): Size of the convolutional kernel.
+        """
         self.weights = np.random.randn(out_channels, in_channels, kernel_size, kernel_size)
         self.bias = np.zeros((out_channels, 1))
 
     def forward(self, x):
+        """
+        Perform forward pass for the convolutional layer.
+
+        Parameters:
+        - x (numpy array): Input data.
+
+        Returns:
+        - numpy array: Output data after convolution.
+        """
         self.last_input = x
         batch_size, in_channels, in_height, in_width = x.shape
         out_channels, _, kernel_size, _ = self.weights.shape
@@ -26,6 +42,9 @@ class Conv2D:
         return output
 
     def plot_filters(self):
+        """
+        Plot the filters of the convolutional layer.
+        """
         out_channels, in_channels, _, _ = self.weights.shape
 
         # Handle the case when either out_channels or in_channels is 1
@@ -47,9 +66,24 @@ class Conv2D:
 
 class MaxPool2D:
     def __init__(self, pool_size):
+        """
+        Initialize a 2D max pooling layer.
+
+        Parameters:
+        - pool_size (int): Size of the pooling window.
+        """
         self.pool_size = pool_size
 
     def forward(self, x):
+        """
+        Perform forward pass for the max pooling layer.
+
+        Parameters:
+        - x (numpy array): Input data.
+
+        Returns:
+        - numpy array: Output data after max pooling.
+        """
         self.last_input = x
         batch_size, in_channels, in_height, in_width = x.shape
         pool_height, pool_width = self.pool_size, self.pool_size
@@ -68,36 +102,74 @@ class MaxPool2D:
 
 class Flatten:
     def forward(self, x):
+        """
+        Perform forward pass for flattening layer.
+
+        Parameters:
+        - x (numpy array): Input data.
+
+        Returns:
+        - numpy array: Flattened output data.
+        """
         self.last_input_shape = x.shape
         return x.reshape(x.shape[0], -1)
 
 class Dense:
     def __init__(self, in_features, out_features):
+        """
+        Initialize a fully connected layer.
+
+        Parameters:
+        - in_features (int): Number of input features.
+        - out_features (int): Number of output features.
+        """
         self.weights = np.random.randn(out_features, in_features)
         self.bias = np.zeros((out_features, 1))
 
     def forward(self, x):
+        """
+        Perform forward pass for the fully connected layer.
+
+        Parameters:
+        - x (numpy array): Input data.
+
+        Returns:
+        - numpy array: Output data after fully connected layer.
+        """
         self.last_input = x
         return np.dot(self.weights, x.T).T + self.bias.T
 
 class SimpleCNN:
     def __init__(self, in_channels, num_classes):
+        """
+        Initialize a simple CNN model.
+
+        Parameters:
+        - in_channels (int): Number of input channels.
+        - num_classes (int): Number of output classes.
+        """
         self.conv1 = Conv2D(in_channels, 32, kernel_size=3)
         self.pool1 = MaxPool2D(2)
         self.flatten = Flatten()
         self.dense1 = Dense(5408, 128)
-        self.dense2 = Dense(128, 10)
+        self.dense2 = Dense(128, num_classes)
 
     def forward(self, x):
+        """
+        Perform forward pass for the entire CNN model.
+
+        Parameters:
+        - x (numpy array): Input data.
+
+        Returns:
+        - numpy array: Output data after passing through the model.
+        """
         x = self.conv1.forward(x)
         x = self.pool1.forward(x)
         x = self.flatten.forward(x)
         x = self.dense1.forward(x)
         x = self.dense2.forward(x)
         return x
-
-
-
 
 # Example usage with random input
 model = SimpleCNN(in_channels=1, num_classes=10)
@@ -107,4 +179,3 @@ print(output)
 
 # Plot the learned filters
 model.conv1.plot_filters()
-
