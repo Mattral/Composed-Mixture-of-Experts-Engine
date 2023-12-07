@@ -9,15 +9,17 @@ The Naive Bayes Classifier is a probabilistic machine learning algorithm based o
 ### Mathematical Formulation
 
 1. **Data Preprocessing:**
+      - The algorithm assumes that features are conditionally independent given the class label. Preprocess the data by tokenizing and vectorizing the text features (e.g., using bag-of-words or TF-IDF).
    - Tokenize and vectorize text features into a bag-of-words representation. Given a document with features \(X_1, X_2, ..., X_n\), the probability of the document given the class \(P(X_1, X_2, ..., X_n | C)\) is calculated.
 
-2. **Training:**
+3. **Training:**
+      - Estimate the probability of each class and the conditional probabilities of each feature given the class using the training data.
    - Calculate the prior probability of each class \(P(C)\) and the conditional probabilities of each feature given the class \(P(X_i | C)\) using the training data.
    - Use Bayes' theorem to calculate the posterior probability of each class \(P(C | X_1, X_2, ..., X_n)\).
 
    $$\[ P(C | X_1, X_2, ..., X_n) = \frac{P(C) \cdot P(X_1 | C) \cdot P(X_2 | C) \cdot ... \cdot P(X_n | C)}{P(X_1, X_2, ..., X_n)} \]$$
 
-3. **Prediction:**
+5. **Prediction:**
    - For a new data point, calculate the posterior probability for each class and choose the class with the highest probability as the predicted class.
 
    $$\[ \hat{y} = \arg\max_{c} P(C=c | X_1, X_2, ..., X_n) \]$$
