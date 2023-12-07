@@ -92,6 +92,8 @@ class ImprovedSelfAttention:
         attended_values = np.matmul(attention_weights, V)
         return attended_values
 
+
+
     def split_heads(self, X):
         """
         Split the input into multiple heads.
