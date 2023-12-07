@@ -139,12 +139,23 @@ class MultiLayerPerceptronRegression:
 
 # Generate synthetic data for regression
 np.random.seed(42)
-X_regression = np.random.randn(200, 1)
-y_regression = 3 * X_regression + 2 + 0.5 * np.random.randn(200, 1)
+X = np.random.randn(200, 1)
+y = 3 * X + 2 + 0.5 * np.random.randn(200, 1)
 
-# Plot the synthetic data
-plt.scatter(X_regression, y_regression)
-plt.title('Synthetic Data for Regression')
+# Create an instance of MultiLayerPerceptronRegression
+mlp_regression = MultiLayerPerceptronRegression(input_size=1, hidden_size=3, output_size=1)
+
+# Train the Multi-Layer Perceptron
+mlp_regression.train(X, y, learning_rate=0.01, epochs=1000)
+
+# Make predictions on the same data for visualization
+predictions = mlp_regression.forward_pass(X)
+
+# Plot the original data and the predictions
+plt.scatter(X, y, label='Original Data')
+plt.plot(X, predictions, color='red', label='Predictions')
+plt.title('Regression with Multi-Layer Perceptron')
 plt.xlabel('X')
 plt.ylabel('y')
+plt.legend()
 plt.show()
