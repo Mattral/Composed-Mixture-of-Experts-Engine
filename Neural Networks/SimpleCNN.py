@@ -1,5 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
+from PIL import Image
+
 
 class Conv2D:
     def __init__(self, in_channels, out_channels, kernel_size):
@@ -171,10 +173,35 @@ class SimpleCNN:
         x = self.dense2.forward(x)
         return x
 
+"""
+____________Syntatic DATA__________
+"""
 # Example usage with random input
 model = SimpleCNN(in_channels=1, num_classes=10)
 input_data = np.random.randn(1, 1, 28, 28)  # Batch size of 1, 1 channel, 28x28 image
 output = model.forward(input_data)
+print(output)
+
+# Plot the learned filters
+model.conv1.plot_filters()
+
+'''
+___________________Image DATA____________
+'''
+# Function to load and preprocess an image
+def load_and_preprocess_image(image_path):
+    image = Image.open(image_path)
+    image = image.resize((28, 28))  # Resize the image to match the input size of the CNN
+    image = np.array(image)
+    image = np.expand_dims(image, axis=0)  # Add batch dimension
+    image = np.transpose(image, (0, 3, 1, 2))  # Adjust the channels axis if needed
+    return image
+
+# Example usage with image loading
+model = SimpleCNN(in_channels=3, num_classes=10)  # Assuming 3 channels for RGB images
+image_path = "kali.jpg"
+input_image = load_and_preprocess_image(image_path)
+output = model.forward(input_image)
 print(output)
 
 # Plot the learned filters
