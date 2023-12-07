@@ -124,6 +124,140 @@ The implementations cover a range of neural network architectures and concepts.
 
 21. **titanic.csv**
     - Dataset file containing Titanic passenger data.
+   
+##Uses
+
+1. **AutoEncoder.py**
+    - Implements an autoencoder for feature learning and dimensionality reduction.
+    - **Uses:**
+        - Feature learning and dimensionality reduction.
+        - Anomaly detection.
+        - Image denoising.
+        - Generative modeling.
+        - Transfer learning.
+        - Regression and time series (encoded features).
+        - Natural Language Processing (NLP) for text representation.
+
+2. **BoltzmannMachine.py**
+    - Basic implementation of a Boltzmann Machine for unsupervised learning.
+    - **Uses:**
+        - Unsupervised learning.
+        - Stochastic optimization.
+        - Energy-based models.
+
+3. **GenerativeAdversarialNetwork.py**
+    - Simple implementation of a Generative Adversarial Network (GAN) with a basic generator and discriminator.
+    - **Uses:**
+        - Image generation.
+        - Data augmentation.
+        - Synthetic data generation.
+        - Creative applications.
+
+4. **HopfieldNetwork.py**
+    - Implementation of a Hopfield Network, a content-addressable memory system.
+    - **Uses:**
+        - Associative memory.
+        - Pattern recognition.
+        - Image recognition.
+        - Optimization problems.
+        - Information retrieval.
+
+5. **LongShortTermMemoryLSTM.py**
+    - Basic implementation of a Long Short-Term Memory (LSTM) network for handling sequential data.
+    - **Uses:**
+        - Sequential data processing.
+        - Time series prediction.
+        - Natural Language Processing (NLP).
+        - Speech recognition.
+
+6. **Microsoft_Stock.csv**
+    - Dataset file containing historical Microsoft stock data.
+
+7. **MultiLayerPerceptronClassification.py**
+    - Implementation of a multi-layer perceptron (MLP) for classification tasks.
+    - **Uses:**
+        - Classification problems.
+        - Pattern recognition.
+        - Decision boundaries.
+
+8. **MultiLayerPerceptronRegression.py**
+    - Implementation of an MLP for regression tasks.
+    - **Uses:**
+        - Regression problems.
+        - Function approximation.
+
+9. **RadialBasisFunctionNetworks.py**
+    - Implementation of a Radial Basis Function Network (RBFN) for function approximation.
+    - **Uses:**
+        - Function approximation.
+        - Pattern recognition.
+        - Interpolation and extrapolation.
+
+10. **SelfAttentionMechanism.py**
+    - Implementation of a self-attention mechanism, commonly used in transformers.
+    - **Uses:**
+        - Transformer architectures.
+        - Sequence-to-sequence tasks.
+        - Natural Language Processing (NLP).
+
+11. **SimpleCNN.py**
+    - Basic Convolutional Neural Network (CNN) implementation.
+    - **Uses:**
+        - Image classification.
+        - Object detection.
+        - Feature learning in images.
+
+12. **SimpleEncoderDecoder.py**
+    - Simple implementation of an encoder-decoder architecture.
+    - **Uses:**
+        - Sequence-to-sequence tasks.
+        - Language translation.
+        - Text summarization.
+
+13. **SimpleRNN.py**
+    - Implementation of a Simple Recurrent Neural Network (RNN).
+    - **Uses:**
+        - Sequential data processing.
+        - Time series prediction.
+        - Natural Language Processing (NLP).
+
+14. **SingleLayerPerceptronClassification.py**
+    - Implementation of a single-layer perceptron (SLP) for classification tasks.
+    - **Uses:**
+        - Binary classification.
+        - Perceptron learning algorithm.
+
+15. **SingleLayerPerceptronRegression.py**
+    - Implementation of an SLP for regression tasks.
+    - **Uses:**
+        - Regression problems.
+        - Function approximation.
+
+16. **TitanicSurvialBySingleLayerPerceptron.py**
+    - Example of using a single-layer perceptron to predict Titanic survival.
+    - **Uses:**
+        - Binary classification.
+        - Introductory example for perceptron.
+
+17. **Transformer.py**
+    - Basic implementation of the Transformer architecture.
+    - **Uses:**
+        - Sequence-to-sequence tasks.
+        - Natural Language Processing (NLP).
+        - Language modeling.
+
+18. **positionalEncoding.py**
+    - Implementation of positional encoding used in transformers.
+    - **Uses:**
+        - Positional encoding in transformer architectures.
+
+19. **scaled_dot_product_attention.py**
+    - Implementation of scaled dot-product attention used in transformers.
+    - **Uses:**
+        - Attention mechanism in transformer architectures.
+
+20. **titanic.csv**
+    - Dataset file containing Titanic passenger data.
 
 ## How to Use
 
