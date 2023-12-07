@@ -74,9 +74,9 @@ Random Forest can also be used for regression tasks. In regression, the output i
 - The DecisionTreeRegressor class implements a basic decision tree for regression.
 - The RandomForestRegressor class builds an ensemble of decision trees for regression.
 
-  ###Usage
+###Usage
 
-  ```
+```python
   # Example Usage for Random Forest Regression
 from RandomForestRegression import RandomForestRegressor
 from sklearn.model_selection import train_test_split
