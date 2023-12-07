@@ -1,3 +1,21 @@
+'''
+Single Layer Perceptron (SLP): It's the simplest form of a neural network with a single layer of neurons. The perceptron makes predictions based on a weighted sum of input features and applies an activation function (sigmoid in this case).
+
+Initialization: We initialize the weights and bias randomly.
+
+Sigmoid Activation Function: It squashes the weighted sum into the range [0, 1].
+
+Predict Method: It calculates the predictions based on the current weights and bias.
+
+Training: It uses gradient descent to update weights and bias in the direction that minimizes the binary cross-entropy loss.
+
+Plot Decision Boundary: It visualizes the decision boundary during training to see how the model learns.
+
+Example Usage: It generates synthetic data and trains the perceptron on it.
+
+
+'''
+
 import numpy as np
 import matplotlib.pyplot as plt
 
