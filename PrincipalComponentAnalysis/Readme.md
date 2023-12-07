@@ -50,8 +50,4 @@ Principal Component Analysis (PCA) is a dimensionality reduction technique used 
 
 The provided Python script (`PrincipalComponentAnalysis.py`) demonstrates the step-by-step implementation of PCA without relying on external libraries. It includes a `PCA` class with methods for fitting, transforming, and inverse transforming data.
 
-## Usage
 
-1. Install required libraries:
-   ```bash
-   pip install numpy pandas matplotlib
