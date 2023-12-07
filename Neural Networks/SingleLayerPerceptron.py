@@ -3,17 +3,62 @@ import matplotlib.pyplot as plt
 
 class SingleLayerPerceptron:
     def __init__(self, input_size):
+        """
+        Initialize the Single Layer Perceptron.
+
+        Parameters:
+        - input_size: int
+            Number of input features.
+        """
         self.weights = np.random.rand(input_size)
         self.bias = np.random.rand(1)
 
     def sigmoid(self, x):
+        """
+        Sigmoid activation function.
+
+        Parameters:
+        - x: numpy array
+            Input to the sigmoid function.
+
+        Returns:
+        - numpy array
+            Output of the sigmoid function.
+        """
         return 1 / (1 + np.exp(-x))
 
     def predict(self, X):
+        """
+        Make predictions using the trained perceptron.
+
+        Parameters:
+        - X: numpy array, shape (n_samples, n_features)
+            Input features.
+
+        Returns:
+        - numpy array
+            Predicted labels (0 or 1).
+        """
         z = np.dot(X, self.weights) + self.bias
-        return self.sigmoid(z)
+        predictions = self.sigmoid(z)
+        return (predictions > 0.5).astype(int)
 
     def train(self, X, y, learning_rate=0.01, epochs=1000, epsilon=1e-8):
+        """
+        Train the Single Layer Perceptron.
+
+        Parameters:
+        - X: numpy array, shape (n_samples, n_features)
+            Input features.
+        - y: numpy array, shape (n_samples,)
+            Binary labels (0 or 1).
+        - learning_rate: float, optional (default=0.01)
+            Learning rate for gradient descent.
+        - epochs: int, optional (default=1000)
+            Number of training epochs.
+        - epsilon: float, optional (default=1e-8)
+            Small value for numerical stability.
+        """
         for epoch in range(epochs):
             # Forward pass
             z = np.dot(X, self.weights) + self.bias
@@ -30,11 +75,35 @@ class SingleLayerPerceptron:
             self.weights -= learning_rate * dw
             self.bias -= learning_rate * db
 
-            # Visualize decision boundary every 100 epochs
+            # Print details every 100 epochs
             if epoch % 100 == 0:
+                print(f'Epoch {epoch}: Loss = {loss}')
+
+                # You can print additional information if needed
+                # For example, you can print weights and bias:
+                print(f'  Weights: {self.weights}')
+                print(f'  Bias: {self.bias}')
+
                 self.plot_decision_boundary(X, y, epoch)
 
+        # Print final details after training
+        print(f'Final Epoch: Loss = {loss}')
+        print(f'Final Weights: {self.weights}')
+        print(f'Final Bias: {self.bias}')
+
+
     def plot_decision_boundary(self, X, y, epoch):
+        """
+        Plot the decision boundary of the perceptron.
+
+        Parameters:
+        - X: numpy array, shape (n_samples, n_features)
+            Input features.
+        - y: numpy array, shape (n_samples,)
+            Binary labels (0 or 1).
+        - epoch: int
+            Current training epoch.
+        """
         plt.figure(figsize=(8, 6))
         plt.scatter(X[:, 0], X[:, 1], c=y, cmap=plt.cm.RdYlBu, edgecolors='k')
         plt.title(f'Decision Boundary - Epoch {epoch}')
@@ -51,7 +120,7 @@ class SingleLayerPerceptron:
         Z = self.predict(np.c_[xx.ravel(), yy.ravel()])
         Z = Z.reshape(xx.shape)
 
-        plt.contourf(xx, yy, Z, alpha=0.3, cmap=plt.cm.RdYlBu)
+        plt.contour(xx, yy, Z, levels=[0.5], colors='black')  # Use contour instead of contourf
         plt.show()
 
 
@@ -62,4 +131,4 @@ y = (X[:, 0] + X[:, 1] > 0).astype(int)
 
 # Train the Single-Layer Perceptron
 slp = SingleLayerPerceptron(input_size=2)
-slp.train(X, y, learning_rate=0.1, epochs=1000)
+slp.train(X, y, learning_rate=0.1, epochs=500)
