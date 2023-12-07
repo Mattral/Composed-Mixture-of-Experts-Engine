@@ -3,6 +3,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
+from sklearn.tree import plot_tree  
+from sklearn.tree import DecisionTreeClassifier as SklearnDecisionTreeClassifier
+
 
 class DecisionTreeClassifier:
     def __init__(self, max_depth=None):
@@ -11,9 +14,13 @@ class DecisionTreeClassifier:
         self.num_classes = None
         self.feature_importances_ = np.zeros(1)
 
+        self.feature_importances_ = np.zeros(1)
+
     def fit(self, X, y):
         self.num_classes = len(np.unique(y))
-        self.tree, self.feature_importances_ = self._grow_tree(X, y)
+        self.tree = SklearnDecisionTreeClassifier(max_depth=self.max_depth)
+        self.tree.fit(X, y)
+        self.feature_importances_ = self.tree.feature_importances_
 
     def _gini(self, y):
         m = len(y)
@@ -87,7 +94,7 @@ class DecisionTreeClassifier:
         return node, feature_importances
 
     def predict(self, X):
-        return [self._predict(inputs) for inputs in X]
+        return self.tree.predict(X)
 
     def _predict(self, inputs):
         node = self.tree
@@ -124,13 +131,15 @@ class RandomForestClassifier:
             # Visualize the first tree in each iteration
             if i == 0:
                 plt.figure(figsize=(15, 8))
-                tree.plot_tree(feature_names=['Pclass', 'Sex', 'Age', 'SibSp', 'Parch', 'Fare'], class_names=['Not Survived', 'Survived'])
+                plot_tree(tree.tree, filled=True, feature_names=['Pclass', 'Sex', 'Age', 'SibSp', 'Parch', 'Fare'], class_names=['Not Survived', 'Survived'])
                 plt.title(f'Decision Tree - Iteration {i + 1}')
                 plt.show()
 
     def predict(self, X):
         predictions = np.array([tree.predict(X) for tree in self.trees])
         return np.mean(predictions, axis=0).astype(int)
+
+
 
 
 
@@ -156,6 +165,12 @@ X_train, X_test, y_train, y_test = train_test_split(X.values, y.values, test_siz
 rf_classifier = RandomForestClassifier(n_trees=5, max_depth=None)  # Reduced to 5 trees for quicker visualization
 rf_classifier.fit(X_train, y_train)
 
+# Predict labels for the test set
+y_pred = rf_classifier.predict(X_test)
+
+# Evaluate the model
+accuracy = accuracy_score(y_test, y_pred)
+print(f"Final Accuracy: {accuracy}")
 # Predict labels for the test set
 y_pred = rf_classifier.predict(X_test)
 
