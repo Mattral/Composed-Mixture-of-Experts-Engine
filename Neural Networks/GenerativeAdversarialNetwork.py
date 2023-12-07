@@ -1,31 +1,88 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-# Generator
 def build_generator(input_size, output_size):
+    """
+    Build and return the generator model.
+
+    Parameters:
+    - input_size: The size of the input noise vector.
+    - output_size: The size of the output data vector.
+
+    Returns:
+    A dictionary representing the generator with 'weights' and 'bias'.
+    """
     return {
         'weights': np.random.randn(output_size, input_size),
         'bias': np.zeros((output_size, 1))
     }
 
 def generate_fake_data(generator, num_samples):
+    """
+    Generate fake data using the generator.
+
+    Parameters:
+    - generator: The generator model.
+    - num_samples: The number of fake samples to generate.
+
+    Returns:
+    An array of generated fake data.
+    """
     return np.random.randn(generator['weights'].shape[0], num_samples)
 
-# Discriminator
 def build_discriminator(input_size):
+    """
+    Build and return the discriminator model.
+
+    Parameters:
+    - input_size: The size of the input data vector.
+
+    Returns:
+    A dictionary representing the discriminator with 'weights' and 'bias'.
+    """
     return {
         'weights': np.random.randn(1, input_size),
         'bias': np.zeros((1, 1))
     }
 
 def sigmoid(x):
+    """
+    Sigmoid activation function.
+
+    Parameters:
+    - x: Input value.
+
+    Returns:
+    The sigmoid of the input.
+    """
     return 1 / (1 + np.exp(-x))
 
 def discriminate(discriminator, data):
+    """
+    Make a prediction using the discriminator.
+
+    Parameters:
+    - discriminator: The discriminator model.
+    - data: Input data.
+
+    Returns:
+    The predicted output after applying the sigmoid activation.
+    """
     return sigmoid(np.dot(discriminator['weights'], data) + discriminator['bias'])
 
-# Training
 def train_gan(generator, discriminator, num_epochs, learning_rate):
+    """
+    Train the GAN by updating the generator and discriminator parameters.
+
+    Parameters:
+    - generator: The generator model.
+    - discriminator: The discriminator model.
+    - num_epochs: The number of training epochs.
+    - learning_rate: The learning rate for gradient descent.
+
+    Returns:
+    None
+    """
     for epoch in range(num_epochs):
         # Generate fake data
         fake_data = generate_fake_data(generator, 100)
@@ -55,6 +112,16 @@ def train_gan(generator, discriminator, num_epochs, learning_rate):
 
 # Generate samples from the trained generator
 def generate_samples(generator, num_samples):
+    """
+    Generate samples using the trained generator.
+
+    Parameters:
+    - generator: The trained generator model.
+    - num_samples: The number of samples to generate.
+
+    Returns:
+    An array of generated samples.
+    """
     return generate_fake_data(generator, num_samples)
 
 # Create and train the GAN
