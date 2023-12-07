@@ -1,86 +1,47 @@
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
+# Support Vector Machine (SVM) Classification and Regression
 
-# Load the housing dataset from CSV file
-df = pd.read_csv('housing.csv')
+## Overview
 
-# Extract features and target variable
-X = df[['median_income']].values
-y = df['median_house_value'].values
+Support Vector Machine (SVM) is a versatile machine learning algorithm used for both classification and regression tasks. This README covers both SVM classification and regression, implemented from scratch without relying on external libraries.
 
-# Split the dataset into training and testing sets
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+## Implementation
 
-# SVM Regressor from Scratch
-class SVMRegressor:
-    def __init__(self, learning_rate=0.01, epochs=1000, C=1.0):
-        """
-        Initialize a Support Vector Machine Regressor.
+### SVM Classification and Regression from Scratch
 
-        Parameters:
-        - learning_rate (float): Learning rate for gradient descent.
-        - epochs (int): Number of training epochs.
-        - C (float): Regularization parameter.
-        """
-        self.learning_rate = learning_rate
-        self.epochs = epochs
-        self.C = C
+The provided Python script (`svm_classification_regression.py`) demonstrates the implementation of SVM for both classification and regression. It uses a simple stochastic gradient descent approach for optimization.
 
-    def fit(self, X, y):
-        """
-        Train the SVM Regressor.
+## How It Works
 
-        Parameters:
-        - X (numpy.ndarray): Training feature data.
-        - y (numpy.ndarray): Training target data.
-        """
-        # Add bias term to X
-        X = np.column_stack((np.ones(len(X)), X))
-        m, n = X.shape
+1. **Initialization:**
+   - Initialize the weights and bias terms to zero.
 
-        # Initialize weights
-        self.w = np.zeros(n)
+2. **Add Bias Term:**
+   - Add a bias term to the feature matrix.
 
-        # Stochastic Gradient Descent
-        for epoch in range(self.epochs):
-            for i in range(m):
-                error = y[i] - np.dot(self.w, X[i])
-                if error != 0:
-                    self.w = self.w + self.learning_rate * (self.C * error * X[i] - self.w)
-                else:
-                    self.w = self.w - self.learning_rate * self.w
+3. **Stochastic Gradient Descent:**
+   - Update the weights using stochastic gradient descent with appropriate loss functions.
+   - For classification, the hinge loss is used.
+   - For regression, a loss function that minimizes the difference between predicted and true values is employed.
 
-    def predict(self, X):
-        """
-        Make predictions using the trained model.
+4. **Convergence:**
+   - Repeat the stochastic gradient descent steps for multiple epochs until convergence.
 
-        Parameters:
-        - X (numpy.ndarray): Test feature data.
+5. **Prediction:**
+   - Use the trained weights to make predictions on new data.
 
-        Returns:
-        - numpy.ndarray: Predicted target values.
-        """
-        # Add bias term to X
-        X = np.column_stack((np.ones(len(X)), X))
-        return np.dot(X, self.w)
+## Advantages
 
-# Instantiate the SVM Regressor
-svm_regressor = SVMRegressor(learning_rate=0.01, epochs=1000, C=1.0)
+- **Effective in High-Dimensional Spaces:** SVM performs well in high-dimensional feature spaces, making it suitable for complex datasets.
+- **Versatility:** SVM can be adapted for various tasks, including classification and regression.
 
-# Train the model
-svm_regressor.fit(X_train, y_train)
+## Disadvantages
 
-# Make predictions on the test set
-y_pred_reg = svm_regressor.predict(X_test)
+- **Computational Intensity:** Training an SVM can be computationally expensive, especially on large datasets.
+- **Sensitivity to Outliers:** SVM is sensitive to outliers, and their presence can impact the model's performance.
 
-# Visualize the results for regression
-plt.scatter(X_test, y_test, color='black', label='True values')
-plt.scatter(X_test, y_pred_reg, color='red', label='Predicted values')
-plt.plot(X_test, y_pred_reg, color='blue', linewidth=3, label='Regression Line')
-plt.title('SVM Regression from Scratch')
-plt.xlabel('Median Income')
-plt.ylabel('Median House Value')
-plt.legend()
-plt.show()
+## Common Use Cases
+
+- **Classification:** SVM is commonly used in image recognition, text classification, and spam detection.
+- **Regression:** Predicting numerical values, such as house prices in real estate.
+- **Anomaly Detection:** Identifying outliers in a dataset.
+
