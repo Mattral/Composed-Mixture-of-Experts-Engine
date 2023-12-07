@@ -1,3 +1,17 @@
+'''
+This is a basic implementation of a Generative Adversarial Network (GAN)
+with a simple generator and discriminator.
+
+GANs are used for generating new data instances that resemble a given dataset.
+
+It can be applied to various domains such as generating synthetic data,
+image generation, and data augmentation.
+
+GANs are commonly used in computer vision, image synthesis,
+and creative applications to produce realistic and novel samples.
+'''
+
+
 import numpy as np
 import matplotlib.pyplot as plt
 
