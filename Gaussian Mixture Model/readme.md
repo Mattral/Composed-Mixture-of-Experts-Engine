@@ -67,6 +67,3 @@ The Gaussian Mixture Model is a probabilistic model that represents a mixture of
 - **Computational Complexity:** Training can be computationally expensive, especially for high-dimensional data.
 - **Assumes Gaussian Distribution:** May not perform well if the data doesn't follow a Gaussian distribution.
 
-### References:
-
-- Bishop, C. M. (2006). Pattern Recognition and Machine Learning. Springer.
