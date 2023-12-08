@@ -8,7 +8,7 @@ t-SNE is a dimensionality reduction technique that maps high-dimensional data to
 
 1. **Pairwise Euclidean Distances:**
 
-   \[ \text{distances}_{ij} = \lVert \text{data}_i - \text{data}_j \rVert \]
+   $$\[ \text{distances}_{ij} = \lVert \text{data}_i - \text{data}_j \rVert \]$$
 
 2. **Conditional Probabilities:**
 
