@@ -24,13 +24,45 @@
 ## Real-World Uses
 
 - **Audio Signal Separation:**
-  - ICA is widely used in audio signal processing to separate mixed audio sources in scenarios such as cocktail party problems.
+  - **Dataset:** Audio recordings with multiple sound sources.
+  - **Task:** Separate different instruments or voices present in a mixed audio signal.
 
-- **Financial Data Analysis:**
-  - In finance, ICA can be applied to decompose mixed financial time series data into independent components, aiding in the analysis of market trends.
+- **Medical Imaging:**
+  - **Dataset:** Functional Magnetic Resonance Imaging (fMRI) or Electroencephalography (EEG) data.
+  - **Task:** Identify independent brain sources or components related to different cognitive processes.
 
-- **Biomedical Signal Processing:**
-  - ICA is used in biomedical signal processing for separating mixed signals from different physiological sources, such as EEG and fMRI data.
+- **Image Processing:**
+  - **Dataset:** Multispectral or hyperspectral images.
+  - **Task:** Extract independent components representing distinct features or materials in the images.
+
+- **Financial Time Series Analysis:**
+  - **Dataset:** Stock prices or financial time series data.
+  - **Task:** Identify independent factors influencing the variations in financial data.
+
+- **Communication Signal Processing:**
+  - **Dataset:** Mixed signals in communication channels.
+  - **Task:** Separate independent sources in mixed signals, especially in scenarios like multiple microphones in speech processing.
+
+- **Biological Data Analysis:**
+  - **Dataset:** Gene expression data.
+  - **Task:** Identify independent gene expression patterns or regulatory pathways.
+
+- **Environmental Monitoring:**
+  - **Dataset:** Sensor data from environmental monitoring stations.
+  - **Task:** Extract independent components representing different environmental factors.
+
+- **Sensory Data Processing:**
+  - **Dataset:** Multisensory data from sensors.
+  - **Task:** Separate independent sources or features from combined sensory signals.
+
+- **Network Traffic Analysis:**
+  - **Dataset:** Network traffic logs with multiple sources.
+  - **Task:** Identify independent patterns or sources of network activity.
+
+- **Social Sciences:**
+  - **Dataset:** Surveys or observational data with multiple influencing factors.
+  - **Task:** Extract independent social or psychological factors affecting the observed outcomes.
+
 
 ## Mathematics
 
