@@ -16,6 +16,23 @@ DBSCAN is a density-based clustering algorithm that identifies clusters in a dat
 
 The algorithm proceeds by iterating through the data points, identifying core points and expanding clusters by connecting density-reachable points.
 
+## Mathematical Expression
+
+Let $\(D\)$ be the dataset, $\(p\)$ and $\(q\)$ be data points in $\(D\)$, $\(\varepsilon\)$ be the neighborhood radius, and $\(min\_samples\)$ be the minimum number of points in the neighborhood.
+
+- **Core Point:**
+  - A point $\(p\)$ is a core point if $\(\left| \{ q \in D \mid \text{distance}(p, q) \leq \varepsilon \} \right| \geq \text{min\_samples}\)$.
+
+- **Directly Density-Reachable:**
+  - Points \(p\) and \(q\) are directly density-reachable if $\(\text{distance}(p, q) \leq \varepsilon\)$.
+
+- **Density-Reachable:**
+  - A point \(A\) is density-reachable from \(B\) if there is a chain of points $\(P_1, P_2, \ldots, P_n\) where \(P_1 = B\), \(P_n = A\), and each \(P_i\)$ is directly density-reachable from $\(P_{i+1}\)$.
+
+- **Density-Connected:**
+  - Points \(p\) and \(q\) are density-connected if there exists a point \(C\) such that both \(p\) and \(q\) are density-reachable from \(C\).
+
+
 ## Pros and Cons
 
 ### Pros
