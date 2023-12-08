@@ -43,18 +43,21 @@ def compute_conditional_probabilities(distances, perplexity, epsilon=1e-8):
         beta = 1.0
 
         while True:
-            sum_Pi = 0.0
+            log_sum_Pi = -np.inf
             for j in range(N):
                 if i != j:
-                    sum_Pi += np.exp(-beta * distances[i, j])
+                    log_sum_Pi = np.logaddexp(log_sum_Pi, -beta * distances[i, j])
 
+            sum_Pi = np.exp(log_sum_Pi)
             sum_Pi += epsilon  # Avoid division by zero
+
             entropy = 0.0
 
             for j in range(N):
                 if i != j:
-                    P[i, j] = np.exp(-beta * distances[i, j]) / sum_Pi
-                    entropy += P[i, j] * np.log2(P[i, j])
+                    log_Pij = -beta * distances[i, j] - log_sum_Pi
+                    P[i, j] = np.exp(log_Pij)
+                    entropy += P[i, j] * (log_Pij - np.log(sum_Pi))
 
             entropy_diff = np.log2(perplexity) - entropy
 
@@ -75,6 +78,9 @@ def compute_conditional_probabilities(distances, perplexity, epsilon=1e-8):
                     beta = (beta + lower_bound) / 2.0
 
     return P
+
+
+
 
 def compute_perplexity(P):
     """
