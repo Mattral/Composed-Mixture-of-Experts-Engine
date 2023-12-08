@@ -11,8 +11,8 @@ The Expectation-Maximization (EM) algorithm is a statistical technique for findi
 
 2. **Expectation Step (E-step):**
    - Compute the probability of each data point belonging to each component (responsibilities).
-   - The responsibility of component \( i \) for data point \( j \) is given by:
-     \[ P(\text{component } i \,|\, \text{data point } j) = \frac{\text{Weight}_i \times \text{Probability of data point } j \, \text{in component } i}{\sum_{k=1}^{K} \text{Weight}_k \times \text{Probability of data point } j \, \text{in component } k} \]
+   - The responsibility of component $\( i \)$ for data point $\( j \)$ is given by:
+     $$\[ P(\text{component } i \,|\, \text{data point } j) = \frac{\text{Weight}_i \times \text{Probability of data point } j \, \text{in component } i}{\sum_{k=1}^{K} \text{Weight}_k \times \text{Probability of data point } j \, \text{in component } k} \]$$
 
 3. **Maximization Step (M-step):**
    - Update the parameters (means, standard deviations, and weights) based on the computed responsibilities.
@@ -24,7 +24,7 @@ The Expectation-Maximization (EM) algorithm is a statistical technique for findi
 ## Math Expression
 
 The probability density function (PDF) of a univariate Gaussian distribution is given by:
-\[ f(x \,|\, \mu, \sigma) = \frac{1}{\sigma \sqrt{2\pi}} \exp\left(-\frac{1}{2}\left(\frac{x - \mu}{\sigma}\right)^2\right) \]
+$$\[ f(x \,|\, \mu, \sigma) = \frac{1}{\sigma \sqrt{2\pi}} \exp\left(-\frac{1}{2}\left(\frac{x - \mu}{\sigma}\right)^2\right) \]$$
 
 ## Real-Life Use Cases
 
