@@ -124,7 +124,7 @@ The implementations cover a range of neural network architectures and concepts.
 
 21. **titanic.csv**
     - Dataset file containing Titanic passenger data.
-   
+
 ##Uses
 
 1. **AutoEncoder.py**
