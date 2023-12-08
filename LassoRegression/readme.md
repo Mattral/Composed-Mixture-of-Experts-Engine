@@ -22,8 +22,10 @@ The optimization involves updating the coefficients (\(\theta_i\)) using coordin
 $$\[ J(\theta) = \text{MSE}(\theta) + \alpha \sum_{i=1}^{n} |\theta_i| \]$$
 
 *Update Rule (Coordinate Descent):*
-$$\[ \theta_j^{new} = \text{soft\_threshold}(\rho_j, \alpha) \]$$
-$$\[ \text{soft\_threshold}(x, \alpha) = \text{sign}(x) \cdot \max(|x| - \alpha, 0) \]$$
+```math
+\[ \theta_j^{new} = \text{soft\_threshold}(\rho_j, \alpha) \]$$
+\[ \text{soft\_threshold}(x, \alpha) = \text{sign}(x) \cdot \max(|x| - \alpha, 0) \]
+```
 
 **Pros and Cons:**
 
