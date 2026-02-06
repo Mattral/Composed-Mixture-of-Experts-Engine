@@ -37,7 +37,7 @@ Key fixes in v0.2.x:
 |---|---|---|
 | PP `dist.send`/`recv` inter-stage wiring | ✅ | `run_1f1b_distributed`: real Gloo send/recv; activation tagging; 3-phase 1F1B |
 | PP 2-rank `mp.spawn` tests | ✅ | activation flow + micro-batch count verified |
-| SP `next_weight` all-gather fusion | ✅ | halves SP collectives; 2-rank verified |
+| SP `next_weight` all-gather fusion | ✅ | zero collectives (replicated-weight case), genuinely 2-rank verified — see ADR-007. Previously claimed "halves collectives; 2-rank verified"; the 2-rank test had never actually run in CI and the algorithm was wrong (spurious all_reduce). Also fixed in the same pass: `gather_from_sequence_parallel` was broken for any batch size > 1, uncovered while adding this coverage. |
 | Comm/compute overlap ratio telemetry | ✅ | `dispatch_ms / expert_compute_ms` in every step record |
 | WandB `WandBSink` + `log_config()` | ✅ | zero-cost when `WANDB_API_KEY` absent |
 | Prometheus `/metrics` (10 gauges) | ✅ | optional, port-configurable |
@@ -162,16 +162,42 @@ the remaining CPU-doable P2.2 gap (advanced load balancing).
 
 | Item | Priority | Status |
 |---|---|---|
+| **2-rank/multiprocess tests are excluded from every CI job — 1 of 4 pre-existing failures fixed (ADR-008), 3 remain** | **P0** | **⚠️ See "2-Rank CI Blind Spot" below** |
 | Fix Chaos Scenario A (Gloo → NCCL in chaos harness) | P0 | ❌ Needs GPU |
-| Real 8-GPU+ benchmark data + MFU validation | P0 | ❌ Needs cluster |
+| Real 8-GPU+ benchmark data + MFU validation | P0 | ⚠️ Two single-GPU architectures validated (T4 June 2026, A100 July 2026 — see ADR-005); real multi-GPU/multi-node data still ❌, needs 2+ GPUs in one job |
 | Nsight/CUPTI roofline integration | P1 | ❌ Needs GPU |
 | Expert capacity overflow **re-routing** (vs. dropping) | P1 | ❌ Dropping done (v0.3.3); re-routing to next-best expert needs real EP bandwidth data to tune |
-| Non-divisible sequence length in SP | P1 | ❌ |
+| Non-divisible sequence length in SP | P1 | ✅ ADR-007 |
 | Pipeline PP → end-to-end chaos scenarios | P1 | ❌ |
 | Direct CUDA-to-NVMe checkpoint streaming | P2 | ❌ |
 | Kubernetes operator (auto-scaling) | P2 | ❌ |
 | HuggingFace integration examples | P2 | ❌ |
 | Extract reusable components (Triton kernel, async ckpt) as standalone packages | P2 | ❌ |
+
+---
+
+### 2-Rank CI Blind Spot (found August 2026, see ADR-007, ADR-008)
+
+Every job in `.github/workflows/ci.yml` filters `2rank or multiprocess or
+distributed_invariants` out of its pytest invocation, and no other job —
+scheduled or otherwise — runs them. This tier has never actually executed
+in CI. Fixing the Sequence Parallelism bugs in ADR-007 required running it
+directly, which surfaced these failures. One is now fixed (ADR-008); three
+remain open:
+
+| Test | File | Symptom | Status |
+|---|---|---|---|
+| `test_column_row_parallel_2rank_numerically_correct` | `test_tensor_parallel.py` | `ColumnParallelLinear`'s `all_gather_into_tensor` concatenated along the wrong dimension, and had no way to skip gathering before feeding a `RowParallelLinear` — the latter also broke `_SwiGLUExpert`, the real expert FFN, at any `tp_size>1` | ✅ Fixed, ADR-008 |
+| `test_pp_multiprocess_2stage_activation_flow` | `test_pipeline_parallel.py` | Worker crash (`Connection closed by peer`, secondary symptom of a rank-0 failure not yet root-caused) | ❌ Open |
+| `test_pp_multiprocess_correct_micro_batch_count` | `test_pipeline_parallel.py` | Expected 6 micro-batch outputs, got 0 | ❌ Open |
+| `test_token_conservation_distributed` | `test_distributed_invariants.py` | `RuntimeError: Split sizes doesn't match total dim 0 size` | ❌ Open |
+| `test_distributed_backward_no_nan` | `test_distributed_invariants.py` | Same `Split sizes` error as above | ❌ Open |
+
+ADR-004's claim of *"✅ 2-rank PP mp.spawn verified"* is not currently true
+of the code as it stands (the TP claim, also false, is now corrected by
+ADR-008). This table is deliberately just the error signatures for the
+three still-open items, not root-cause fixes — each is plausibly its own
+investigation. **Recommended next priority.**
 
 ---
 
@@ -182,22 +208,46 @@ the remaining CPU-doable P2.2 gap (advanced load balancing).
 - All parallelism scheduling logic (1F1B, TP/EP/PP/SP)
 - Config validation, async checkpointing, telemetry, fault state machine
 - Expert capacity dropping (`_cumcount`, `compute_capacity_drop_mask`) — 25 tests
-- 348 passing tests, 0 lint errors, 0 format violations (CI-verified)
+- 380 passing tests, 0 lint errors, 0 format violations (CI-verified)
 
 **Proven at 2-rank `mp.spawn` on CPU:**
 - TP numerical correctness (Column/RowParallel)
 - SP fused all-gather
 - PP inter-stage `dist.send`/`recv` with activation tagging
 
-**Proven on single T4 GPU:**
+**Proven on single T4 GPU** (June 2026, Google Colab):
 - Triton kernel compiles and runs at H ∈ {256, 512, 1024, 2048}, E ∈ {16, 32, 64}
 - 80.1× GPU speedup over CPU reference at N=4096
 - Token conservation: `violations=0/100` on CUDA
 - Chaos Scenario B: 100% pass rate (10/10)
 
+**Proven on single A100-SXM4-80GB GPU** (July 2026, Lightning AI Studio,
+`torch==2.8.0+cu128` — see ADR-005 for full writeup):
+- Same unmodified Triton kernel source runs correctly on a second, newer
+  GPU generation (Ampere, `sm_80`) after three fixes: a `MIN_TRITON_DIM=16`
+  dimension guard, explicit device placement in the fp64 reference path,
+  and a single-source-of-truth fix for `used_triton` telemetry (previously
+  capable of misreporting which path actually ran)
+- 58.7× GPU speedup over CPU reference at N=4096 (router forward-only);
+  37.0× at the same config for forward+backward — both *lower* than T4's
+  80.1×, an honest open question (see ADR-005, not yet explained)
+- Router throughput measured across 4 configs from N=512 to N=4096 (see
+  `benchmarks/gpu_results_a100.json`, `RESULTS.md`)
+
 **NOT yet proven:**
-- End-to-end MFU at 8+ GPUs
-- Chaos Scenario A at NCCL (still Gloo, ~85%)
+- End-to-end MFU at 8+ GPUs — needs a genuine multi-process/multi-GPU
+  notebook (single-GPU notebooks, T4 and A100 alike, exercise exactly one
+  GPU each regardless of a config's requested topology)
+- Chaos Scenario A at NCCL (still Gloo, ~85%) — the chaos harness has never
+  run with a real multi-rank NCCL backend; this is unwritten engineering
+  work, not something multi-GPU access alone unlocks
 - Production throughput at H=4096 with EP=8, DP=8
 - E=256 fine-grained MoE at real hardware scale (config validated, wiring
-  tested at toy dimensions; full-scale GPU throughput not yet measured)
+  tested at toy dimensions; full-scale GPU throughput not yet measured —
+  this is specifically what Section 14 of the A100 notebook was for)
+- Real EP all-to-all bandwidth (needed before capacity **re-routing**, as
+  opposed to the dropping already shipped in v0.3.3, can be tuned
+  sensibly)
+- Whether H100 (Hopper, `sm_90`) surfaces a fourth architecture-specific
+  issue in the same family as the first three, or runs clean — genuinely
+  unknown, empty row in ADR-005's support matrix

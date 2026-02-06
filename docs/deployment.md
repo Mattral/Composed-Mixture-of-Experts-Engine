@@ -328,7 +328,7 @@ python scripts/cli.py validate configs/default.yaml
 # 2. Smoke test the image / environment
 python train.py --config configs/smoke.yaml --smoke
 
-# 3. Run the Tier-0 CPU test suite (348 tests expected)
+# 3. Run the Tier-0 CPU test suite (380 tests expected)
 pytest tests/ -m cpu \
   -k "not (2rank or multiprocess or distributed_invariants)" \
   --ignore=tests/test_chaos.py --ignore=tests/test_smoke_e2e.py -v

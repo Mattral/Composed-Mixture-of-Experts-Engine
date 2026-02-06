@@ -28,7 +28,7 @@ The four-tier model matches the four-tier benchmark strategy in `docs/benchmarks
 ### Tier 0: CPU-only (must pass on every commit)
 
 ```bash
-# All 348 CPU tests
+# All 380 CPU tests
 make test-cpu
 
 # Equivalent manual command
@@ -39,7 +39,7 @@ pytest tests/ \
   -k "not (2rank or multiprocess or distributed_invariants)" \
   -q
 
-# Expected: 348 passed, 1 skipped (Triton GPU), 1 xfailed (seed=2 routing, documented statistical edge case)
+# Expected: 380 passed, 3 skipped (Triton GPU; 2 more in test_gpu_portability.py needing real/multi CUDA — see ADR-006), 1 xfailed (seed=2 routing, documented statistical edge case)
 ```
 
 ### Tier 1: GPU (Triton kernel, real CUDA)
@@ -57,19 +57,27 @@ pytest tests/test_kernels.py tests/test_kernels_numerics.py -m gpu -v
 
 ### Tier 2: Multi-process (2-rank mp.spawn)
 
-These run automatically in the full suite but are slow and require loopback
-networking (`GLOO_SOCKET_IFNAME=lo`):
+These are **not actually run by any CI job** — every job in
+`.github/workflows/ci.yml` filters `2rank or multiprocess or
+distributed_invariants` out of its pytest invocation, with nothing else in
+the pipeline picking them up. (This section previously said they "run
+automatically in the full suite," which was not true — found and corrected
+during the ADR-007 investigation, August 2026.) Run them manually with
+loopback networking (`GLOO_SOCKET_IFNAME=lo`):
 
 ```bash
 GLOO_SOCKET_IFNAME=lo pytest tests/ \
   -k "2rank or multiprocess or distributed_invariants" -v
 ```
 
-Tests covered:
-- `test_tensor_parallel.py::test_column_row_parallel_2rank_numerically_correct`
-- `test_pipeline_parallel.py::test_pp_multiprocess_2stage_activation_flow`
-- `test_sequence_parallel_v03.py::test_sp_fused_2rank_numerically_correct`
-- `test_distributed_invariants.py::test_token_conservation_distributed`
+Tests covered, with known status as of ADR-008 (August 2026):
+- `test_tensor_parallel.py::test_column_row_parallel_2rank_numerically_correct` — ✅ fixed, see ADR-008
+- `test_pipeline_parallel.py::test_pp_multiprocess_2stage_activation_flow` — ❌ fails (not yet fixed)
+- `test_sequence_parallel_v03.py::test_sp_fused_2rank_numerically_correct` — ✅ fixed, see ADR-007
+- `test_distributed_invariants.py::test_token_conservation_distributed` — ❌ fails, `Split sizes doesn't match total dim 0 size` (not yet fixed)
+
+See `roadmap.md`'s "2-Rank CI Blind Spot" section for the full list (six
+failing tests across four files) and recommended next steps.
 
 ### Tier 3: Chaos (fault injection)
 
@@ -91,9 +99,9 @@ make chaos-a
 | `test_kernels.py` | 0/1 | 7 | Router invariants (conservation, NaN, bounds, constexpr) |
 | `test_kernels_numerics.py` | 0/1 | 13 | `atol=rtol=1e-5` vs fp64 ref; 30 `(H,E,K)` configs |
 | `test_routing_quality.py` | 0 | 12 | Load imbalance, z-loss; stochastic seed sweep |
-| `test_tensor_parallel.py` | 0/2 | 19 | Column/Row parallel at tp=1; 2-rank numerics |
+| `test_tensor_parallel.py` | 0/2 | 25 | Column/Row parallel at tp=1 incl. gather_output modes (ADR-008); 5 genuinely-verified 2-rank checks |
 | `test_pipeline_parallel.py` | 0/2 | 16 | 1F1B scheduling; 2-rank `mp.spawn` activation flow |
-| `test_sequence_parallel_v03.py` | 0/2 | 8 | SP scatter/gather; fused next_weight 2-rank check |
+| `test_sequence_parallel_v03.py` | 0/2 | 26 | SP scatter/gather incl. non-divisible-length padding; fused `next_weight` path (zero collectives, ADR-007); 5 genuinely-verified 2-rank checks |
 | `test_distributed.py` | 0 | 4 | `DistributedMoELayer` expert-to-rank mapping |
 | `test_distributed_invariants.py` | 2 | 2 | Token conservation + backward NaN (4-process Gloo) |
 | `test_elastic.py` | 0 | 7 | Async checkpointing core (NVMe + S3 mock) |
@@ -102,9 +110,10 @@ make chaos-a
 | `test_mfu_v02.py` | 0 | 15 | `MFUAccountant` streaming tracker |
 | `test_telemetry.py` | 0 | 22 | `StructuredLogger` JSONL output; overlap ratio field |
 | `test_smoke_e2e.py` | 0 | 3 | End-to-end smoke: config → topology → model → step |
+| `test_gpu_portability.py` | 0/1 | 22 | ADR-005's three A100 fixes + ADR-006's device-coercion correction; CPU logic/source tests, 2 hardware-gated `gpu`-tier tests |
 | `test_chaos.py` | 3 | 3 | Scenario A (node kill) + Scenario B (storage stall) |
 
-**Total Tier-0 CPU: 348 passing** (v0.3.3, July 2026)
+**Total Tier-0 CPU: 380 passing** (v0.3.3, July 2026)
 
 ---
 
@@ -124,7 +133,7 @@ markers = [
 Usage:
 
 ```bash
-pytest tests/ -m cpu          # 348 tests, ~20s
+pytest tests/ -m cpu          # 380 tests, ~20s
 pytest tests/ -m gpu          # requires CUDA + Triton
 pytest tests/ -m chaos        # requires torchrun + Gloo
 pytest tests/ -m "cpu or gpu" # both tiers
@@ -178,7 +187,7 @@ codebase and is present in the original repo's CI. It does not reflect a bug
 in the refactored code.
 
 Status: **non-blocking**. Marked `xfail(strict=False)` with the mechanism
-documented inline; excluded from the 348-passing count when counting
+documented inline; excluded from the 380-passing count when counting
 stable tests. Tracked as a known issue.
 
 ### Multi-process tests (`2rank`, `multiprocess`, `distributed_invariants`)

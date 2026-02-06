@@ -446,9 +446,9 @@ Verify with: `pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed
 | `test_router.py` | `MoERouterInterface`: construction, invariants, `capacity_budget`, backward pass (33 tests) |
 | `test_registry.py` | Model registry: registration, duplicate detection, factory dispatch (20 tests) |
 | `test_capacity_dropping.py` | `_cumcount`, `compute_capacity_drop_mask`, layer integration (22 tests) |
-| `test_tensor_parallel.py` | Column/Row shape+grad+dtype+numerical; 2-rank `mp.spawn` |
+| `test_tensor_parallel.py` | Column/Row shape+grad+dtype+numerical incl. gather_output modes (ADR-008); 2-rank `mp.spawn`, genuinely verified |
 | `test_pipeline_parallel.py` | 1F1B schedule; single-process invariants; 2-rank `mp.spawn` PP |
-| `test_sequence_parallel_v03.py` | SP fused `next_weight` path; 2-rank `mp.spawn` SP |
+| `test_sequence_parallel_v03.py` | SP fused `next_weight` path (zero collectives, ADR-007); non-divisible sequence length; 2-rank `mp.spawn` SP, genuinely verified |
 | `test_distributed.py` | MoE layer fwd/bwd shapes, topology construction |
 | `test_distributed_invariants.py` | 4-process Gloo: token conservation, NaN guard |
 | `test_elastic.py` / `test_elastic_v02.py` | NVMe round-trip, reshard edge cases, schema versioning |
@@ -456,12 +456,15 @@ Verify with: `pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed
 | `test_telemetry.py` | JSON completeness (`REQUIRED_KEYS`), thread safety, v0.3.3 fields |
 | `test_mock_dist.py` | `MockTopology`/`MockDistEnv` — collective simulation without multi-process |
 | `test_properties.py` | Hypothesis property-based tests: conservation, ownership, config invariants |
+| `test_gpu_portability.py` | Permanent coverage for ADR-005's three A100 fixes + ADR-006's device-coercion correction; CPU-runnable logic/source tests plus honestly-skipped `gpu`-marked hardware tests |
 | `test_smoke_e2e.py` | Full `train.py` loop, all telemetry envelope keys, S3 mock |
 | `test_chaos.py` | Scenario B ✅ 100%; Scenario A ⚠️ ~85% |
 
-**Total: 348 passing tests** (21 test files), 1 skip (Triton GPU path, no
-CUDA in this environment), 1 `xfail` (documented statistical edge case in
-`test_routing_quality.py`, seed=2). 0 lint errors, 0 format violations
+**Total: 380 passing tests** (22 test files), 3 skips (1 pre-existing:
+Triton GPU path, no CUDA in this environment; 2 new in
+`test_gpu_portability.py`, requiring real CUDA / 2+ CUDA devices
+respectively — see ADR-006), 1 `xfail` (documented statistical edge case
+in `test_routing_quality.py`, seed=2). 0 lint errors, 0 format violations
 (`ruff check` / `ruff format --check`).
 
 ---
@@ -471,7 +474,7 @@ CUDA in this environment), 1 `xfail` (documented statistical edge case in
 | Limitation | Root Cause | Planned Fix |
 |---|---|---|
 | Chaos Scenario A ~85% pass rate | Gloo `connectFullMesh` socket race after SIGKILL | v0.4 (NCCL, needs GPU) |
-| No multi-node banchmark data yet | Two single-GPU architectures now validated (T4, A100); no multi-node/multi-GPU cluster data yet | v0.4 |
+| No multi-node benchmark data yet | Two single-GPU architectures now validated (T4, A100); no multi-node/multi-GPU cluster data yet | v0.4 |
 | SP `sequence_length % tp_size == 0` required | No padding for non-divisible lengths | v0.4 |
 | PP `run_1f1b_distributed` not in chaos tests | `_chaos_worker.py` uses a dense model | v0.4 |
 | No Nsight/CUPTI roofline | Requires GPU hardware | v0.4 |
