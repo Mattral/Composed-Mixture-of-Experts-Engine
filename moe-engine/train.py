@@ -179,11 +179,29 @@ def main() -> None:
     )
 
     # Auto-reduce parallelism if world_size is smaller than config demands.
+    # (default.yaml requests dp=8 x ep=8 = 64 ranks; large_scale.yaml wants
+    # 128. Any real single-node job -- 4 or 8 GPUs -- is smaller than that
+    # by construction, so this path is the common case, not an edge case.)
     if world_size < dp * tp * pp * ep:
+        requested = (dp, ep, tp, pp)
         dp = max(1, world_size // (tp * pp * ep))
         if dp * tp * pp * ep > world_size:
             ep = max(1, world_size // (tp * pp))
             dp = max(1, world_size // (tp * pp * ep))
+        logging.warning(
+            "Config requested dp=%d ep=%d tp=%d pp=%d (product=%d) but "
+            "WORLD_SIZE=%d; auto-reduced to dp=%d ep=%d tp=%d pp=%d "
+            "(product=%d). Set parallelism explicitly in the config or via "
+            "env-var overrides if this isn't the topology you intended.",
+            *requested,
+            requested[0] * requested[1] * requested[2] * requested[3],
+            world_size,
+            dp,
+            ep,
+            tp,
+            pp,
+            dp * ep * tp * pp,
+        )
 
     topology = build_topology(
         dp_size=dp,

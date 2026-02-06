@@ -25,7 +25,7 @@ x-moe-base: &moe-base
     args:
       PYTORCH_VERSION: "2.6.0"
       CUDA_VERSION: "12.6"
-  image: moe-engine:v0.3.2
+  image: moe-engine:v0.3.3
   ipc: host          # required for NCCL shared memory
   ulimits:
     memlock: -1
@@ -45,7 +45,7 @@ x-moe-base-cpu: &moe-base-cpu
     context: ../..
     dockerfile: deploy/docker/Dockerfile
     target: runtime-cpu
-  image: moe-engine:v0.3.2-cpu
+  image: moe-engine:v0.3.3-cpu
   environment:
     - PYTHONUNBUFFERED=1
   volumes:
