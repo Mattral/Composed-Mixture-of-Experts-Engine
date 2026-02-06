@@ -1,5 +1,18 @@
 # moe-engine Inner Roadmap
 
+> **⚠️ SUPERSEDED — kept for historical record only.** This file stopped
+> being updated partway through v0.2/v0.3 development and now contradicts
+> both the root [`roadmap.md`](../roadmap.md) and the actual code on several
+> items (e.g. it lists PP inter-stage `dist.send`/`recv` wiring and
+> comm/compute overlap telemetry as not-started; both have been done and
+> CI-verified since v0.3 — see root `roadmap.md`'s v0.3 section). **The root
+> `roadmap.md` is the single source of truth going forward.** This file is
+> left in place rather than deleted so its early-stage history isn't lost,
+> per this project's general preference for additive, non-destructive
+> changes (docs/adr/README.md's ADR-immutability rule follows the same
+> spirit). Flagged during the July 2026 handoff-audit pass — see
+> `docs/audits/2026-07-handoff-audit.md`.
+
 ## Legend
 ✅ Complete + CI-verified  ⚠️ Partial / known issue  ❌ Not started
 
