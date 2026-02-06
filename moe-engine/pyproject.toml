@@ -88,3 +88,18 @@ exclude_lines = [
     "except ImportError:",
     "except Exception:.*# pragma: no cover",
 ]
+
+[tool.ruff]
+line-length = 100
+# Mirrors .github/workflows/ci.yml's "ruff check" job exactly (E,F,W,I,
+# --ignore E501) so `ruff check .` / `ruff format --check .` with NO flags
+# match CI locally. Before this section existed, the bare commands used
+# ruff's full default rule set instead -- harmless for CI (which always
+# passed explicit flags) but produced spurious, non-representative errors
+# for anyone running ruff directly without knowing to add them. Found
+# during the July 2026 handoff-audit pass; see
+# docs/audits/2026-07-handoff-audit.md.
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]

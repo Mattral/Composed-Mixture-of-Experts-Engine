@@ -1,5 +1,5 @@
 # ===========================================================================
-# moe-engine Makefile  —  v0.3.2
+# moe-engine Makefile  —  v0.3.3
 # ===========================================================================
 # Run from: moe-engine/   (the directory containing pyproject.toml)
 #
@@ -33,7 +33,7 @@ CONFIG     ?= configs/smoke.yaml
 
 help:
 	@echo ""
-	@echo "moe-engine v0.3.2 — Make targets"
+	@echo "moe-engine v0.3.3 — Make targets"
 	@echo "=================================="
 	@echo "  test-cpu        Tier-0 CPU suite (235 tests, ~60s)"
 	@echo "  test-gpu        Tier-1 GPU suite (requires CUDA + Triton)"
@@ -109,7 +109,10 @@ validate-config:
 # ---------------------------------------------------------------------------
 lint:
 	@echo "==> ruff check"
-	-ruff check pkg/ train.py benchmarks/ scripts/
+	-ruff check pkg/ train.py benchmarks/ scripts/ tests/ examples/
+	@echo ""
+	@echo "==> ruff format --check"
+	-ruff format --check pkg/ train.py benchmarks/ scripts/ tests/ examples/
 	@echo ""
 	@echo "==> mypy"
 	-mypy pkg/ --ignore-missing-imports --no-error-summary
