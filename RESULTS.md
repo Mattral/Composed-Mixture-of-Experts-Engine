@@ -214,7 +214,7 @@ until the NCCL migration is complete.
 ```bash
 pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" \
   --ignore=tests/test_chaos.py --ignore=tests/test_smoke_e2e.py
-# → 348 passed, 1 skipped (GPU Triton), 1 xfailed (documented statistical edge case)
+# → 380 passed, 3 skipped (1 GPU Triton; 2 more in test_gpu_portability.py — see ADR-006), 1 xfailed (documented statistical edge case)
 ```
 
 | File | Tests | Tier | Result |
@@ -228,9 +228,10 @@ pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" 
 | `test_capacity_dropping.py` | 25 | Tier-0 CPU | ✅ Expert capacity dropping — new in v0.3.3 |
 | `test_mock_dist.py` | 17 | Tier-0 CPU | ✅ Mocked collective backend — new in v0.3.2 |
 | `test_properties.py` | 9 | Tier-0 CPU | ✅ Hypothesis property-based tests — new in v0.3.2 |
-| `test_tensor_parallel.py` | 21 | Tier-0 CPU / Tier-2 2-rank | ✅ |
+| `test_gpu_portability.py` | 22 | Tier-0 CPU / Tier-1 GPU | ✅ (2 skips: real/multi CUDA — see ADR-006) — new in v0.3.3 |
+| `test_tensor_parallel.py` | 25 | Tier-0 CPU / Tier-2 2-rank | ✅ ADR-008: fixed ColumnParallelLinear's gather-dimension bug and _SwiGLUExpert's composition bug (broken at any real tp_size>1) |
 | `test_pipeline_parallel.py` | 27 | Tier-0 CPU / Tier-2 2-rank | ✅ |
-| `test_sequence_parallel_v03.py` | 10 | Tier-0 CPU / Tier-2 2-rank | ✅ |
+| `test_sequence_parallel_v03.py` | 26 | Tier-0 CPU / Tier-2 2-rank | ✅ ADR-007: fixed a broken fused-path algorithm + a batch-corrupting gather bug, added non-divisible sequence length support |
 | `test_distributed.py` | 5 | Tier-0 CPU | ✅ |
 | `test_distributed_invariants.py` | 2 | Tier-2 4-process Gloo | ✅ |
 | `test_elastic.py` | 7 | Tier-0 CPU | ✅ |
@@ -242,11 +243,19 @@ pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" 
 | `test_chaos.py` | 3 | Tier-3 cluster | ✅ Scenario B / ⚠️ Scenario A |
 
 Per-file counts above are full `pytest --collect-only` totals (including
-2-rank `mp.spawn` tests and the one GPU-only test skipped without CUDA).
-The headline **348 passed** figure at the top of this document excludes
+2-rank `mp.spawn` tests and GPU-only tests skipped without CUDA).
+The headline **380 passed** figure at the top of this document excludes
 `test_chaos.py`, `test_smoke_e2e.py`, and the 2-rank/multiprocess/
 distributed-invariants tests via `-k` filtering — this is the fast
 Tier-0-only subset, not the full collection sum shown per-file here.
+
+> Note (found during the July 2026 handoff audit, not fixed here to avoid
+> scope creep on an otherwise-unrelated pass): this table's per-file counts
+> and `docs/testing.md`'s equivalent table use different counting
+> conventions for at least one shared file (`test_kernels.py`: 11 here vs.
+> 7 there) and were already inconsistent with each other before this
+> audit. Worth a dedicated reconciliation pass — see
+> `docs/audits/2026-07-handoff-audit.md`.
 
 ---
 
@@ -384,3 +393,15 @@ CPU-doable P2.2 gap from the roadmap (advanced load balancing).
 
 **Test suite growth:** 319 → 348 passing tests this release; 235 → 348
 across the full v0.3.2 + v0.3.3 refactoring arc.
+
+**Post-release addition (July 2026 handoff audit):** 348 → 368, all from
+`tests/test_gpu_portability.py` — permanent coverage for ADR-005's three
+A100 fixes plus the ADR-006 device-coercion correction found during that
+pass. See `docs/audits/2026-07-handoff-audit.md`.
+
+**Post-release addition (August 2026, ADR-007):** 368 → 380, all from
+`tests/test_sequence_parallel_v03.py`'s rewrite — fixing a broken fused-SP
+algorithm and a batch-corrupting `gather_from_sequence_parallel` bug, plus
+non-divisible sequence length support. See ADR-007 and `roadmap.md`'s
+"2-Rank CI Blind Spot" section for the four still-open failures this pass
+surfaced but did not fix.

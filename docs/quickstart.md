@@ -112,11 +112,14 @@ make test-cpu
 Expected:
 
 ```
-1 xfailed, 348 passed, 1 skipped in ~20s
+1 xfailed, 380 passed, 3 skipped in ~20s
 ```
 
-- **348 passed**
-- **1 skipped**: Triton GPU path (no CUDA in this environment — expected)
+- **380 passed**
+- **3 skipped**: Triton GPU path (no CUDA in this environment — expected);
+  plus two hardware-gated tests in `test_gpu_portability.py` that need a
+  real CUDA GPU and 2+ CUDA devices respectively (see ADR-006) — all three
+  skips are expected on a CPU-only machine, not failures.
 - **1 xfailed**: `test_routing_quality::test_uniform_init_lower_imbalance[2]`  
   Marked `xfail` — a documented statistical edge case at seed=2, not a code
   bug. See `docs/testing.md` for the full mechanism explanation.
