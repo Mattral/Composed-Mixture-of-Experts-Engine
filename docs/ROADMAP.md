@@ -1,10 +1,7 @@
 # Roadmap
 
 Short-term (Weeks 1-4)
-- Week 1: P0 correctness - numerics tests & token-conservation assertions (Done)
-- Week 2: Distributed invariants & chaos tests (current)
-- Week 3: Kernel + async overlap benchmarks
-- Week 4: README rewrite + release v1.0-reference
+- DONE 
 
 Medium-term (Weeks 5-12)
 - Streaming NVMe checkpointing

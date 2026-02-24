@@ -107,12 +107,62 @@ class LocalNVMeAdapter(ObjectStoreAdapter):
         p = self._p(key)
         p.parent.mkdir(parents=True, exist_ok=True)
         # Write-and-atomic-rename so partial files are never visible.
+        # Use chunked streaming to avoid OOM on large checkpoints (e.g., 80GB shards).
         tmp = p.with_suffix(p.suffix + ".tmp")
-        with tmp.open("wb") as f:
-            f.write(payload)
-            f.flush()
-            os.fsync(f.fileno())
+        self._write_chunked(tmp, payload)
         tmp.replace(p)
+
+    def _write_chunked(self, path: Path, payload: bytes, chunk_bytes: int = 256 * 1024 * 1024) -> None:
+        """Write payload in chunks to avoid OOM on large buffers.
+        
+        Parameters
+        ----------
+        path : Path
+            Target file path
+        payload : bytes
+            Data to write (can be very large, e.g., 80GB for expert shards)
+        chunk_bytes : int
+            Size of each chunk to write (default: 256MB)
+        """
+        # Try to use O_DIRECT for zero-copy I/O; fall back to buffered if not available
+        # or if payload is too small/misaligned for direct I/O.
+        try:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+            if hasattr(os, 'O_DIRECT'):
+                flags |= os.O_DIRECT
+            fd = os.open(str(path), flags, 0o644)
+            use_direct = True
+        except (AttributeError, OSError):
+            # O_DIRECT not available, use buffered I/O
+            fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+            use_direct = False
+        
+        try:
+            offset = 0
+            total = len(payload)
+            while offset < total:
+                chunk_end = min(offset + chunk_bytes, total)
+                chunk = payload[offset:chunk_end]
+                try:
+                    bytes_written = os.write(fd, chunk)
+                    if bytes_written != len(chunk):
+                        log.warning(f"Short write: {bytes_written} != {len(chunk)}")
+                except OSError as e:
+                    if use_direct and e.errno == 22:  # EINVAL from O_DIRECT alignment
+                        log.debug(f"O_DIRECT alignment failed, retrying with buffered I/O: {e}")
+                        # Close and reopen without O_DIRECT
+                        os.close(fd)
+                        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
+                        use_direct = False
+                        # Seek to current position and retry
+                        os.lseek(fd, offset, os.SEEK_SET)
+                        os.write(fd, chunk)
+                    else:
+                        raise
+                offset = chunk_end
+            os.fsync(fd)
+        finally:
+            os.close(fd)
 
     def get(self, key: str) -> bytes:
         return self._p(key).read_bytes()
@@ -573,6 +623,17 @@ class ElasticTrainerHarness:
 
         self.cfg = cfg
         self.topology = topology
+        
+        # Initialize rendezvous tracking for elastic recovery at scale.
+        # At >100 nodes, use etcd for reliable rendezvous; otherwise c10d.
+        self.rdzv_backend = os.environ.get("RDZV_BACKEND", "c10d")
+        self.rdzv_epoch = -1
+        self.rdzv_run_id = ""
+        if self.rdzv_backend == "etcd":
+            self._init_etcd_rendezvous()
+        else:
+            log.info(f"Using rendezvous backend: {self.rdzv_backend}")
+        
         self.local_adapter = LocalNVMeAdapter(cfg.local_ckpt_dir)
         self.remote_adapter: Optional[ObjectStoreAdapter] = None
         if cfg.remote_uri:
@@ -595,6 +656,57 @@ class ElasticTrainerHarness:
         )
         self.state.register_on_drop(self.state._on_rank_failure)
         self._signals_installed = False
+
+    def _init_etcd_rendezvous(self) -> None:
+        """Initialize etcd-backed rendezvous for elastic recovery at scale.
+        
+        This configures the TorchElastic rendezvous handler to use etcd as the
+        coordination backend, which is more reliable than dist.barrier() at
+        >100 nodes. This also enables tracking of training restarts via
+        generation/epoch changes.
+        """
+        try:
+            from torch.distributed.elastic.rendezvous import etcd_rendezvous
+            from torch.distributed.elastic.rendezvous.etcd_rendezvous_handler import (
+                EtcdRendezvousHandler,
+            )
+        except ImportError:
+            log.warning(
+                "etcd rendezvous not available; falling back to c10d. "
+                "Upgrade to PyTorch 2.1+ with TorchElastic support."
+            )
+            self.rdzv_backend = "c10d"
+            return
+        
+        # Read etcd connection parameters from environment.
+        # Typical: RDZV_ENDPOINT=etcd.example.com:2379 (set by torchrun agent)
+        endpoint = os.environ.get("RDZV_ENDPOINT", "localhost:2379")
+        run_id = os.environ.get("RDZV_ID", "default-run")
+        
+        # Query current rendezvous state to detect if we're restarting.
+        try:
+            handler = EtcdRendezvousHandler(
+                host=endpoint.split(":")[0],
+                port=int(endpoint.split(":")[-1]),
+                run_id=run_id,
+                min_workers=self.cfg.min_nodes,
+                max_workers=self.cfg.max_nodes if hasattr(self.cfg, 'max_nodes') else 1024,
+                timeout=10.0,
+            )
+            self.rdzv_run_id = run_id
+            # Query the current epoch to detect restarts.
+            state = handler.get_state()
+            if state:
+                self.rdzv_epoch = state.get_epoch()
+                log.info(
+                    f"Etcd rendezvous initialized: run_id={run_id}, epoch={self.rdzv_epoch}, "
+                    f"endpoint={endpoint}"
+                )
+            else:
+                log.info(f"Etcd rendezvous initialized: run_id={run_id}, endpoint={endpoint}")
+        except Exception as e:
+            log.warning(f"Failed to initialize etcd rendezvous: {e}. Using c10d.")
+            self.rdzv_backend = "c10d"
 
     # ------------------------------------------------------------------
     def install_signal_handlers(self) -> None:

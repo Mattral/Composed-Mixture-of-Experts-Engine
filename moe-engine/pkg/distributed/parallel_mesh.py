@@ -229,7 +229,7 @@ def all_to_all_dispatch(
     tokens_sorted: torch.Tensor,       # [N_local*K, H] sorted by expert id
     send_counts: torch.Tensor,         # [ep_size]      int64
     topology: ParallelTopology,
-) -> Tuple[torch.Tensor, torch.Tensor, "torch.cuda.Event | None"]:
+) -> Tuple[torch.Tensor, torch.Tensor, "torch.cuda.Event | None", float]:
     """Dispatch sorted tokens to their assigned EP ranks.
 
     Returns
@@ -238,9 +238,10 @@ def all_to_all_dispatch(
     recv_counts : [ep_size] int64  counts per source rank
     event       : CUDA event recording completion of the collective
                   (None on CPU).
+    latency_ms  : float            elapsed time for the all-to-all in milliseconds
     """
     if topology.ep_size == 1 or not dist.is_initialized():
-        return tokens_sorted, send_counts.clone(), None
+        return tokens_sorted, send_counts.clone(), None, 0.0
 
     ep_group = topology.mesh["ep"].get_group() if topology.mesh is not None else None
     stream = _CommStream.get(topology.device)
@@ -261,7 +262,10 @@ def all_to_all_dispatch(
         (total_recv, H), dtype=tokens_sorted.dtype, device=tokens_sorted.device,
     )
 
-    if stream is not None:
+    if stream is not None and torch.cuda.is_available():
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt = torch.cuda.Event(enable_timing=True)
+        start_evt.record(stream)
         with torch.cuda.stream(stream):
             dist.all_to_all_single(
                 received, tokens_sorted,
@@ -269,17 +273,37 @@ def all_to_all_dispatch(
                 input_split_sizes=send_counts.tolist(),
                 group=ep_group,
             )
-            event = torch.cuda.Event()
-            event.record(stream)
-        return received, recv_counts, event
+            end_evt.record(stream)
+        end_evt.synchronize()
+        latency_ms = max(start_evt.elapsed_time(end_evt), 0.0)
+        event = torch.cuda.Event()
+        event.record(stream)
+        return received, recv_counts, event, latency_ms
 
-    dist.all_to_all_single(
-        received, tokens_sorted,
-        output_split_sizes=recv_counts.tolist(),
-        input_split_sizes=send_counts.tolist(),
-        group=ep_group,
-    )
-    return received, recv_counts, None
+    # CPU path: no timing available
+    if torch.cuda.is_available():
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt = torch.cuda.Event(enable_timing=True)
+        start_evt.record()
+        dist.all_to_all_single(
+            received, tokens_sorted,
+            output_split_sizes=recv_counts.tolist(),
+            input_split_sizes=send_counts.tolist(),
+            group=ep_group,
+        )
+        end_evt.record()
+        end_evt.synchronize()
+        latency_ms = max(start_evt.elapsed_time(end_evt), 0.0)
+    else:
+        dist.all_to_all_single(
+            received, tokens_sorted,
+            output_split_sizes=recv_counts.tolist(),
+            input_split_sizes=send_counts.tolist(),
+            group=ep_group,
+        )
+        latency_ms = 0.0
+    
+    return received, recv_counts, None, latency_ms
 
 
 def all_to_all_combine(
@@ -287,10 +311,17 @@ def all_to_all_combine(
     recv_counts: torch.Tensor,         # [ep_size] – from dispatch
     send_counts: torch.Tensor,         # [ep_size] – original send sizes
     topology: ParallelTopology,
-) -> Tuple[torch.Tensor, "torch.cuda.Event | None"]:
-    """Reverse permutation: send expert outputs back to their origin ranks."""
+) -> Tuple[torch.Tensor, "torch.cuda.Event | None", float]:
+    """Reverse permutation: send expert outputs back to their origin ranks.
+    
+    Returns
+    -------
+    out         : [N_send, H]  recombined tokens in original order
+    event       : CUDA event or None
+    latency_ms  : float        elapsed time in milliseconds
+    """
     if topology.ep_size == 1 or not dist.is_initialized():
-        return expert_out, None
+        return expert_out, None, 0.0
 
     ep_group = topology.mesh["ep"].get_group() if topology.mesh is not None else None
     stream = _CommStream.get(topology.device)
@@ -300,7 +331,10 @@ def all_to_all_combine(
         (total_send, H), dtype=expert_out.dtype, device=expert_out.device,
     )
 
-    if stream is not None:
+    if stream is not None and torch.cuda.is_available():
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt = torch.cuda.Event(enable_timing=True)
+        start_evt.record(stream)
         with torch.cuda.stream(stream):
             dist.all_to_all_single(
                 out, expert_out,
@@ -308,17 +342,37 @@ def all_to_all_combine(
                 input_split_sizes=recv_counts.tolist(),
                 group=ep_group,
             )
-            event = torch.cuda.Event()
-            event.record(stream)
-        return out, event
+            end_evt.record(stream)
+        end_evt.synchronize()
+        latency_ms = max(start_evt.elapsed_time(end_evt), 0.0)
+        event = torch.cuda.Event()
+        event.record(stream)
+        return out, event, latency_ms
 
-    dist.all_to_all_single(
-        out, expert_out,
-        output_split_sizes=send_counts.tolist(),
-        input_split_sizes=recv_counts.tolist(),
-        group=ep_group,
-    )
-    return out, None
+    # CPU path: no timing available
+    if torch.cuda.is_available():
+        start_evt = torch.cuda.Event(enable_timing=True)
+        end_evt = torch.cuda.Event(enable_timing=True)
+        start_evt.record()
+        dist.all_to_all_single(
+            out, expert_out,
+            output_split_sizes=send_counts.tolist(),
+            input_split_sizes=recv_counts.tolist(),
+            group=ep_group,
+        )
+        end_evt.record()
+        end_evt.synchronize()
+        latency_ms = max(start_evt.elapsed_time(end_evt), 0.0)
+    else:
+        dist.all_to_all_single(
+            out, expert_out,
+            output_split_sizes=send_counts.tolist(),
+            input_split_sizes=recv_counts.tolist(),
+            group=ep_group,
+        )
+        latency_ms = 0.0
+    
+    return out, None, latency_ms
 
 
 # ==========================================================================
@@ -353,6 +407,95 @@ class _SwiGLUExpert(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:                  # [n, H] -> [n, H]
         return self.w_down(torch.nn.functional.silu(self.w_gate(x)) * self.w_up(x))
+
+
+# ==========================================================================
+# Sequence Parallelism Helpers
+# ==========================================================================
+def scatter_to_sequence_parallel(
+    x: torch.Tensor,        # [B, S, H]
+    topology: ParallelTopology,
+) -> torch.Tensor:
+    """Scatter activations across the TP group along the sequence dimension.
+    
+    For TP > 1, this prevents duplicating the full sequence on every rank,
+    enabling memory-efficient long-context training. Each TP rank gets a
+    contiguous slice of the sequence.
+    
+    Parameters
+    ----------
+    x : torch.Tensor
+        Activation tensor of shape [B, S, H]
+    topology : ParallelTopology
+        Mesh topology including TP group information
+    
+    Returns
+    -------
+    torch.Tensor
+        Scattered tensor of shape [B, S // tp_size, H] on each rank
+    """
+    if topology.tp_size <= 1 or not dist.is_initialized():
+        return x
+    
+    B, S, H = x.shape
+    assert S % topology.tp_size == 0, (
+        f"Sequence length {S} must be divisible by TP size {topology.tp_size}"
+    )
+    
+    tp_group = topology.mesh["tp"].get_group() if topology.mesh is not None else None
+    tp_rank = dist.get_rank(tp_group) if tp_group is not None else 0
+    
+    # Scatter: each rank gets a contiguous slice
+    S_local = S // topology.tp_size
+    x_scattered = x[:, tp_rank * S_local : (tp_rank + 1) * S_local, :]
+    return x_scattered
+
+
+def gather_from_sequence_parallel(
+    x: torch.Tensor,        # [B, S // tp_size, H]
+    topology: ParallelTopology,
+) -> torch.Tensor:
+    """Gather sequence-parallel shards back to the full sequence on every rank.
+    
+    Reverses the scatter_to_sequence_parallel operation. Each rank contributes
+    its sequence shard to reconstruct the full [B, S, H] tensor.
+    
+    Parameters
+    ----------
+    x : torch.Tensor
+        Scattered activation tensor of shape [B, S // tp_size, H]
+    topology : ParallelTopology
+        Mesh topology including TP group information
+    
+    Returns
+    -------
+    torch.Tensor
+        Gathered tensor of shape [B, S, H] on each rank
+    """
+    if topology.tp_size <= 1 or not dist.is_initialized():
+        return x
+    
+    B, S_local, H = x.shape
+    S = S_local * topology.tp_size
+    
+    tp_group = topology.mesh["tp"].get_group() if topology.mesh is not None else None
+    
+    # Allocate output buffer for full sequence
+    x_full = torch.empty(
+        (B, S, H), dtype=x.dtype, device=x.device,
+    )
+    
+    # Each rank scatters its shard into the global buffer
+    if tp_group is not None:
+        dist.all_gather(
+            [x_full[:, i * S_local : (i + 1) * S_local, :] for i in range(topology.tp_size)],
+            x,
+            group=tp_group,
+        )
+    else:
+        x_full = x
+    
+    return x_full
 
 
 # ==========================================================================
@@ -410,6 +553,10 @@ class DistributedMoELayer(nn.Module):
         )
         for li, gi in enumerate(local_ids):
             self._global_to_local[gi] = li
+        
+        # Store collective timings for telemetry (best-effort)
+        self.last_dispatch_ms: float = 0.0
+        self.last_combine_ms: float = 0.0
 
     # ----------------------------------------------------------------------
     # Forward
@@ -448,9 +595,10 @@ class DistributedMoELayer(nn.Module):
         send_counts = torch.bincount(target_rank, minlength=ep).to(torch.int64)
 
         # 3. Dispatch tokens (overlapped with combine of previous layer in async loops).
-        received, recv_counts, ev_disp = all_to_all_dispatch(
+        received, recv_counts, ev_disp, dispatch_ms = all_to_all_dispatch(
             tokens_sorted, send_counts, self.topology,
         )
+        self.last_dispatch_ms = dispatch_ms
 
         # 4. Exchange expert IDs alongside tokens (so receiving rank knows
         #    which local expert each token belongs to).
@@ -482,9 +630,10 @@ class DistributedMoELayer(nn.Module):
             if stream is not None:
                 stream.wait_event(ev_local)
 
-        combined, ev_comb = all_to_all_combine(
+        combined, ev_comb, combine_ms = all_to_all_combine(
             expert_out, recv_counts, send_counts, self.topology,
         )
+        self.last_combine_ms = combine_ms
 
         if ev_comb is not None:
             torch.cuda.current_stream().wait_event(ev_comb)
@@ -782,3 +931,94 @@ def apply_fsdp2(
     # FSDP hooks (gradient hooks, pre-forward, etc.).
     fully_shard(model, mesh=dp_mesh, mp_policy=mp_policy)
     return model
+
+
+# ==========================================================================
+# Pipeline parallelism stage + 1F1B schedule (single-process / test shim)
+# ==========================================================================
+class PipelineStage:
+    """Lightweight PipelineStage helper implementing a 1F1B schedule.
+
+    This class provides a single-stage view suitable for unit testing the
+    1F1B interleave schedule in single-process environments. It intentionally
+    keeps the communication layer abstract: when running in a multi-process
+    environment users should replace the simple send/recv stubs with the
+    actual `dist.send`/`dist.recv` mapped to the pipeline axis.
+
+    Parameters
+    ----------
+    stage_id: int
+        0-based id of this stage in the pipeline
+    num_stages: int
+        Total number of pipeline stages
+    module: Optional[nn.Module]
+        Local module to execute on activations for this stage. If omitted
+        the stage acts as a passthrough.
+    """
+
+    def __init__(self, stage_id: int, num_stages: int, module: Optional[nn.Module] = None):
+        self.stage_id = int(stage_id)
+        self.num_stages = int(num_stages)
+        self.module = module
+
+    def forward_step(self, micro_batch: torch.Tensor) -> torch.Tensor:
+        """Execute the forward work for one micro-batch on this stage.
+
+        In distributed runs this should receive from the previous stage before
+        running and send to the next stage after. Here we provide a simple
+        single-process implementation useful for unit tests.
+        """
+        x = micro_batch
+        if self.module is not None:
+            return self.module(x)
+        return x
+
+    def backward_step(self, grad_output: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        """Execute the backward work for one micro-batch on this stage.
+
+        This shim simply returns the incoming gradient (no parameter updates).
+        Real distributed backward should perform local backward and send the
+        gradient to the previous stage when appropriate.
+        """
+        return grad_output
+
+    def run_1f1b(self, micro_batches: list[torch.Tensor]) -> list[Optional[torch.Tensor]]:
+        """Run the 1F1B interleave schedule for this stage (single-process).
+
+        Returns a list of gradients (or None) corresponding to each micro-batch.
+        The implementation follows the classic three-phase algorithm:
+          1. Warmup: issue up to (p-1) forwards to fill the pipeline
+          2. Steady-state: for each clock, perform one forward (if available)
+             and one backward (if available)
+          3. Drain: finish outstanding backwards
+
+        Note: This method does not perform cross-process communication; it is
+        suitable for local unit tests and scheduling verification.
+        """
+        p = self.num_stages
+        m = len(micro_batches)
+        activations: list[Optional[torch.Tensor]] = [None] * m
+        grads: list[Optional[torch.Tensor]] = [None] * m
+
+        # Warmup forwards
+        for t in range(min(p - 1, m)):
+            activations[t] = self.forward_step(micro_batches[t])
+
+        # Steady-state: each iteration issues one forward (if remaining)
+        # and one backward (if a completed forward is ready to be drained).
+        for t in range(m - (p - 1)):
+            idx_fwd = t + (p - 1)
+            if idx_fwd < m:
+                activations[idx_fwd] = self.forward_step(micro_batches[idx_fwd])
+            # Backward for micro-batch t (steady-state drain)
+            if activations[t] is not None:
+                # In a real stage the gradient would come from the next stage;
+                # here we simulate by creating a same-shaped gradient filled with ones.
+                grads[t] = self.backward_step(torch.ones_like(activations[t]))
+
+        # Drain remaining backwards
+        for t in range(m - (p - 1), m):
+            if activations[t] is not None:
+                grads[t] = self.backward_step(torch.ones_like(activations[t]))
+
+        return grads

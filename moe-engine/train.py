@@ -273,6 +273,7 @@ def main() -> None:
         # Pull last router profile from the first MoE block (best-effort).
         try:
             first_router = model.blocks[0].moe.router
+            first_moe = model.blocks[0].moe
             if first_router.last_profile is not None:
                 rec.kernel = {
                     "sram_bytes_per_block": first_router.last_profile.sram_bytes_per_block,
@@ -281,6 +282,11 @@ def main() -> None:
                     "tokens_per_expert_std": first_router.last_profile.tokens_per_expert_std,
                     "used_triton": first_router.last_profile.used_triton,
                 }
+            # Capture collective timings
+            rec.collective = {
+                "all_to_all_dispatch_ms": first_moe.last_dispatch_ms,
+                "all_to_all_combine_ms": first_moe.last_combine_ms,
+            }
         except (AttributeError, IndexError):
             pass
 
