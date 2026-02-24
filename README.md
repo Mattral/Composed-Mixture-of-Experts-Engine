@@ -63,10 +63,10 @@ checkpoint-stall bug can be isolated to a single line, not a six-team incident.
 │                           │   │                              │   │                              │
 │ • ParallelTopology        │   │ • ElasticTrainerHarness      │   │ • MoERouter (nn.Module)      │
 │ • init_device_mesh(       │   │ • AsyncCheckpointer          │   │   ├─ forward: Triton @jit    │
-│     (pp,dp,ep,tp))        │   │ • _PinnedHostStager          │   │   │   - dynamic-bound mask  │
-│ • DistributedMoELayer     │   │ • ClusterStateMachine        │   │   │   - 128B aligned loads  │
-│ • apply_fsdp2(...)        │   │ • LocalNVMeAdapter           │   │   └─ backward (TD-04)       │
-│ • all_to_all_dispatch     │   │ • S3Adapter (boto3)          │   │ • CPU autograd fallback     │
+│     (pp,dp,ep,tp))        │   │ • _PinnedHostStager          │   │   │   - dynamic-bound mask   │
+│ • DistributedMoELayer     │   │ • ClusterStateMachine        │   │   │   - 128B aligned loads   │
+│ • apply_fsdp2(...)        │   │ • LocalNVMeAdapter           │   │   └─ backward (TD-04)        │
+│ • all_to_all_dispatch     │   │ • S3Adapter (boto3)          │   │ • CPU autograd fallback      │
 │   (async_op=True)         │   │                              │   │                              │
 └───────────┬───────────────┘   └─────────────┬────────────────┘   └──────────────┬───────────────┘
             │                                 │                                   │
@@ -93,17 +93,17 @@ checkpoint-stall bug can be isolated to a single line, not a six-team incident.
                                   │
                                   ▼
                     DistributedMoELayer.forward
-                    ┌──────────────────────────┐
-                    │ 1. router (Triton fwd)   │
-                    │ 2. sort by target EP rank│
-                    │ 3. all_to_all_single     │
+                    ┌─────────────────────────────────────────┐
+                    │ 1. router (Triton fwd)                  │
+                    │ 2. sort by target EP rank               │
+                    │ 3. all_to_all_single                    │
                     │    (async_op=True)  ──► launch  ────────┐
                     │ 4. independent compute  ─── overlap ───►│  GPU compute
                     │ 5. work.wait() on dispatch              │  in flight
                     │ 6. local SwiGLU experts                 │
                     │ 7. all_to_all_combine (async_op=True) ──┘
-                    │ 8. weight ⊗ combine → reduce-K          │
-                    └──────────────────────────┘
+                    │ 8. weight ⊗ combine → reduce-K         │
+                    └─────────────────────────────────────────┘
 ```
 
 Per-rank a single 4-D coordinate `(pp_rank, dp_rank, ep_rank, tp_rank)`
