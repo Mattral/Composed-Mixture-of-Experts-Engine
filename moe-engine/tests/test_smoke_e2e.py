@@ -99,6 +99,9 @@ def _assert_telemetry_envelope(jsonl_path: Path) -> None:
             assert k in rec, f"missing key {k!r} in telemetry record"
         # Kernel block must report Triton/CPU-fallback usage.
         assert "used_triton" in rec["kernel"]
+        # Collective block must include all_to_all timing measurements.
+        assert "all_to_all_dispatch_ms" in rec["collective"]
+        assert "all_to_all_combine_ms" in rec["collective"]
         # Infra block must surface async ckpt commit time + cluster size.
         assert "async_ckpt_commit_ms" in rec["infra"]
         assert "active_nodes" in rec["infra"]

@@ -157,5 +157,43 @@ def test_row_parallel_dtype_preservation():
         assert y.dtype == dtype
 
 
+def test_sequence_parallel_scatter_single_rank():
+    """Verify scatter_to_sequence_parallel no-op on single TP rank."""
+    from pkg.distributed.parallel_mesh import (
+        scatter_to_sequence_parallel,
+        build_topology,
+    )
+    
+    batch_size, seq_len, hidden_dim = 4, 128, 64
+    x = torch.randn(batch_size, seq_len, hidden_dim)
+    
+    # Create single-rank topology (tp_size=1)
+    topo = build_topology(dp_size=1, tp_size=1, ep_size=1, device_type="cpu")
+    
+    x_scattered = scatter_to_sequence_parallel(x, topo)
+    
+    assert x_scattered.shape == x.shape
+    assert torch.equal(x_scattered, x)
+
+
+def test_sequence_parallel_gather_single_rank():
+    """Verify gather_from_sequence_parallel no-op on single TP rank."""
+    from pkg.distributed.parallel_mesh import (
+        gather_from_sequence_parallel,
+        build_topology,
+    )
+    
+    batch_size, seq_len, hidden_dim = 4, 128, 64
+    x = torch.randn(batch_size, seq_len, hidden_dim)
+    
+    # Create single-rank topology (tp_size=1)
+    topo = build_topology(dp_size=1, tp_size=1, ep_size=1, device_type="cpu")
+    
+    x_gathered = gather_from_sequence_parallel(x, topo)
+    
+    assert x_gathered.shape == x.shape
+    assert torch.equal(x_gathered, x)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
