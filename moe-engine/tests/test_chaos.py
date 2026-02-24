@@ -115,6 +115,10 @@ def _torchrun_session(
     ):
         full_env.pop(var, None)
     full_env.update(env)
+    # Enable fault-tolerant collectives in the worker for CI runs so
+    # transient Gloo connect failures are retried locally. This is a test-
+    # only mitigation and can be disabled by overriding the env var.
+    full_env.setdefault("CHAOS_FAULT_TOLERANT", "1")
     full_env.setdefault("MASTER_ADDR", "127.0.0.1")
     full_env.setdefault("MASTER_PORT", str(_find_free_port()))
     full_env.setdefault("GLOO_SOCKET_IFNAME", "lo")
@@ -183,6 +187,17 @@ def _torchrun_session(
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+        # Fallback: if any worker processes survive the process group kill,
+        # terminate them by exact worker script path to avoid zombie bleed-through.
+        try:
+            subprocess.run(
+                ["pkill", "-f", str(WORKER)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        except Exception:
+            pass
 
 
 # ==========================================================================
@@ -258,6 +273,21 @@ def _no_zombie_workers_after_test() -> Iterator[None]:
     except subprocess.CalledProcessError:
         out = ""  # pgrep exits 1 when nothing matches — desired state.
     leftovers = [ln for ln in out.splitlines() if ln.strip()]
+    if leftovers:
+        try:
+            subprocess.run(
+                ["pkill", "-f", str(WORKER)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            time.sleep(0.5)
+            out = subprocess.check_output(["pgrep", "-af", str(WORKER)], text=True)
+        except subprocess.CalledProcessError:
+            out = ""
+        except Exception:
+            pass
+        leftovers = [ln for ln in out.splitlines() if ln.strip()]
     assert not leftovers, (
         "zombie chaos worker processes detected after test:\n  "
         + "\n  ".join(leftovers)

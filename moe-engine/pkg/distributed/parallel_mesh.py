@@ -57,6 +57,15 @@ except Exception:                                                        # pragm
     _HAS_DEVICE_MESH = False
 
 try:
+    from torch.distributed.tensor import DTensor, Shard, Replicate
+    _HAS_DTENSOR = True
+except Exception:                                                        # pragma: no cover
+    DTensor = None                                                      # type: ignore
+    Shard = None                                                        # type: ignore
+    Replicate = None                                                    # type: ignore
+    _HAS_DTENSOR = False
+
+try:
     from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
     _HAS_FSDP2 = True
 except Exception:                                                        # pragma: no cover
@@ -65,6 +74,35 @@ except Exception:                                                        # pragm
     _HAS_FSDP2 = False
 
 from pkg.kernels.moe_router import MoERouter
+
+_TP_GROUPS: dict[tuple[int, int, int], dist.ProcessGroup] = {}
+
+
+def _tp_process_group(topology: "ParallelTopology") -> "dist.ProcessGroup | None":
+    if topology.tp_size == 1 or not dist.is_initialized():
+        return None
+    if topology.mesh is not None:
+        try:
+            return topology.mesh["tp"].get_group()
+        except Exception:
+            pass
+
+    assert topology.world_size == topology.dp_size * topology.tp_size * topology.ep_size, (
+        "world_size must equal dp_size * tp_size * ep_size for TP groups"
+    )
+    key = (topology.dp_rank, topology.ep_rank, topology.tp_size)
+    if key in _TP_GROUPS:
+        return _TP_GROUPS[key]
+
+    ranks = [
+        topology.dp_rank * topology.tp_size * topology.ep_size
+        + tp * topology.ep_size
+        + topology.ep_rank
+        for tp in range(topology.tp_size)
+    ]
+    group = dist.new_group(ranks=ranks)
+    _TP_GROUPS[key] = group
+    return group
 
 
 # ==========================================================================
@@ -84,7 +122,13 @@ class ParallelTopology:
 
     @property
     def dp_rank(self) -> int:
-        return (self.rank // self.ep_size) % self.dp_size
+        if self.tp_size == 1:
+            return (self.rank // self.ep_size) % self.dp_size
+        return (self.rank // (self.tp_size * self.ep_size)) % self.dp_size
+
+    @property
+    def tp_rank(self) -> int:
+        return (self.rank // self.ep_size) % self.tp_size
 
     @property
     def ep_rank(self) -> int:
@@ -107,6 +151,7 @@ class ParallelTopology:
 def build_topology(
     dp_size: int,
     ep_size: int,
+    tp_size: int = 1,
     device_type: str = "cuda",
 ) -> ParallelTopology:
     """Initialize (or query) the process group and return a Topology.
@@ -121,16 +166,19 @@ def build_topology(
         # Degenerate path used by tests and CPU smoke runs.
         dev = torch.device(device_type if torch.cuda.is_available() and device_type == "cuda" else "cpu")
         return ParallelTopology(
-            world_size=1, rank=0, dp_size=1, ep_size=1, mesh=None, device=dev,
+            world_size=1, rank=0, dp_size=1, ep_size=1, tp_size=1, mesh=None, device=dev,
         )
 
-    assert dp_size * ep_size == world_size, (
-        f"dp_size({dp_size}) * ep_size({ep_size}) must equal world_size({world_size})"
+    assert dp_size * tp_size * ep_size == world_size, (
+        f"dp_size({dp_size}) * tp_size({tp_size}) * ep_size({ep_size}) "
+        f"must equal world_size({world_size})"
     )
+    mesh_shape = (dp_size, tp_size, ep_size) if tp_size > 1 else (dp_size, ep_size)
+    mesh_dim_names = ("dp", "tp", "ep") if tp_size > 1 else ("dp", "ep")
     mesh = init_device_mesh(
         device_type,
-        (dp_size, ep_size),
-        mesh_dim_names=("dp", "ep"),
+        mesh_shape,
+        mesh_dim_names=mesh_dim_names,
     )
     dev = torch.device(f"{device_type}:{rank % max(torch.cuda.device_count(), 1)}")
     return ParallelTopology(
@@ -138,6 +186,7 @@ def build_topology(
         rank=rank,
         dp_size=dp_size,
         ep_size=ep_size,
+        tp_size=tp_size,
         mesh=mesh,
         device=dev,
     )
@@ -276,11 +325,31 @@ def all_to_all_combine(
 # Local expert implementation: a 2-layer SwiGLU FFN. Compact, BF16-friendly.
 # ==========================================================================
 class _SwiGLUExpert(nn.Module):
-    def __init__(self, hidden_dim: int, ffn_dim: int, dtype: torch.dtype = torch.float32):
+    def __init__(
+        self,
+        hidden_dim: int,
+        ffn_dim: int,
+        topology: ParallelTopology,
+        dtype: torch.dtype = torch.float32,
+    ):
         super().__init__()
         self.w_gate = nn.Linear(hidden_dim, ffn_dim, bias=False, dtype=dtype)
-        self.w_up   = nn.Linear(hidden_dim, ffn_dim, bias=False, dtype=dtype)
-        self.w_down = nn.Linear(ffn_dim, hidden_dim, bias=False, dtype=dtype)
+        self.w_up = ColumnParallelLinear(
+            in_features=hidden_dim,
+            out_features=ffn_dim,
+            bias=False,
+            topology=topology,
+            device=topology.device,
+            dtype=dtype,
+        )
+        self.w_down = RowParallelLinear(
+            in_features=ffn_dim,
+            out_features=hidden_dim,
+            bias=False,
+            topology=topology,
+            device=topology.device,
+            dtype=dtype,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:                  # [n, H] -> [n, H]
         return self.w_down(torch.nn.functional.silu(self.w_gate(x)) * self.w_up(x))
@@ -330,7 +399,8 @@ class DistributedMoELayer(nn.Module):
         local_ids = topology.experts_on_this_rank(num_experts)
         self.local_expert_ids: List[int] = local_ids
         self.experts = nn.ModuleList([
-            _SwiGLUExpert(hidden_dim, ffn_dim, dtype=dtype) for _ in local_ids
+            _SwiGLUExpert(hidden_dim, ffn_dim, topology=topology, dtype=dtype)
+            for _ in local_ids
         ])
         # Mapping global_expert_id -> local index. -1 means "not on this rank".
         self.register_buffer(
@@ -497,10 +567,6 @@ class ColumnParallelLinear(nn.Module):
     - Compute: local_out = input @ weight.T where weight is sharded on dim 0
     - Output: Run all-gather on TP group to collect outputs from all ranks
     - Final:  [batch, out_features]         (replicated across TP group)
-
-    This is equivalent to computing a full linear layer and then gathering
-    the sliced outputs across all TP ranks, without actually materializing
-    the full output on any single rank.
     """
 
     def __init__(
@@ -508,38 +574,65 @@ class ColumnParallelLinear(nn.Module):
         in_features: int,
         out_features: int,
         bias: bool = True,
+        topology: Optional[ParallelTopology] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        
-        # For now, TP is scalar (no mesh passed). In the full integrated version,
-        # this would receive the TP mesh and shard the weight appropriately.
-        # For CPU/single-GPU tests, fall back to unreplicated weight.
+        self.topology = topology
+        self.tp_size = topology.tp_size if topology is not None else 1
+        self.tp_group = _tp_process_group(topology) if topology is not None else None
+
+        if self.tp_size > 1:
+            assert out_features % self.tp_size == 0, (
+                "out_features must be divisible by tp_size for ColumnParallelLinear"
+            )
+            self.local_out_features = out_features // self.tp_size
+        else:
+            self.local_out_features = out_features
+
         factory_kwargs = {"device": device, "dtype": dtype}
         self.weight = nn.Parameter(
-            torch.empty((out_features, in_features), **factory_kwargs)
+            torch.empty((self.local_out_features, in_features), **factory_kwargs)
         )
         if bias:
-            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
+            self.bias = nn.Parameter(torch.empty(self.local_out_features, **factory_kwargs))
         else:
             self.register_parameter("bias", None)
+
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         if self.bias is not None:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
 
+        self.weight_dt = None
+        if _HAS_DTENSOR and self.tp_size > 1 and topology is not None and topology.mesh is not None:
+            self.weight_dt = DTensor.from_local(
+                self.weight,
+                device_mesh=topology.mesh["tp"],
+                placements=[Shard(0)],
+            )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward: local gemm then optional all-gather on TP group."""
-        # For now: no actual TP (no group passed), just a standard linear layer.
-        # In the production version with TP enabled, we would:
-        # 1. Shard weight on output dimension
-        # 2. Compute local_out = x @ weight.T (each rank computes its slice)
-        # 3. all-gather outputs across TP group to form full output
-        return torch.nn.functional.linear(x, self.weight, self.bias)
+        local_out = torch.nn.functional.linear(x, self.weight, self.bias)
+        if self.tp_size == 1 or self.tp_group is None:
+            return local_out
+
+        gathered = torch.empty(
+            (self.tp_size, *local_out.shape),
+            dtype=local_out.dtype,
+            device=local_out.device,
+        )
+        req = dist.all_gather_into_tensor(
+            gathered, local_out, group=self.tp_group, async_op=True
+        )
+        if req is not None:
+            req.wait()
+
+        return gathered.permute(1, 0, 2).reshape(*local_out.shape[:-1], self.out_features)
 
 
 class RowParallelLinear(nn.Module):
@@ -550,10 +643,6 @@ class RowParallelLinear(nn.Module):
     - Compute: local_out = input_local @ weight.T (each rank sees its input slice)
     - Reduce:  reduce-scatter outputs across TP group (sum contributions)
     - Final:  [batch, out_features]        (replicated across TP group)
-
-    This requires a reduce-scatter collective to sum the partial contributions
-    from each rank's weight shard. Typically used after an attention layer that
-    already sharded the sequence.
     """
 
     def __init__(
@@ -561,35 +650,100 @@ class RowParallelLinear(nn.Module):
         in_features: int,
         out_features: int,
         bias: bool = True,
+        topology: Optional[ParallelTopology] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        
+        self.topology = topology
+        self.tp_size = topology.tp_size if topology is not None else 1
+        self.tp_group = _tp_process_group(topology) if topology is not None else None
+        self.tp_rank = topology.tp_rank if topology is not None else 0
+
+        if self.tp_size > 1:
+            assert in_features % self.tp_size == 0, (
+                "in_features must be divisible by tp_size for RowParallelLinear"
+            )
+            self.local_in_features = in_features // self.tp_size
+        else:
+            self.local_in_features = in_features
+
         factory_kwargs = {"device": device, "dtype": dtype}
         self.weight = nn.Parameter(
-            torch.empty((out_features, in_features), **factory_kwargs)
+            torch.empty((out_features, self.local_in_features), **factory_kwargs)
         )
         if bias:
             self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
         else:
             self.register_parameter("bias", None)
+
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         if self.bias is not None:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
             nn.init.uniform_(self.bias, -bound, bound)
 
+        self.weight_dt = None
+        if _HAS_DTENSOR and self.tp_size > 1 and topology is not None and topology.mesh is not None:
+            self.weight_dt = DTensor.from_local(
+                self.weight,
+                device_mesh=topology.mesh["tp"],
+                placements=[Shard(1)],
+            )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Forward: local gemm then optional reduce-scatter on TP group."""
-        # For now: no actual TP (no group passed), just a standard linear layer.
-        # In the production version with TP enabled, we would:
-        # 1. Shard weight on input dimension
-        # 2. Compute local_out = x @ weight_local.T (each rank computes its contribution)
-        # 3. reduce-scatter outputs across TP group to sum contributions
-        return torch.nn.functional.linear(x, self.weight, self.bias)
+        if self.tp_size > 1 and self.tp_group is not None:
+            if x.shape[-1] != self.local_in_features:
+                if x.shape[-1] == self.in_features:
+                    start = self.tp_rank * self.local_in_features
+                    end = start + self.local_in_features
+                    x = x[..., start:end]
+                else:
+                    raise ValueError(
+                        f"RowParallelLinear expected input size {self.local_in_features} or "
+                        f"{self.in_features}, got {x.shape[-1]}"
+                    )
+
+        local_out = torch.nn.functional.linear(x, self.weight, bias=None)
+
+        if self.tp_size == 1 or self.tp_group is None:
+            return local_out if self.bias is None else local_out + self.bias
+
+        local_chunks = torch.stack(local_out.chunk(self.tp_size, dim=-1), dim=0)
+        output_chunk = torch.empty(
+            local_chunks.shape[1:],
+            dtype=local_chunks.dtype,
+            device=local_chunks.device,
+        )
+        req = dist.reduce_scatter_tensor(
+            output_chunk,
+            local_chunks,
+            group=self.tp_group,
+            async_op=True,
+        )
+        if req is not None:
+            req.wait()
+
+        gathered = torch.empty(
+            (self.tp_size, *output_chunk.shape),
+            dtype=output_chunk.dtype,
+            device=output_chunk.device,
+        )
+        req2 = dist.all_gather_into_tensor(
+            gathered,
+            output_chunk,
+            group=self.tp_group,
+            async_op=True,
+        )
+        if req2 is not None:
+            req2.wait()
+
+        out = gathered.permute(1, 0, 2).reshape(*output_chunk.shape[:-1], self.out_features)
+        if self.bias is not None:
+            out = out + self.bias
+        return out
 
 
 # ==========================================================================

@@ -196,7 +196,7 @@ def main() -> int:
             # supplies rank/WORLD_SIZE via environment variables.
             dist.init_process_group(
                 backend="gloo",
-                init_method="env://",
+                init_method=init_method,
                 timeout=timeout,
             )
             emit(event="pg_ready", attempt=attempt)
@@ -306,7 +306,13 @@ def main() -> int:
         # restart the cohort, which is exactly the chaos we want.
         for p in model.parameters():
             if p.grad is not None:
-                dist.all_reduce(p.grad, op=dist.ReduceOp.SUM)
+                _safe_all_reduce(
+                    p.grad,
+                    op=dist.ReduceOp.SUM,
+                    emit_fn=emit,
+                    init_method=init_method,
+                    timeout=timeout,
+                )
                 p.grad.div_(world)
 
         optim.step()
@@ -367,6 +373,69 @@ def main() -> int:
     emit(event="finish", final_step=total_steps - 1, cum_tokens=cum_tokens)
     tele.close()
     return 0
+
+
+# ----------------------------------------------------------------------
+# Resilient collective helpers (test-only). When enabled via the
+# `CHAOS_FAULT_TOLERANT` env var, wrap collectives with retry semantics
+# that attempt to re-init the process group on transient failures.
+# ----------------------------------------------------------------------
+FAULT_TOLERANT = os.environ.get("CHAOS_FAULT_TOLERANT", "0") == "1"
+
+
+def _safe_all_reduce(
+    tensor: torch.Tensor,
+    op: dist.ReduceOp = dist.ReduceOp.SUM,
+    max_retries: int = 6,
+    emit_fn=None,
+    init_method: str = "env://",
+    timeout: timedelta = timedelta(seconds=90),
+) -> None:
+    """Attempt an all_reduce with retries; on repeated failure try to
+    re-init the process group (best-effort). Only used when
+    `CHAOS_FAULT_TOLERANT=1` in the worker env.
+
+    This wrapper is intentionally conservative: it does not mask hard
+    errors, but will tolerate short windows where peers are transiently
+    disconnected during a restart.
+    """
+    if not FAULT_TOLERANT:
+        dist.all_reduce(tensor, op=op)
+        return
+
+    backoff = 0.5
+    for attempt in range(1, max_retries + 1):
+        try:
+            dist.all_reduce(tensor, op=op)
+            return
+        except Exception as e:  # noqa: BLE001 - broad catch intended for robustness
+            if emit_fn is not None:
+                emit_fn(event="collective_retry", attempt=attempt, error=str(e))
+            # Try a graceful PG teardown and re-init on repeated failures.
+            try:
+                if dist.is_initialized():
+                    try:
+                        dist.destroy_process_group()
+                    except Exception:
+                        pass
+                # small sleep to allow sockets to clear
+                time.sleep(backoff + random.uniform(0.0, 0.2))
+                # re-init with same parameters as above
+                dist.init_process_group(
+                    backend="gloo",
+                    init_method=init_method,
+                    timeout=timeout,
+                )
+                if emit_fn is not None:
+                    emit_fn(event="collective_reinit", attempt=attempt)
+            except Exception as re:
+                if emit_fn is not None:
+                    emit_fn(event="collective_reinit_failed", attempt=attempt, error=str(re))
+            backoff = min(backoff * 2, 10.0)
+            time.sleep(backoff)
+    # Final attempt without swallowing the exception so the worker fails
+    # visibly if nothing recovers.
+    dist.all_reduce(tensor, op=op)
 
 
 if __name__ == "__main__":

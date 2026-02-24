@@ -399,8 +399,11 @@ class MoERouterFunction(torch.autograd.Function):
         )
 
         if use_triton:
-            topk_idx, topk_w, logits = _triton_forward(tokens, gate_w, k)
+            topk_idx, topk_w, logits, kernel_ms, sram_bytes, achieved_bw = _triton_forward(tokens, gate_w, k)
         else:
+            kernel_ms = 0.0
+            sram_bytes = 0
+            achieved_bw = 0.0
             topk_idx, topk_w, logits = _reference_route_fp64(tokens, gate_w, k)
 
         # Token-Conservation Invariant (must hold by construction; assert
@@ -498,19 +501,58 @@ def _triton_forward(
     logits = torch.empty((N, E), dtype=torch.float32, device=tokens.device)
 
     grid = ((N + BLOCK_N - 1) // BLOCK_N,)
-    _router_fwd_kernel[grid](
-        tokens.contiguous(),
-        gate_w.contiguous(),
-        topk_idx, topk_w, logits,
-        tokens.stride(0), tokens.stride(1),
-        gate_w.stride(0), gate_w.stride(1),
-        topk_idx.stride(0), topk_idx.stride(1),
-        topk_w.stride(0), topk_w.stride(1),
-        logits.stride(0), logits.stride(1),
-        N, H, E, k,
-        BLOCK_N=BLOCK_N, BLOCK_H=BLOCK_H, BLOCK_E=BLOCK_E,
+    if tokens.is_cuda:
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        _router_fwd_kernel[grid](
+            tokens.contiguous(),
+            gate_w.contiguous(),
+            topk_idx, topk_w, logits,
+            tokens.stride(0), tokens.stride(1),
+            gate_w.stride(0), gate_w.stride(1),
+            topk_idx.stride(0), topk_idx.stride(1),
+            topk_w.stride(0), topk_w.stride(1),
+            logits.stride(0), logits.stride(1),
+            N, H, E, k,
+            BLOCK_N=BLOCK_N, BLOCK_H=BLOCK_H, BLOCK_E=BLOCK_E,
+        )
+        end.record()
+        end.synchronize()
+        kernel_ms = max(end.elapsed_time(start), 0.0)
+    else:
+        _router_fwd_kernel[grid](
+            tokens.contiguous(),
+            gate_w.contiguous(),
+            topk_idx, topk_w, logits,
+            tokens.stride(0), tokens.stride(1),
+            gate_w.stride(0), gate_w.stride(1),
+            topk_idx.stride(0), topk_idx.stride(1),
+            topk_w.stride(0), topk_w.stride(1),
+            logits.stride(0), logits.stride(1),
+            N, H, E, k,
+            BLOCK_N=BLOCK_N, BLOCK_H=BLOCK_H, BLOCK_E=BLOCK_E,
+        )
+        kernel_ms = 0.0
+
+    dtype_size = tokens.element_size()
+    float32_size = torch.finfo(torch.float32).bits // 8
+    bytes_moved = (
+        tokens.numel() * dtype_size
+        + gate_w.numel() * dtype_size
+        + logits.numel() * float32_size
+        + topk_idx.numel() * 4
+        + topk_w.numel() * 4
     )
-    return topk_idx.to(torch.long), topk_w.to(tokens.dtype), logits.to(tokens.dtype)
+    achieved_bw = (bytes_moved / 1e9) / max(kernel_ms / 1e3, 1e-9)
+    return (
+        topk_idx.to(torch.long),
+        topk_w.to(tokens.dtype),
+        logits.to(tokens.dtype),
+        kernel_ms,
+        BLOCK_N * BLOCK_E * dtype_size * 3,
+        achieved_bw,
+    )
 
 
 def _next_pow2(x: int) -> int:
@@ -613,7 +655,8 @@ class MoERouter(torch.nn.Module):
             # so we route bias users through the reference path.
             force_reference = True
 
-        idx, w = moe_topk_route(flat, gate_w, self.top_k, force_reference)
+        # Use the autograd-aware path for routing so backward works correctly.
+        idx, w = MoERouterAutograd.apply(flat, gate_w, self.top_k, force_reference)
 
         if self.bias is not None and force_reference:
             # In bias mode we used the reference path on the *unbiased* logits.
@@ -625,6 +668,27 @@ class MoERouter(torch.nn.Module):
                 topk_vals, idx_new = torch.topk(probs, k=self.top_k, dim=-1)
                 w_new = (topk_vals / topk_vals.sum(-1, keepdim=True).clamp_min(1e-30)).to(tokens.dtype)
             idx, w = idx_new.to(torch.long), w_new
+
+        # Collect profiling metrics separately (no-grad) when Triton+CUDA is available
+        # and we didn't force the reference implementation.
+        # Conservative defaults if profiling isn't available.
+        sram = 64 * max(_next_pow2(self.num_experts), 64) * 4 * 3
+        dtype_size = flat.element_size()
+        bytes_moved = (flat.numel() + gate_w.numel()) * dtype_size
+        achieved_bw = (bytes_moved / (1024 ** 3)) / 1e-3   # GB/s assuming 1ms
+        kernel_ms = 0.0
+        sram_bytes = sram
+        if TRITON_AVAILABLE and flat.is_cuda and (not force_reference):
+            with torch.no_grad():
+                # third-party Triton kernel returns profiling metadata as the
+                # tail of its return tuple; discard tensors, keep metrics.
+                try:
+                    _, _, _, kernel_ms, sram_bytes, achieved_bw = _triton_forward(flat, gate_w, self.top_k)
+                except Exception:
+                    # Profiling must not break normal forward.
+                    kernel_ms = 0.0
+                    sram_bytes = sram
+                    achieved_bw = achieved_bw
 
         # Dispatch count per expert: histogram of idx flatten.
         dispatch_cnt = torch.bincount(
@@ -660,9 +724,9 @@ class MoERouter(torch.nn.Module):
         bytes_moved = (flat.numel() + gate_w.numel()) * flat.element_size()
         achieved_bw = (bytes_moved / (1024 ** 3)) / 1e-3   # GB/s assuming 1ms
         self.last_profile = RouterProfile(
-            sram_bytes_per_block=sram,
+            sram_bytes_per_block=sram_bytes,
             achieved_bandwidth_gbps=achieved_bw,
-            kernel_ms=1.0,
+            kernel_ms=kernel_ms,
             used_triton=(TRITON_AVAILABLE and flat.is_cuda),
             tokens_per_expert_mean=float(dispatch_cnt.float().mean().item()),
             tokens_per_expert_std=float(dispatch_cnt.float().std().item()),
