@@ -10,11 +10,19 @@ step time.
 
 For a Transformer MoE layer the per-token FLOP count is:
 
-    flops_attn        = 4 * H^2 * S    (qkv + out projection, summed)
-    flops_router      = H * E          (gating gemm)
-    flops_expert_ffn  = 2 * H * F * 2  (gate + up + down, each ~H*F)
-                      = 6 * H * F      (per active token)
-    flops_per_token   = flops_attn / S + flops_router + K * flops_expert_ffn
+    flops_dense        = 2 * T_total * P_dense_layers              (dense attention)
+    flops_sparse       = 2 * T_total * (K/E) * P_expert_layers     (sparse experts)
+    flops_per_step     = flops_dense + flops_sparse
+    
+    MFU = flops_per_step / (world_size * hardware_peak_flops * step_time_seconds)
+
+Where:
+    T_total            = batch_size * seq_len (total tokens)
+    P_dense_layers     = parameter count of all non-expert layers
+    P_expert_layers    = parameter count of a single expert (replicated across E experts)
+    K                  = top-k value
+    E                  = total number of experts
+    hardware_peak_flops = peak FLOPs of the GPU model (e.g., 989e12 for H100 SXM5 BF16)
 
 The factor 3 covers forward + backward + recomputation (standard convention
 used by Chinchilla, PaLM, Llama papers).
@@ -22,8 +30,12 @@ used by Chinchilla, PaLM, Llama papers).
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
+from typing import Optional
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -33,6 +45,80 @@ class MFUResult:
     mfu: float
     step_ms: float
     tokens_per_sec: float
+
+
+def compute_mfu(
+    batch_tokens: int,
+    param_dense: int,
+    param_expert: int,
+    num_experts: int,
+    top_k: int,
+    world_size: int,
+    hardware_peak_tflops: float,
+    step_time_sec: float,
+) -> float:
+    """Compute MoE-aware MFU with sparse activation accounting.
+
+    Parameters
+    ----------
+    batch_tokens : int
+        Total tokens in batch = batch_size * seq_len
+    param_dense : int
+        Parameter count of dense layers (embeddings, attention, norms)
+    param_expert : int
+        Parameter count of a single expert module
+    num_experts : int
+        Total number of experts
+    top_k : int
+        Number of active experts per token
+    world_size : int
+        Number of ranks / GPUs
+    hardware_peak_tflops : float
+        Peak FLOPs of a single GPU (e.g., 989e12 for H100 SXM5 BF16)
+    step_time_sec : float
+        Elapsed time for one training step in seconds
+
+    Returns
+    -------
+    float
+        MFU as a fraction between 0.0 and 1.0
+    """
+    # FLOPs for dense layers: 2 * (fwd + bwd) = 2 * T_total * P_dense
+    flops_dense = 2 * batch_tokens * param_dense
+    
+    # FLOPs for expert layers: only K out of E experts are active per token
+    # Fraction active = K / E. Per active token: 2 * (fwd + bwd) = 2 * param_expert
+    # Total = 2 * T_total * (K/E) * param_expert
+    flops_sparse = 2 * batch_tokens * (top_k / max(num_experts, 1)) * param_expert
+    
+    # Total FLOPs for this step (forward + backward)
+    total_flops = flops_dense + flops_sparse
+    
+    # Achieve capacity across all ranks
+    achieved_tflops = (total_flops / step_time_sec) / 1e12
+    peak_total_tflops = world_size * hardware_peak_tflops
+    
+    mfu = achieved_tflops / max(peak_total_tflops, 1e-9)
+    
+    # Clamp to [0.0, 1.0] for sanity (>1.0 suggests measurement error)
+    mfu_clamped = max(0.0, min(1.0, mfu))
+    
+    # Warn if MFU looks unrealistic
+    if mfu_clamped < 0.30:
+        log.warning(
+            f"MFU = {mfu_clamped:.2%} is very low; check model config/batch size"
+        )
+    if mfu_clamped > 0.85:
+        log.warning(
+            f"MFU = {mfu_clamped:.2%} is suspiciously high; may indicate measurement error"
+        )
+    
+    assert 0.0 <= mfu_clamped <= 1.0, (
+        f"MFU out of range: {mfu_clamped}. "
+        f"Likely inputs: peak_tflops={hardware_peak_tflops}, step_time={step_time_sec}s"
+    )
+    
+    return mfu_clamped
 
 
 def compute_moe_flops(
@@ -45,7 +131,11 @@ def compute_moe_flops(
     batch_tokens: int,
     vocab_size: int = 0,
 ) -> int:
-    """Total FLOPs for a forward+backward step on `batch_tokens` tokens."""
+    """Deprecated: Use compute_mfu() with batch_tokens and param counts directly.
+    
+    This function remains for backward compatibility but is not the recommended
+    MFU calculation path. Prefer compute_mfu() which uses P_dense + P_expert counts.
+    """
     H = hidden_dim
     F = ffn_dim
     E = num_experts

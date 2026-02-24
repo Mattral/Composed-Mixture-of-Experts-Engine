@@ -51,6 +51,7 @@ import json
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -71,6 +72,12 @@ if shutil.which("torchrun") is None:                             # pragma: no co
 # ==========================================================================
 # Bulletproof torchrun session.
 # ==========================================================================
+def _find_free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
 @contextlib.contextmanager
 def _torchrun_session(
     *,
@@ -108,9 +115,16 @@ def _torchrun_session(
     ):
         full_env.pop(var, None)
     full_env.update(env)
+    full_env.setdefault("MASTER_ADDR", "127.0.0.1")
+    full_env.setdefault("MASTER_PORT", str(_find_free_port()))
+    full_env.setdefault("GLOO_SOCKET_IFNAME", "lo")
+    full_env.setdefault("GLOO_WAIT_MODE", "1")
+    full_env.setdefault("GLOO_LOG_LEVEL", "INFO")
+    full_env.setdefault("PYTHONUNBUFFERED", "1")
     full_env.setdefault("OMP_NUM_THREADS", "1")
     full_env.setdefault("MKL_NUM_THREADS", "1")
-    full_env.setdefault("PYTHONUNBUFFERED", "1")
+    full_env.setdefault("TORCHELASTIC_RUN_ID", f"chaos-{int(time.time())}")
+    full_env.setdefault("TORCHELASTIC_USE_AGENT_STORE", "0")
     # Make sure the worker can `import pkg.*`.
     pp = full_env.get("PYTHONPATH", "")
     full_env["PYTHONPATH"] = (str(ROOT) + (os.pathsep + pp if pp else ""))
@@ -139,6 +153,18 @@ def _torchrun_session(
             except Exception:
                 captured = b""
             raise
+        # Persist the torchrun stdout/stderr to the test's CHAOS_WORK_DIR
+        # for post-mortem debugging of rendezvous/connect failures.
+        chaos_dir = full_env.get("CHAOS_WORK_DIR")
+        if chaos_dir:
+            try:
+                p = Path(chaos_dir)
+                p.mkdir(parents=True, exist_ok=True)
+                log_file = p / f"torchrun-{int(time.time())}.log"
+                log_file.write_bytes(captured)
+            except Exception:
+                # Best-effort logging; do not mask the underlying test error.
+                pass
         yield proc, captured.decode("utf-8", errors="replace")
     finally:
         # Strict bulletproof process sanitization.
