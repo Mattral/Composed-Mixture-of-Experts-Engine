@@ -374,4 +374,5 @@ moe-engine/                        ← python package root
 
 ## 12. License
 
-Apache 2.0. See `LICENSE`.
+[Apache 2.0](LICENSE). Use it. Ship it. Tell us when you do we'd love to
+hear how this is being used in the wild.
