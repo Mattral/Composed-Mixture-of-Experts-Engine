@@ -1,0 +1,227 @@
+# ============================================================
+# moe-engine CI — GitHub Actions
+# ============================================================
+# Runs on every push and pull request.
+#
+# Jobs:
+#   lint        – ruff + mypy type-check
+#   unit        – full pytest suite (CPU/Gloo, no GPU)
+#   benchmark   – smoke benchmark (CPU path, verifies no regression)
+#   docker      – smoke docker build (no GPU required)
+#
+# GPU jobs (future): guarded by `runs-on: [self-hosted, gpu]`
+# ============================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main, dev, "release/**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHONUNBUFFERED: "1"
+  OMP_NUM_THREADS: "1"
+  MKL_NUM_THREADS: "1"
+
+# ---------------------------------------------------------------------------
+# Job: lint
+# ---------------------------------------------------------------------------
+jobs:
+  lint:
+    name: Lint (ruff + mypy)
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: moe-engine
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install lint tools
+        run: pip install ruff mypy types-PyYAML
+
+      - name: ruff check
+        run: ruff check pkg/ train.py benchmarks/ --select E,W,F,I --ignore E501,W503
+
+      - name: mypy (pkg only, strict-ish)
+        run: |
+          mypy pkg/ \
+            --ignore-missing-imports \
+            --no-error-summary \
+            --warn-return-any \
+            --warn-unused-ignores \
+            || true   # non-fatal until type coverage improves
+
+# ---------------------------------------------------------------------------
+# Job: unit tests
+# ---------------------------------------------------------------------------
+  unit:
+    name: Unit Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-22.04
+    needs: lint
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11"]
+
+    defaults:
+      run:
+        working-directory: moe-engine
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies (CPU-only torch)
+        run: |
+          pip install --upgrade pip
+          # Install CPU-only PyTorch first (no CUDA overhead in CI)
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+
+      - name: Run unit tests (excluding chaos + GPU)
+        run: |
+          pytest tests/ -v \
+            --ignore=tests/test_chaos.py \
+            -k "not cuda" \
+            --timeout=120 \
+            -p no:warnings \
+            --tb=short \
+            --junitxml=test-results.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-py${{ matrix.python-version }}
+          path: moe-engine/test-results.xml
+
+# ---------------------------------------------------------------------------
+# Job: benchmark smoke (verifies benchmark suite runs end-to-end)
+# ---------------------------------------------------------------------------
+  benchmark:
+    name: Benchmark Smoke (CPU)
+    runs-on: ubuntu-22.04
+    needs: unit
+
+    defaults:
+      run:
+        working-directory: moe-engine
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+
+      - name: Run benchmark suite (CPU, small configs)
+        run: |
+          python benchmarks/run_benchmark.py \
+            --json /tmp/bench_results.json
+          python -c "
+          import json, sys
+          r = json.load(open('/tmp/bench_results.json'))
+          failed = [x for x in r if not x['passed']]
+          if failed:
+              print('FAILED:', [x['name'] for x in failed])
+              sys.exit(1)
+          print(f'All {len(r)} benchmark checks passed')
+          "
+
+      - name: Upload benchmark results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: benchmark-results
+          path: /tmp/bench_results.json
+
+# ---------------------------------------------------------------------------
+# Job: Docker build smoke
+# ---------------------------------------------------------------------------
+  docker:
+    name: Docker Build Smoke
+    runs-on: ubuntu-22.04
+    needs: unit
+    # Only run on pushes to main/dev (not every PR) to save CI minutes
+    if: github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: moe-engine
+          file: moe-engine/deploy/docker/Dockerfile
+          push: false
+          tags: moe-engine:ci-${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+# ---------------------------------------------------------------------------
+# Job: chaos (opt-in, runs on push to main only)
+# ---------------------------------------------------------------------------
+  chaos:
+    name: Chaos Tests (Gloo CPU)
+    runs-on: ubuntu-22.04
+    needs: unit
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    defaults:
+      run:
+        working-directory: moe-engine
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+
+      - name: Run chaos tests (baseline + scenario B; scenario A known flaky)
+        run: |
+          pytest tests/test_chaos.py -v -m chaos \
+            -k "baseline or scenario_b" \
+            --timeout=180 \
+            --tb=short
+        continue-on-error: false
+
+      - name: Run scenario A (allowed to fail; tracked separately)
+        run: |
+          pytest tests/test_chaos.py -v -m chaos \
+            -k "scenario_a" \
+            --timeout=300 \
+            --tb=short
+        continue-on-error: true    # known ~85% pass rate; non-blocking
