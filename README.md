@@ -1,9 +1,11 @@
+<div align="center">
+  
 # `moe-engine` &nbsp;&middot;&nbsp; A Composed Mixture-of-Experts Engine
 
-> **Production-grade sparse MoE training runtime.**
+> **A sparse MoE training runtime.**
 > Designed to keep large-scale pre-training jobs alive end-to-end:
 > sparse Top-K routing in custom Triton, DP+EP distributed training with TP
-> support in core layers and PP work in progress, on PyTorch 2.12+,
+> support in core layers and PP work in progress, 
 > asynchronous sharded checkpointing through a two-tier (NVMe → S3 / MinIO)
 > durable store, and a TorchElastic state-machine that evicts dead ranks,
 > reshards experts, and hot-resumes training without operator intervention.
@@ -11,6 +13,9 @@
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.12%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Triton](https://img.shields.io/badge/Triton-3.x-9333ea.svg)](https://triton-lang.org/)
+
+
+</div>
 
 ---
 
@@ -29,6 +34,32 @@
 12. [License](#12-license)
 
 ---
+
+
+## What's actually built (v0.1 — current)
+
+| Component | Status | Notes |
+|---|---|---|
+| Triton Top-K routing kernel (forward) | ✅ CI-verified | Dynamic-bound masking, 128B aligned loads |
+| Triton routing kernel (backward) | ✅ CI-verified | Through softmax + top-k + renormalization; `atol=1e-5` |
+| DP+EP device mesh | ✅ | `init_device_mesh((dp,ep))` via `parallel_mesh.py` |
+| EP `all_to_all_single` with comm-compute overlap | ✅ | Dedicated CUDA stream + event sync |
+| FSDP2 sharding via `DTensor` | ✅ | `apply_fsdp2()` on dense layers |
+| Async two-tier checkpointing | ✅ | Pinned host staging → NVMe → S3/MinIO, background I/O threads |
+| TorchElastic state machine | ✅ | Evict dead rank → reshard experts → hot-resume |
+| Chaos: storage stall (Scenario B) | ✅ | Writer queue drains in background; step never blocks |
+| Chaos: sudden node kill (Scenario A) | ⚠️ Flaky | Gloo reconnect timeouts at 4-rank restart; ~80-90% pass rate |
+| Tensor Parallelism | ⚠️ Placeholder | Axis reserved in mesh; no ColumnParallel/RowParallel compute yet |
+| Pipeline Parallelism | ⚠️ Placeholder | `pp_size` wired through config; no 1F1B schedule yet |
+| MFU calculation | ⚠️ Placeholder | Formula in code; denominator uses estimated peak, not measured |
+| Telemetry numbers | ⚠️ Illustrative | SRAM bytes and bandwidth are estimated; CUDA-event timing not wired |
+| Multi-node > 100 nodes | ❌ | etcd rendezvous not yet integrated; Gloo/c10d only |
+| NVMe chunked streaming writes | ❌ | Planned for v0.4 |
+
+Full status with blocked items tracked in [`roadmap.md`](roadmap.md).
+
+---
+
 
 ## 1. Why this exists
 
@@ -224,17 +255,21 @@ the most recent async checkpoint.
 
 ### 6.3 Topology selection
 
-`configs/default.yaml::parallelism` must satisfy
-`tensor_parallel · pipeline_parallel · data_parallel · expert_parallel = WORLD_SIZE`.
+`configs/default.yaml::parallelism` must satisfy:
 
-Example for 256 GPUs (32 nodes × 8 H100):
-- `tensor_parallel: 8` &nbsp;(intra-node, NVLink)
-- `pipeline_parallel: 4` &nbsp;(inter-node, IB)
-- `data_parallel: 4` &nbsp;(FSDP2 across remaining axis)
-- `expert_parallel: 2`
+```
+tensor_parallel × pipeline_parallel × data_parallel × expert_parallel = WORLD_SIZE
+```
 
-The mesh constructor enforces this product equality; missized configs fail
-fast at boot rather than mid-step.
+The mesh constructor enforces this at boot. Misconfigured topologies fail immediately, not mid-step.
+
+Example for 256 GPUs (32 nodes × 8):
+```yaml
+tensor_parallel: 8    # intra-node over NVLink
+pipeline_parallel: 4  # inter-node (placeholder; 1F1B not yet scheduled)
+data_parallel: 4      # FSDP2
+expert_parallel: 2
+```
 
 ---
 
@@ -369,6 +404,32 @@ moe-engine/                        ← python package root
 │   └── simulate_node_failure.sh    ← drop N nodes mid-run
 └── train.py                        ← unified training loop
 ```
+
+---
+
+
+## Known issues & honest status
+
+Straight from [`roadmap.md`](roadmap.md):
+
+**Chaos Scenario A (sudden node kill):** Gloo connection timeouts during process group reformation after restart. ~80-90% pass rate locally; flagged flaky in CI. Root cause: `connectFullMesh` failures in containerized environment. Fix tracked as TD-05 — requires either Gloo socket-state logging to diagnose, or switching chaos tests to NCCL backend.
+
+**TP and PP are topology placeholders:** `ColumnParallelLinear` / `RowParallelLinear` not yet implemented; `pp_size` flows through config but no 1F1B schedule exists. The 4D mesh axis math is correct and ready; compute mapping is v0.2 work.
+
+**Telemetry numbers are illustrative:** SRAM bytes per block and achieved bandwidth are estimates. CUDA-event timing is not yet wired to real measurements.
+
+**Scale ceiling:** c10d rendezvous tops out around 100 nodes. etcd integration is v0.4.
+
+---
+
+## Roadmap summary
+
+| Version | Focus | Status |
+|---|---|---|
+| v0.1 | Correctness foundation — Triton bwd kernel, DP+EP, async ckpt, chaos baseline | **Current** |
+| v0.2 | 4D parallelism — ColumnParallel/RowParallel TP, 1F1B PP, real MFU accounting | Planned |
+| v0.3 | Performance — async overlap benchmarks, Nsight integration, BENCHMARKS.md | Planned |
+| v0.4 | Production hardening — etcd rendezvous, NVMe chunked writes, K8s manifests | Planned |
 
 ---
 
