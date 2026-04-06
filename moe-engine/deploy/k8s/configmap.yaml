@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: moe-engine-config
+  namespace: moe-engine
+data:
+  # Override specific training parameters via env var injection.
+  # The full config lives in the Docker image at configs/default.yaml.
+  TORCH_NCCL_ASYNC_ERROR_HANDLING: "1"
+  TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC: "30"
+  TORCH_NCCL_TRACE_BUFFER_SIZE: "1048576"
+  NCCL_DEBUG: "WARN"
+  RDZV_BACKEND: "c10d"

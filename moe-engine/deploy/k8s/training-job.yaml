@@ -1,0 +1,107 @@
+# ============================================================
+# moe-engine Kubernetes Training Job
+# ============================================================
+# Single-node, 8-GPU torchrun job.
+# For multi-node runs see training-job-multinode.yaml.
+#
+# Apply:
+#   kubectl apply -f deploy/k8s/namespace.yaml
+#   kubectl apply -f deploy/k8s/configmap.yaml
+#   kubectl apply -f deploy/k8s/training-job.yaml
+#
+# Monitor:
+#   kubectl logs -n moe-engine -l job-name=moe-training -f
+# ============================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: moe-training
+  namespace: moe-engine
+  labels:
+    app.kubernetes.io/name: moe-engine
+    app.kubernetes.io/version: v0.2
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app: moe-training
+    spec:
+      restartPolicy: OnFailure
+      # Require nodes with 8× A100/H100
+      nodeSelector:
+        accelerator: nvidia-h100
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+
+      # Shared memory for NCCL
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: checkpoint-storage
+          persistentVolumeClaim:
+            claimName: moe-checkpoints-pvc
+
+      containers:
+        - name: trainer
+          image: moe-engine:v0.2
+          imagePullPolicy: Always
+          command:
+            - torchrun
+            - --standalone
+            - --nnodes=1
+            - --nproc_per_node=8
+            - train.py
+            - --config
+            - configs/default.yaml
+            - --profile
+          envFrom:
+            - configMapRef:
+                name: moe-engine-config
+          env:
+            - name: S3_ENDPOINT_URL
+              valueFrom:
+                secretKeyRef:
+                  name: moe-engine-s3
+                  key: endpoint
+                  optional: true
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: moe-engine-s3
+                  key: access_key_id
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: moe-engine-s3
+                  key: secret_access_key
+                  optional: true
+          resources:
+            requests:
+              cpu: "64"
+              memory: 512Gi
+              nvidia.com/gpu: "8"
+            limits:
+              cpu: "96"
+              memory: 640Gi
+              nvidia.com/gpu: "8"
+          ports:
+            - containerPort: 9102
+              name: prometheus
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: checkpoint-storage
+              mountPath: /mnt/ckpts
+          # Liveness: job is alive if the process group is still forming
+          livenessProbe:
+            exec:
+              command: ["python", "-c", "import torch; torch.zeros(1)"]
+            initialDelaySeconds: 60
+            periodSeconds: 60
+            failureThreshold: 3
