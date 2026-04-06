@@ -1,0 +1,8 @@
+# Prometheus scrape config for moe-engine
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: moe_engine
+    static_configs:
+      - targets: ["train-4gpu:9102"]
