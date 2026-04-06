@@ -1,0 +1,13 @@
+# PersistentVolumeClaim for checkpoint storage
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: moe-checkpoints-pvc
+  namespace: moe-engine
+spec:
+  accessModes:
+    - ReadWriteMany   # shared across pods; use EFS/GlusterFS/Longhorn
+  resources:
+    requests:
+      storage: 2Ti
+  storageClassName: efs-sc   # adjust to your cluster's storage class
