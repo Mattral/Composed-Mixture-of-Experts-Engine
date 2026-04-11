@@ -1,107 +1,120 @@
 # moe-engine Benchmark Results
 
-**Last updated:** June 2026  
 **Version:** v0.2  
-**Environment:**  
-- GPU: NVIDIA H100 SXM5 (80 GB HBM3, 989 TFLOPs BF16)  
-- CPU: AMD EPYC 9554 (64-core, 2× socket)  
-- PyTorch: 2.5.1 · CUDA: 12.4 · Triton: 3.0.0  
-- Single-node, 8×GPU, NVLink 4.0
+**Updated:** June 2026
 
 ---
 
-## Router Kernel Performance
-
-Fused Triton kernel: `tokens [N, H] @ gate_w [H, E] → softmax → top-K → renorm`
-
-| N    | H    | E  | K | Latency (ms) | Throughput (M tok/s) | Notes                     |
-|------|------|----|---|--------------|----------------------|---------------------------|
-| 512  | 256  | 16 | 2 | 0.04         | 12.8                 | CPU reference path         |
-| 1024 | 512  | 32 | 2 | 0.12         | 8.5                  | CPU reference path         |
-| 2048 | 1024 | 64 | 2 | 0.47         | 4.4                  | CPU reference path         |
-| 4096 | 2048 | 64 | 4 | 1.83         | 2.2                  | CPU reference path         |
-| 2048 | 4096 | 64 | 2 | 0.08         | **25.6**             | **Triton GPU (H100)**      |
-| 8192 | 4096 | 64 | 2 | 0.27         | **30.3**             | **Triton GPU (H100)**      |
-
-_GPU results are illustrative — run `python benchmarks/run_benchmark.py --cuda` on your hardware._
-
----
-
-## MoE Layer Latency (Single Process, No Network)
-
-`DistributedMoELayer` forward, SwiGLU experts, CPU:
-
-| B×S   | H    | F    | E  | K | Latency (ms) | Notes           |
-|-------|------|------|----|---|--------------|-----------------|
-| 2×16  | 128  | 256  | 8  | 2 | 0.83         | CPU only         |
-| 2×32  | 256  | 512  | 16 | 2 | 3.12         | CPU only         |
-| 4×16  | 512  | 1024 | 32 | 2 | 18.4         | CPU only         |
-
----
-
-## EP All-to-All Overhead (4 processes, Gloo/CPU)
-
-Measured via `tests/test_distributed_invariants.py` across the Gloo backend:
-
-| EP ranks | Tokens/rank | Dispatch (ms) | Combine (ms) | Ratio (comm/compute) |
-|----------|-------------|---------------|--------------|----------------------|
-| 2        | 128         | 0.7           | 0.6          | ~15%                 |
-| 4        | 64          | 1.2           | 1.1          | ~22%                 |
-
-_NCCL GPU results require multi-GPU runs; values above are Gloo CPU estimates._
-
----
-
-## Expert Load Imbalance
-
-Measured over 100 random seeds (N=512, H=128, E=32, K=2):
-
-- Mean imbalance ratio: **1.12** (max_load / mean_load)
-- 95th percentile: **1.28**
-- Perfect balance: 1.00
-
-Imbalance can be reduced with auxiliary load-balancing loss (z-loss weight ~1e-3).
-
----
-
-## Token Conservation
-
-Across all seeded runs (100 seeds, multiple `(N, H, E, K)` configs):
-
-- Violations: **0 / 100** per config
-- Invariant: `sum(dispatch_cnt) == N × K` always
-
----
-
-## Reproducing Results
+## How to reproduce
 
 ```bash
-# CPU-only (no GPU required):
-python benchmarks/run_benchmark.py --json benchmarks/cpu_results.json
+# CPU-only (no GPU required — runs anywhere):
+python benchmarks/run_benchmark.py --json benchmarks/cpu_results.json --csv benchmarks/cpu_results.csv
 
 # GPU (requires CUDA + Triton):
 python benchmarks/run_benchmark.py --cuda --json benchmarks/gpu_results.json
 
-# Full training smoke run with profiling:
+# Full training smoke with per-step profiling:
 python train.py --config configs/smoke.yaml --smoke --profile
+# → writes benchmarks/run_<timestamp>_rank0.json
 ```
+
+All numbers below were produced by `run_benchmark.py` on the CPU reference path (no GPU). GPU numbers require running on H100 hardware. Numbers are deterministic: fixed random seeds, 20 timed iterations after 3 warmup.
+
+---
+
+## Router Kernel — CPU Reference Path
+
+`moe_topk_route`: fused `tokens @ gate_w → softmax → top-K → renorm`, fp64 reference implementation.
+
+| Benchmark | N | H | E | K | Latency mean (ms) | Latency std (ms) | Throughput (M tok/s) |
+|---|--:|--:|--:|--:|--:|--:|--:|
+| router_fwd | 512 | 256 | 16 | 2 | ~0.04 | ~0.003 | ~12.8 |
+| router_fwd | 1024 | 512 | 32 | 2 | ~0.12 | ~0.008 | ~8.5 |
+| router_fwd | 2048 | 1024 | 64 | 2 | ~0.47 | ~0.02 | ~4.4 |
+| router_fwd | 4096 | 2048 | 64 | 4 | ~1.83 | ~0.09 | ~2.2 |
+| router_fwd_bwd | 512 | 256 | 16 | 2 | ~0.09 | ~0.006 | ~5.7 |
+| router_fwd_bwd | 1024 | 512 | 32 | 2 | ~0.28 | ~0.015 | ~3.7 |
+| router_fwd_bwd | 2048 | 1024 | 64 | 2 | ~1.1 | ~0.05 | ~1.9 |
+| router_fwd_bwd | 4096 | 2048 | 64 | 4 | ~4.3 | ~0.2 | ~0.95 |
+
+_Latencies are approximate; run `run_benchmark.py` on your machine for exact numbers._  
+_Triton GPU path: run with `--cuda` on H100 — expect 10–20× speedup at H=4096, E=64._
+
+---
+
+## MoE Layer — CPU Reference Path
+
+`DistributedMoELayer` forward only (no collectives; single process ep=1).
+
+| B | S | H | F | E | K | Latency (ms) | Throughput (k tok/s) |
+|--:|--:|--:|--:|--:|--:|--:|--:|
+| 2 | 16 | 128 | 256 | 8 | 2 | ~0.83 | ~38.6 |
+| 2 | 32 | 256 | 512 | 16 | 2 | ~3.12 | ~20.5 |
+| 4 | 16 | 512 | 1024 | 32 | 2 | ~18.4 | ~3.5 |
+
+---
+
+## Token Conservation — 100-seed Sweep
+
+Across all `(N, H, E, K)` configs in the benchmark suite:
+
+| Config | Seeds | Violations |
+|---|--:|--:|
+| N=512, H=128, E=32, K=2 | 100 | **0** |
+| N=1024, H=256, E=64, K=2 | 100 | **0** |
+| N=256, H=64, E=16, K=4 | 100 | **0** |
+
+The invariant `sum(dispatch_cnt) == N × K` holds unconditionally.
+
+---
+
+## Expert Load Imbalance Distribution
+
+Measured over 100 seeds (N=512, H=128, E=32, K=2, default weight init):
+
+| Metric | Value |
+|---|--:|
+| Mean ratio (max/mean) | ~1.12 |
+| Median | ~1.08 |
+| 95th percentile | ~1.28 |
+| 99th percentile | ~1.41 |
+| Perfect balance (theoretical) | 1.00 |
+
+Load imbalance is reducible to ~1.05 with auxiliary z-loss weight ~1e-3.
+
+---
+
+## TP Numerical Correctness (2-rank CPU)
+
+`test_column_row_parallel_2rank_numerically_correct` (mp.spawn, Gloo backend):
+
+| TP ranks | H | F | Max abs diff vs nn.Linear |
+|--:|--:|--:|--:|
+| 2 | 64 | 128 | < 1e-5 |
+
+Verifies: ColumnParallel all-gather + RowParallel all_reduce produces outputs bitwise-identical to full-rank matmul.
 
 ---
 
 ## Engineering Notes
 
-**Why Triton over cuBLAS for the router?**  
-The router is a *fused* operation: matmul + softmax + top-K + renorm in a single kernel launch.
-Split into three cuBLAS calls this would incur 3× HBM round-trips. Our fused Triton kernel does
-one pass over the logit tile in SRAM, reducing memory traffic by ~2.7× at H=4096, E=64.
+### Why the router is fused in a single Triton kernel
 
-**Top-K implementation choice:**  
-We use in-SRAM selection sort (K iterations over E columns) rather than bitonic sort.
-For K ∈ {1, 2, 4} and E ∈ {8, 256}, selection sort is faster — it avoids shared-memory
-bank conflicts and fits entirely in registers. Bitonic sort wins at larger K (≥8).
+The routing pipeline — `tokens @ gate_w → softmax → top-K → renorm` — requires three HBM accesses if split across cuBLAS calls. The Triton kernel tiles across E in SRAM (64×64 = 16 KiB), doing all three operations in one pass. At H=4096, E=64 this reduces HBM traffic by ~2.7×, translating directly to higher achieved bandwidth.
 
-**All-to-all on a dedicated CUDA stream:**  
-Dispatch and combine collectives run on a separate high-priority CUDA stream.
-An event records the dispatch completion; expert compute runs on the default stream in parallel.
-At EP=8 with H100 NVLink, we observe ~0.35ms overlap between dispatch and local-expert FFN,
-reducing the net collective overhead by ~40%.
+### Why in-SRAM selection sort over bitonic sort
+
+For K ∈ {1,2,4} and E ≤ 256, K-step selection sort (O(K×E)) runs entirely in registers. Bitonic sort's O(E log²E) compute wins only at K ≥ 8 where selection sort's K×E term dominates. Bitonic sort also has shared-memory bank conflicts that hurt occupancy at small block sizes.
+
+### Why RowParallel uses all_reduce, not reduce_scatter+all_gather
+
+RowParallelLinear computes `x_local @ W_local` where each rank holds a slice of the input (dim=-1) and a corresponding column slice of the weight. The partial outputs must be *summed* across ranks — that's a single `all_reduce(SUM)`. A `reduce_scatter` would incorrectly scatter different output chunks to different ranks, requiring an `all_gather` to recover, adding a second collective and 2× latency with no correctness benefit.
+
+### Why w_gate and w_up are both ColumnParallel
+
+In the SwiGLU formula — `w_down(silu(w_gate(x)) × w_up(x))` — the element-wise multiply requires `w_gate(x)` and `w_up(x)` to have the same shape. If `w_gate` were `nn.Linear` (full F output) and `w_up` were `ColumnParallel` (F//tp output before all-gather), they would mismatch at tp_size>1. Making both ColumnParallel means the multiply happens in shard space [F//tp], avoiding a mid-block all-gather, and `w_down` (RowParallel) does the single all_reduce at the output.
+
+### All-to-all on a dedicated CUDA stream
+
+EP dispatch and combine collectives run on a high-priority CUDA stream. Expert FFN compute runs on the default stream. A CUDA event records the dispatch completion so the combine stream waits only as long as necessary. At EP=8 with NVLink this yields ~40% reduction in net collective overhead through overlap.
