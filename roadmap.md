@@ -53,7 +53,7 @@
 | `test_mfu_v02.py` | ✅ | 12 tests covering MFUAccountant, detailed breakdown |
 | `test_elastic_v02.py` | ✅ | 12 tests covering retention, harness, reshard edge cases |
 
-**Test suite total: 96 passed, 1 skipped (GPU-only), ~30s on CPU.**
+**Test suite total: 138 passed, 1 skipped (GPU-only), ~45s on CPU.**
 
 ---
 
