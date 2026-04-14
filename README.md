@@ -26,17 +26,17 @@ This is not a model. It is the runtime that a model runs on.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                        Training Loop                             │
+│                        Training Loop                            │
 │  train.py  ←  load_config  ←  configs/{default,smoke}.yaml      │
 └───────────────────┬─────────────────────────────────────────────┘
                     │
-     ┌──────────────▼──────────────┐
-     │   DistributedMoELayer       │  pkg/distributed/parallel_mesh.py
-     │                             │
-     │  ┌──────────┐ ┌──────────┐  │
-     │  │MoERouter │ │ Experts  │  │  pkg/kernels/moe_router.py
-     │  │(Triton)  │ │(SwiGLU)  │  │
-     │  └────┬─────┘ └────▲─────┘  │
+     ┌──────────────▼───────────────┐
+     │   DistributedMoELayer        │  pkg/distributed/parallel_mesh.py
+     │                              │
+     │  ┌──────────┐ ┌──────────┐   │
+     │  │MoERouter │ │ Experts  │   │  pkg/kernels/moe_router.py
+     │  │(Triton)  │ │(SwiGLU)  │   │
+     │  └────┬─────┘ └────▲─────┘   │
      │       │  EP a2a     │        │
      │  ┌────▼──────────────────┐   │
      │  │  all_to_all dispatch  │   │  dedicated CUDA stream
@@ -44,16 +44,16 @@ This is not a model. It is the runtime that a model runs on.
      │  └───────────────────────┘   │
      └──────────────┬───────────────┘
                     │
-     ┌──────────────▼──────────────┐
-     │   ElasticTrainerHarness     │  pkg/elastic/fault_monitor.py
-     │                             │
-     │  AsyncCheckpointer          │  background I/O threads
-     │    NVMe tier  (fast)        │  pinned host → O_DIRECT write
-     │    S3/MinIO   (durable)     │  atomic rename + remote mirror
-     │                             │
-     │  ClusterStateMachine        │  heartbeat → evict → reshard
-     │    evict dead ranks         │  → reload → resume (no restart)
-     │    reshard expert owners    │
+     ┌──────────────▼───────────────┐
+     │   ElasticTrainerHarness      │  pkg/elastic/fault_monitor.py
+     │                              │
+     │  AsyncCheckpointer           │  background I/O threads
+     │    NVMe tier  (fast)         │  pinned host → O_DIRECT write
+     │    S3/MinIO   (durable)      │  atomic rename + remote mirror
+     │                              │
+     │  ClusterStateMachine         │  heartbeat → evict → reshard
+     │    evict dead ranks          │  → reload → resume (no restart)
+     │    reshard expert owners     │
      └──────────────┬───────────────┘
                     │
      ┌──────────────▼──────────────┐
@@ -84,7 +84,7 @@ This is not a model. It is the runtime that a model runs on.
 | **EP all-to-all (dispatch + combine)** | ✅ CI-verified | Non-blocking `all_to_all_single`; dedicated CUDA stream; event sync |
 | **Compute-comm overlap** | ✅ | Expert FFN runs on default stream while a2a is in flight |
 | **FSDP2 sharding** | ✅ | `fully_shard` along DP axis; per-param DTensor; MixedPrecision |
-| **Tensor Parallelism** | ✅ v0.2 | `ColumnParallelLinear` + `RowParallelLinear`; wired into expert FFN |
+| **Tensor Parallelism** | ✅ v0.2 | `ColumnParallelLinear` + `RowParallelLinear`; both `w_gate` and `w_up` ColumnParallel; `all_reduce` in RowParallel; 2-rank mp.spawn correctness verified |
 | **Sequence Parallelism** | ✅ v0.2 | `scatter/gather_sequence_parallel`; active when `tp_size > 1` |
 | **Pipeline Parallelism** | ✅ v0.2 | `PipelineStage` + 1F1B schedule; warmup/steady/drain phases |
 | **MFU accounting** | ✅ v0.2 | MoE-sparse formula: `(K/E)×P_expert`; `MFUAccountant` streaming tracker |
@@ -114,7 +114,7 @@ This is not a model. It is the runtime that a model runs on.
 | 2048 | 1024 | 64 | 2 | 0.47 ms | 4.4M tok/s |
 | 4096 | 2048 | 64 | 4 | 1.83 ms | 2.2M tok/s |
 
-Run `python benchmarks/run_benchmark.py --cuda` on H100 hardware to measure the Triton GPU path (illustrative H100 numbers in `benchmarks/BENCHMARKS.md`).
+Run `python benchmarks/run_benchmark.py` for CPU numbers (no GPU required) or `--cuda` for GPU. See `RESULTS.md` for the full results table and telemetry sample. GPU numbers in `benchmarks/BENCHMARKS.md` are illustrative pending sustained cluster access.
 
 ### Token Conservation (100-seed sweep)
 Across all `(N, H, E, K)` configurations: **0 violations in 100 seeds**. The invariant `sum(dispatch_cnt) == N×K` holds unconditionally.
@@ -306,7 +306,7 @@ tests/
   test_kernels.py              – router forward/backward tolerance, token conservation
   test_kernels_numerics.py     – 30 parametrised numerical validation tests
   test_routing_quality.py      – load imbalance, z-loss, RouterProfile (v0.2)
-  test_tensor_parallel.py      – ColumnParallel, RowParallel, SP scatter/gather
+  test_tensor_parallel.py      – ColumnParallel, RowParallel, SP scatter/gather; 2-rank mp.spawn correctness
   test_pipeline_parallel.py    – PipelineStage, 1F1B schedule (v0.2)
   test_distributed.py          – single-process MoE layer shape + grad flow
   test_distributed_invariants.py – 4-process Gloo token conservation + NaN checks
@@ -319,7 +319,7 @@ tests/
   test_chaos.py                – torchrun chaos scenarios A (⚠️ flaky) and B (✅)
 ```
 
-`pytest tests/ -v --ignore=tests/test_chaos.py` → **96 passed, 1 skipped** on CPU in ~30s.
+`pytest tests/ -v --ignore=tests/test_chaos.py` → **138 passed, 1 skipped** on CPU in ~45s (includes 2-rank mp.spawn TP test).
 
 ---
 
