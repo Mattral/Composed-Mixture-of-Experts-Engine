@@ -1,105 +1,294 @@
-# Testing
+# Testing Guide
 
-This repository includes unit, numerics, distributed, elastic, and chaos tests.
-The test suite is designed to validate correctness across the full runtime.
+**Version:** v0.2  
+**Last updated:** June 2026
 
-## Run the main test suite
+---
 
-From the `moe-engine` package root:
+## Test Suite at a Glance
 
-```bash
-pytest -q
+```
+pytest tests/ -v --ignore=tests/test_chaos.py
+# → 123 passed, 1 skipped (GPU-only Triton path)  ~45s on CPU
 ```
 
-For a faster local regression set that excludes injected chaos scenarios:
+| File | Tests | What it covers |
+|---|--:|---|
+| `test_kernels.py` | 5 | Router fwd/bwd shapes, token conservation, NaN guard |
+| `test_kernels_numerics.py` | 13 | 30-config Triton vs fp64 reference, `atol=rtol=1e-5` |
+| `test_routing_quality.py` | 12 | Load imbalance math, z-loss invariants, RouterProfile completeness |
+| `test_tensor_parallel.py` | 19 | Column/Row shape + grad + dtype + tp=1 equivalence; **2-rank mp.spawn** |
+| `test_pipeline_parallel.py` | 13 | 1F1B: all grads non-None, shapes match, edge cases |
+| `test_distributed.py` | 4 | MoE layer fwd/bwd shapes, topology construction |
+| `test_distributed_invariants.py` | 2 | 4-process Gloo: token conservation + NaN check |
+| `test_elastic.py` | 7 | NVMe round-trip, chunked writes, async save/load, retention |
+| `test_elastic_v02.py` | 10 | Reshard edge cases (primes, remainders), file-URI tier, harness |
+| `test_mfu.py` | 6 | MFU formula, sparse fraction, backward compat |
+| `test_mfu_v02.py` | 15 | MFUAccountant, MFUResult breakdown, smoothed window |
+| `test_telemetry.py` | 12 | JSON completeness, 100-thread safety, routing fields |
+| `test_smoke_e2e.py` | 2 | Full train.py loop, all v0.2 envelope keys, S3 mock |
+| `test_chaos.py` | 3 | Baseline ✅, Scenario B ✅, Scenario A ⚠️ |
+
+---
+
+## Running Tests
+
+### Full non-chaos suite (recommended daily driver)
 
 ```bash
-pytest -m "not chaos" -v
+cd moe-engine
+pytest tests/ -v --ignore=tests/test_chaos.py
 ```
 
-## Triton numerics validation
+### Specific test files
 
-The dedicated numerics driver validates the router against FP64 reference
-behavior without requiring the full `pytest` harness.
+```bash
+# Router kernel numerics
+pytest tests/test_kernels.py tests/test_kernels_numerics.py -v
+
+# Tensor parallelism (includes 2-rank mp.spawn end-to-end)
+pytest tests/test_tensor_parallel.py -v
+
+# Pipeline parallelism 1F1B schedule
+pytest tests/test_pipeline_parallel.py -v
+
+# Routing quality metrics (v0.2)
+pytest tests/test_routing_quality.py -v
+
+# Elastic fault tolerance
+pytest tests/test_elastic.py tests/test_elastic_v02.py -v
+
+# MFU accounting (v0.2)
+pytest tests/test_mfu.py tests/test_mfu_v02.py -v
+
+# Telemetry thread safety and field completeness (v0.2)
+pytest tests/test_telemetry.py -v
+
+# Smoke end-to-end
+pytest tests/test_smoke_e2e.py -v
+```
+
+### Triton numerics driver (standalone)
+
+Validates Triton kernel against fp64 reference across 30 parametrised
+configurations without the pytest harness:
 
 ```bash
 python tests/run_numerics_tests.py
 ```
 
-This covers forward/backward correctness, token conservation, weight
-normalization, and deterministic behavior.
+Covers forward/backward correctness, token conservation, weight normalisation,
+and deterministic behaviour across `H ∈ {64, 128, 256, 512}`,
+`E ∈ {8, 16, 32, 64, 128, 256}`, `K ∈ {1, 2, 4}`.
 
-## Test coverage areas
-
-### Kernel correctness
-
-- `moe-engine/tests/test_kernels_numerics.py`
-- `moe-engine/tests/test_kernels.py`
-
-These tests validate the Triton/CPU router kernel and its numerical
-properties.
-
-### Distributed semantics
-
-- `moe-engine/tests/test_distributed.py`
-- `moe-engine/tests/test_distributed_invariants.py`
-
-They verify topology construction, MoE layer forward/backward shapes,
-expert-to-rank mapping, token conservation, and gradient sanity.
-
-### Elastic checkpointing
-
-- `moe-engine/tests/test_elastic.py`
-
-These tests cover async checkpoint save/load, local NVMe round-trip,
-retention pruning, and zero-divergence resharding behavior.
-
-### End-to-end smoke validation
-
-- `moe-engine/tests/test_smoke_e2e.py`
-
-This suite validates full-stack behavior, including checkpoint tiers,
-telemetry output, and S3/MinIO mirror paths.
-
-### Chaos resilience
-
-- `moe-engine/tests/test_chaos.py`
-
-Chaos tests are gated with `@pytest.mark.chaos` and validate crash recovery,
-storage stall handling, and TorchElastic re-rendezvous.
-
-## Running chaos tests locally
-
-The repo supports local multi-rank chaos regression via Gloo.
-Use the loopback interface when running chaos tests on a single machine:
+### Benchmark suite
 
 ```bash
-GLOO_SOCKET_IFNAME=lo pytest -m chaos -v -k "baseline or scenario_b"
+# CPU sweep (no GPU required)
+python benchmarks/run_benchmark.py --json /tmp/bench.json
+
+# GPU sweep (requires CUDA + Triton)
+python benchmarks/run_benchmark.py --cuda --json /tmp/bench_gpu.json
+
+# Token conservation sweep only
+python benchmarks/run_benchmark.py --json /dev/null
 ```
 
-## Smoke and minimal test paths
+---
 
-A lightweight validation path is provided by `configs/smoke.yaml` and the
-`--smoke` flag in `train.py`.
+## Chaos Tests
+
+Chaos tests require `torchrun` on PATH and Gloo installed.
+Use the loopback network interface on single machines.
 
 ```bash
-python train.py --config configs/smoke.yaml --smoke
+# Baseline (no fault, warm path — always passes)
+GLOO_SOCKET_IFNAME=lo pytest tests/test_chaos.py -v -k "baseline" -m chaos
+
+# Scenario B — storage stall (10s injected I/O latency — always passes)
+GLOO_SOCKET_IFNAME=lo pytest tests/test_chaos.py -v -k "scenario_b" -m chaos
+
+# Scenario A — node kill + recovery (~85% pass rate; known Gloo race)
+CHAOS_FAULT_TOLERANT=1 GLOO_SOCKET_IFNAME=lo \
+  pytest tests/test_chaos.py -v -k "scenario_a" -m chaos
 ```
 
-This is the recommended first step for new contributors and CI smoke checks.
+**Scenario A known issue:** `connectFullMesh` in the Gloo backend races with
+socket cleanup after SIGKILL. The root cause and mitigation are documented in
+`roadmap.md §Known Deficiencies`. Do not mark Scenario A as blocking in CI —
+the `.github/workflows/ci.yml` runs it with `continue-on-error: true`.
 
-## Test development guidance
+---
 
-- Add or update tests for any behavioral change.
-- Prefer focused tests that fail before the fix and pass afterward.
-- Document the verification command in PR descriptions.
-- Keep the change set minimal and linked to the relevant test category.
+## Test Categories Explained
 
-## Notes
+### Kernel correctness (`test_kernels.py`, `test_kernels_numerics.py`)
 
-- The CPU-only and single-rank paths are intentionally supported so the full
-  non-chaos suite can run on developer laptops.
-- Use `pytest -m "not chaos"` for fast validation when chaos injection is not
-  required.
-- The `tests/run_numerics_tests.py` script is useful when working on the
-  router implementation and Triton kernel correctness.
+Every router invariant is tested independently so failures pinpoint the exact
+broken property:
+
+- **Token conservation:** `sum(dispatch_cnt) == N × K` across 100 random seeds
+- **Index validity:** `idx ∈ [0, E)`, no NaN, no -1
+- **Weight normalisation:** `w.sum(dim=-1) ≈ 1.0` (atol=1e-5)
+- **Backward tolerance:** Triton grad matches fp64 reference at atol=rtol=1e-5
+- **RouterProfile completeness:** all fields populated after every forward
+
+### Routing quality metrics (`test_routing_quality.py`) — v0.2
+
+Tests `expert_load_imbalance` and `router_z_loss` as independently testable
+functions, not just as attributes on `RouterProfile`. Key invariants:
+
+- `_compute_load_imbalance` — perfect balance → 1.0; all-to-one → E; zero → 1.0
+- `_compute_router_z_loss` — always ≥ 0; zero logits → `log(E)²`; large logits > small
+- `RouterProfile` — always populated after forward; v0.2 fields present
+- Uniform gate init → lower imbalance than sharp gate init (5-seed parametrised)
+
+### Tensor parallelism (`test_tensor_parallel.py`) — v0.2 upgraded
+
+The most important test in this file is the **2-rank mp.spawn correctness test**
+(`test_column_row_parallel_2rank_numerically_correct`). It:
+
+1. Spawns 2 real Gloo CPU workers via `mp.spawn`.
+2. Builds `ColumnParallelLinear(H→F)` + `RowParallelLinear(F→H)`.
+3. Reconstructs full weights via `all_gather` on every rank.
+4. Runs both the sharded path (Column+Row with real collectives) and the
+   reference single-rank matmul.
+5. Asserts max absolute difference < 1e-5.
+
+This is the definitive proof the collectives are correct end-to-end.
+Single-process tests at tp_size=1 alone are insufficient — they exercise
+the identity path only.
+
+Additional structural tests verify:
+- `RowParallelLinear.forward` uses `all_reduce`, not `reduce_scatter_tensor`
+  (source-inspection test to prevent regression of the v0.1 collective bug)
+- `_SwiGLUExpert.w_gate` is `ColumnParallelLinear`, not `nn.Linear`
+  (sharding consistency across the SwiGLU multiply)
+
+### Pipeline parallelism (`test_pipeline_parallel.py`) — v0.2
+
+`PipelineStage.run_1f1b` is tested exhaustively in single-process mode:
+
+- Every micro-batch receives a non-None gradient
+- Gradient shapes match corresponding input shapes
+- `len(grads) == len(micro_batches)` across all `(num_stages, num_micro_batches)` pairs
+- Edge cases: `m=1, p=1`; `m < p`; empty list returns `[]`
+- Module is actually invoked during forward steps (not passthrough)
+- `num_stages` and `num_stages` are int (not float) — type safety
+
+**Multi-process PP activation passing is not tested here** — that requires
+`dist.send`/`dist.recv` wiring which is the v0.3 milestone.
+
+### Elastic fault tolerance (`test_elastic.py`, `test_elastic_v02.py`)
+
+Core invariants exercised:
+
+- `LocalNVMeAdapter` round-trip: write 256 MB chunks, O_DIRECT attempt, atomic rename
+- `AsyncCheckpointer` save → load cycle with both tiers
+- Retention pruning: only the latest N checkpoints survive; the most recent always survives
+- Metadata `.meta.json`: step, rank, ts, hostname all present on both tiers
+- Reshard plan completeness: all experts covered, no duplicates, across 7 topology
+  configs including primes and non-divisible remainders
+- `_largest_divisor_le`: 12 edge cases (primes, power-of-two, k > n, k = 1)
+- `ClusterStateMachine` phase transitions: RUNNING → DRAINING → RECOVERING → RESUMED
+- `install_signal_handlers` is a no-op (not a raise) when called from a non-main thread
+
+### MFU accounting (`test_mfu.py`, `test_mfu_v02.py`) — v0.2 extended
+
+- `compute_mfu_detailed` returns `MFUResult` with `flops_dense` and `flops_sparse`
+- Activation recompute multiplier: recompute path has exactly 1.5× the FLOPs of
+  the non-recompute path (3× vs 2× multiplier)
+- `K/E` sparse fraction: k=4 has exactly 4× sparse FLOPs vs k=1 (parametrised)
+- `MFUAccountant.smoothed_mfu`: only reflects last `smoothing_window` steps
+- `MFUAccountant.summary_str()`: contains `tok/s`, `step=`, `MFU=`
+
+### Telemetry (`test_telemetry.py`) — v0.2
+
+- **Thread safety:** 100 concurrent `emit()` calls produce 100 uncorrupted JSONL
+  lines with no duplicate step numbers
+- **Field completeness:** all 12 keys in `REQUIRED_KEYS` present in every record
+- **Routing fields round-trip:** `expert_load_imbalance` and `router_z_loss`
+  written and read back verbatim (parametrised over 3 value pairs)
+- **Non-rank-0 suppresses TensorBoard:** `rank=1` must not create TB event files
+- **`close()` idempotence:** second call must not raise
+
+### Smoke end-to-end (`test_smoke_e2e.py`)
+
+Runs a complete `train.py` loop (with `--smoke`) and asserts:
+- All REQUIRED_KEYS present in JSONL (including v0.2 `routing` section)
+- `routing.expert_load_imbalance` and `routing.router_z_loss` present when routing
+  section is non-empty
+- Checkpoint shard written to local tier
+- S3 upload attempted (mocked via `moto`)
+
+---
+
+## Writing New Tests
+
+### Invariant-first pattern
+
+```python
+def test_my_new_invariant():
+    """State the mathematical invariant in the docstring."""
+    # Arrange: minimal setup
+    layer = MyLayer(H=64, E=16)
+    x = torch.randn(32, 64)
+
+    # Act
+    out, metadata = layer(x)
+
+    # Assert: one specific invariant per test function
+    assert out.shape == (32, 64), f"Expected [32,64], got {out.shape}"
+```
+
+### Multi-process pattern (for distributed tests)
+
+```python
+def _worker(rank, world_size, result_queue):
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    # ... exercise the distributed primitive ...
+    result_queue.put((rank, result_value))
+    dist.destroy_process_group()
+
+def test_my_distributed_primitive():
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    procs = [ctx.Process(target=_worker, args=(r, 2, q)) for r in range(2)]
+    for p in procs: p.start()
+    for p in procs: p.join(timeout=60); assert p.exitcode == 0
+    results = {q.get_nowait() for _ in range(2)}
+    # assert on results
+```
+
+### Pytest markers
+
+```python
+@pytest.mark.chaos          # torchrun-based; only runs with -m chaos
+@pytest.mark.skipif(        # GPU-only
+    not torch.cuda.is_available(), reason="CUDA required"
+)
+```
+
+### What every new test must have
+
+1. A docstring explaining the invariant being tested, not just the mechanism.
+2. An assertion message that explains what went wrong and what was expected.
+3. A `pytest.mark` if it is slow, GPU-only, or chaos-dependent.
+4. A corresponding entry in this table and in `CONTRIBUTING.md` if it adds a new coverage area.
+
+---
+
+## CI Integration
+
+The GitHub Actions workflow (`.github/workflows/ci.yml`) runs:
+
+| Job | Trigger | What runs |
+|---|---|---|
+| `lint` | every push + PR | ruff + mypy |
+| `unit` | every push + PR | full suite on Python 3.10 and 3.11 |
+| `benchmark` | every push + PR | CPU benchmark smoke (verifies no regression) |
+| `docker` | push to main/dev | Docker build smoke |
+| `chaos` | push to main only | Scenario B (blocking) + Scenario A (non-blocking) |
+
+Scenario A failures in CI are expected and non-blocking. Any other failure is
+a blocker that must be resolved before merge.
