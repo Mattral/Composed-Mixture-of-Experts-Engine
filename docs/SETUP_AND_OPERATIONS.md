@@ -1,184 +1,339 @@
 # Setup and Operations
 
-This document describes how to install, configure, and operate moe-engine
-using the code and scripts that exist in this repository.
+**Version:** v0.2  
+**Last updated:** June 2026
+
+---
 
 ## Install
 
-1. Clone the project and enter the package root:
-   ```bash
-   git clone <this-repo> moe-engine
-   cd moe-engine
-   ```
-
-2. Create a Python environment:
-   ```bash
-   python -m venv .venv
-   source .venv/bin/activate
-   ```
-
-3. Install runtime dependencies:
-   ```bash
-   pip install -U pip wheel
-   pip install -r requirements.txt
-   ```
-
-4. Optional components:
-   - GPU-only Triton kernels: `pip install triton==3.*`
-   - S3/MinIO remote checkpoint mirror: `pip install boto3 botocore`
-
-5. Verify the install:
-   ```bash
-   python -c "import torch, triton; print(torch.__version__, triton.__version__)"
-   ```
-
-## Configuration
-
-`moe-engine/train.py` reads YAML config files via `pkg.utils.config.load_config`.
-The repository ships two canonical configs:
-
-- `configs/default.yaml`: hyperscale default settings.
-- `configs/smoke.yaml`: minimal dimensions for laptop/CI smoke runs.
-
-Important config sections:
-
-- `model`: hidden_dim, num_layers, num_experts, top_k, ffn_dim, vocab_size,
-  sequence_length, dtype.
-- `training`: micro_batch_size, learning_rate, weight_decay, max_steps,
-  log_interval, ckpt_interval, warmup_steps.
-- `parallelism`: data_parallel, expert_parallel, tensor_parallel,
-  pipeline_parallel.
-- `checkpoint`: local_dir, remote_uri, async_workers, retention.
-- `elastic`: min_nodes, max_nodes, rdzv_backend, rdzv_endpoint,
-  health_check_interval_s, drop_grace_period_s.
-- `telemetry`: log_dir, tensorboard_dir, json_path, mfu_target,
-  hardware_peak_tflops.
-
-### Parallelism constraints
-
-The runtime enforces that the topology product corresponds to `WORLD_SIZE`.
-Example from `configs/default.yaml`:
-
-- `data_parallel: 8`
-- `expert_parallel: 8`
-- `tensor_parallel: 1`
-- `pipeline_parallel: 1`
-
-For a run with 64 total ranks, these axes must multiply to the launched world
-size.
-
-## Local development and regression
-
-### Run the test suite
-
-From `moe-engine`:
-
 ```bash
-pytest -m "not chaos" -v
+git clone https://github.com/your-org/moe-engine
+cd moe-engine/moe-engine
+
+# Standard install (editable, with dev tools)
+pip install -e ".[dev]"
+
+# With Prometheus monitoring support
+pip install -e ".[all]"
 ```
 
-This runs the primary non-chaos regression tests on a laptop or CI worker.
-
-### Smoke end-to-end run
-
-A minimal local verification uses the smoke config and the `--smoke` flag:
+**Manual install from requirements.txt:**
 
 ```bash
+pip install -r requirements.txt
+# GPU kernel (optional — CPU fallback always available)
+pip install triton>=3.0.0
+# Remote checkpoint tier (optional)
+pip install boto3 botocore
+# Prometheus metrics endpoint (optional)
+pip install prometheus-client
+```
+
+**Verify install:**
+
+```bash
+python -c "import torch, pkg.kernels.moe_router; print('OK', torch.__version__)"
+```
+
+---
+
+## Configuration Reference
+
+Training is configured via YAML. Two canonical configs ship with the repo:
+
+| Config | Purpose |
+|---|---|
+| `configs/smoke.yaml` | CPU-only 2-step smoke test (hidden=32, layers=2, experts=4) |
+| `configs/default.yaml` | H100-scale production config (hidden=4096, experts=64, dtype=bfloat16) |
+
+### All configuration keys
+
+```yaml
+model:
+  hidden_dim: 4096          # transformer hidden dimension H
+  num_layers: 32            # transformer block count
+  num_experts: 64           # total expert count E
+  top_k: 2                  # active experts per token K
+  ffn_dim: 14336            # expert intermediate dimension F
+  vocab_size: 128256        # vocabulary size
+  sequence_length: 4096     # tokens per sample
+  capacity_factor: 1.25     # expert buffer capacity (overflow tokens dropped)
+  dtype: bfloat16           # float32 | bfloat16 | float16
+
+training:
+  global_batch_size: 4096   # total tokens per step across all ranks
+  micro_batch_size: 2       # per-rank batch size before gradient accumulation
+  gradient_accumulation_steps: 4   # [v0.2] accumulate before optimizer step
+  learning_rate: 3.0e-4
+  weight_decay: 0.1
+  grad_clip: 1.0
+  max_steps: 100000
+  log_interval: 10          # emit telemetry every N steps
+  ckpt_interval: 500        # save checkpoint every N steps
+  warmup_steps: 2000        # [v0.2] linear LR warmup steps
+
+parallelism:
+  data_parallel: 8          # FSDP2 sharding axis
+  expert_parallel: 8        # EP all-to-all axis
+  tensor_parallel: 1        # ColumnParallel / RowParallel axis
+  pipeline_parallel: 1      # 1F1B pipeline stage count
+
+checkpoint:
+  local_dir: /mnt/nvme/ckpts      # NVMe staging directory
+  remote_uri: s3://bucket/path    # s3:// or file:// remote tier
+  async_workers: 4               # background I/O thread count
+  retention: 10                  # number of checkpoints to retain
+
+elastic:
+  min_nodes: 4
+  max_nodes: 64
+  rdzv_backend: c10d            # c10d (≤100 nodes) | etcd (>100 nodes)
+  rdzv_endpoint: head-node:29500
+  health_check_interval_s: 5
+  drop_grace_period_s: 30
+
+telemetry:
+  log_dir: /var/log/moe-engine
+  tensorboard_dir: /var/log/moe-engine/tb
+  json_path: /var/log/moe-engine/step.jsonl
+  hardware_peak_tflops: 989.0   # H100 SXM5 BF16; adjust to your hardware
+  mfu_target: 0.55
+```
+
+### Parallelism constraint
+
+The product of all parallelism axes must equal `WORLD_SIZE`:
+
+```
+dp_size × tp_size × pp_size × ep_size == WORLD_SIZE
+```
+
+`train.py` automatically clamps axes to valid values if the product exceeds
+world size (useful when running at reduced scale for testing).
+
+---
+
+## Running the Smoke Test (CPU, no GPU required)
+
+```bash
+cd moe-engine
 python train.py --config configs/smoke.yaml --smoke
 ```
 
-This exercises the full runtime path in a tiny model and training loop.
+Expected output: 2 training steps, structured JSON telemetry at
+`/tmp/moe-engine/logs/step.jsonl` (or as configured), checkpoint at
+`/tmp/moe-engine/ckpts/`.
 
-### CPU/Gloo regression mode
+With benchmark profiling:
 
-The repository is designed to run cleanly on a single rank without GPUs.
-Use `GLOO_SOCKET_IFNAME=lo` to exercise local multi-rank Gloo-based chaos tests.
+```bash
+python train.py --config configs/smoke.yaml --smoke --profile
+# Writes: benchmarks/run_<timestamp>_rank0.json
+```
 
-## Multi-GPU / cluster operation
+---
 
-### Single-node multi-GPU launch
+## Running the Full Test Suite
 
-Example for an 8-GPU node:
+```bash
+# Full suite (CPU, no GPU needed), ~45s:
+pytest tests/ -v --ignore=tests/test_chaos.py
+
+# Single test file:
+pytest tests/test_tensor_parallel.py -v
+
+# Numerics-only (Triton vs fp64 reference, 30 configs):
+python tests/run_numerics_tests.py
+
+# Benchmark suite (CPU sweep):
+python benchmarks/run_benchmark.py --json /tmp/bench.json
+
+# Benchmark suite (GPU sweep, requires CUDA + Triton):
+python benchmarks/run_benchmark.py --cuda --json /tmp/bench_gpu.json
+```
+
+---
+
+## Single-Node Multi-GPU Launch
 
 ```bash
 torchrun \
   --standalone \
   --nnodes=1 \
   --nproc_per_node=8 \
-  train.py --config configs/default.yaml
+  train.py --config configs/default.yaml --profile
 ```
 
-### Elastic launch helper
-
-`moe-engine/scripts/launch.sh` wraps `torchrun` and is designed for
-multi-node clusters.
-
-Required environment variables:
-
-- `NUM_NODES`
-- `GPUS_PER_NODE`
-- `RDZV_ENDPOINT`
-- `RDZV_ID`
-- `MAX_RESTARTS`
-- `CONFIG`
-
-Example:
+With Prometheus metrics:
 
 ```bash
-NUM_NODES=32 \
+torchrun --standalone --nproc_per_node=8 \
+  train.py --config configs/default.yaml --prometheus-port 9102
+# → /metrics available at http://localhost:9102/metrics
+```
+
+---
+
+## Multi-Node Launch (TorchElastic)
+
+Use `scripts/launch.sh` which wraps `torchrun`:
+
+```bash
+NUM_NODES=16 \
 GPUS_PER_NODE=8 \
 RDZV_ENDPOINT=head-node:29500 \
-RUN_ID=moe-run-001 \
+RDZV_ID=moe-run-001 \
+MAX_RESTARTS=10 \
+CONFIG=configs/default.yaml \
+S3_ENDPOINT_URL=http://minio.internal:9000 \
+AWS_ACCESS_KEY_ID=<key> \
+AWS_SECRET_ACCESS_KEY=<secret> \
 bash scripts/launch.sh
 ```
 
-The launcher uses `--rdzv_backend=c10d` and `--rdzv_conf=timeout=900`.
+For >100 nodes, set `elastic.rdzv_backend: etcd` in your config and point
+`RDZV_ENDPOINT` at your etcd cluster. `ElasticTrainerHarness` selects the
+backend automatically based on this config value.
 
-## Elastic checkpointing and recovery
+---
 
-`moe-engine/pkg/elastic/fault_monitor.py` implements the elastic harness.
-Runtime behavior includes:
+## Docker
 
-- `AsyncCheckpointer` streaming sharded checkpoints from local NVMe to remote
-  storage.
-- retention pruning controlled by `checkpoint.retention`.
-- optional `S3Adapter` mirror support for `remote_uri` values beginning with
-  `s3://`.
-- local file fallback when `remote_uri` begins with `file://`.
+```bash
+# Build image
+docker build -f deploy/docker/Dockerfile -t moe-engine:v0.2 .
 
-The elastic harness can resume training from the latest available checkpoint.
-This behavior is exercised by `moe-engine/tests/test_elastic.py` and
-`moe-engine/tests/test_smoke_e2e.py`.
+# CPU smoke test (no GPU required)
+docker compose -f deploy/docker/docker-compose.yml run --rm smoke
 
-## Chaos and failure simulation
+# 4-GPU training run
+docker compose -f deploy/docker/docker-compose.yml run --rm train-4gpu
 
-`moe-engine/scripts/simulate_node_failure.sh` is a helper for chaos testing.
-It can SIGKILL local ranks or delete selected Kubernetes pods to verify that
-surviving workers re-rendezvous and recover.
+# 8-GPU training run with monitoring stack
+docker compose -f deploy/docker/docker-compose.yml --profile monitoring up -d train-8gpu prometheus grafana
 
-Usage examples:
+# Run test suite inside container
+docker compose -f deploy/docker/docker-compose.yml run --rm test
+```
 
-- Kill random pods:
-  ```bash
-  ./scripts/simulate_node_failure.sh
-  ```
-- Kill specific ranks locally:
-  ```bash
-  ./scripts/simulate_node_failure.sh -r 4,5,6,7
-  ```
+---
 
-## Monitoring and telemetry
+## Kubernetes
 
-Training emits structured telemetry into the directories defined by
-`telemetry.tensorboard_dir` and `telemetry.json_path`.
+```bash
+# Create namespace + PVC + config
+kubectl apply -f deploy/k8s/namespace.yaml
+kubectl apply -f deploy/k8s/pvc.yaml
+kubectl apply -f deploy/k8s/configmap.yaml
 
-- JSON step logs are written to `json_path`.
-- TensorBoard summaries are written to `tensorboard_dir`.
+# Single-node 8-GPU job
+kubectl apply -f deploy/k8s/training-job.yaml
+kubectl logs -n moe-engine -l job-name=moe-training -f
 
-## Operational notes
+# Multi-node (16 × 8GPU = 128 GPUs total) with etcd rendezvous
+kubectl apply -f deploy/k8s/training-job-multinode.yaml
 
-- Use environment variables rather than hardcoding secrets in configs.
-- If using S3/MinIO, set `S3_ENDPOINT_URL` and credential environment variables.
-- The `RDZV_ENDPOINT` may be an etcd service or a head node address.
-- For production, prefer private networking and limited access to the object
-  store and rendezvous endpoints.
+# Monitor (Prometheus scrapes :9102/metrics from training pods)
+kubectl port-forward -n moe-engine svc/prometheus 9090:9090
+```
+
+For S3 credentials, create a secret before applying jobs:
+
+```bash
+kubectl create secret generic moe-engine-s3 -n moe-engine \
+  --from-literal=endpoint=http://minio.internal:9000 \
+  --from-literal=access_key_id=<key> \
+  --from-literal=secret_access_key=<secret>
+```
+
+---
+
+## Checkpointing and Recovery
+
+Checkpoints are written asynchronously in the background. The training thread
+blocks only for the D2H copy of the parameter shard. The background thread:
+
+1. Writes 256 MB chunks to `checkpoint.local_dir` (NVMe) with `O_DIRECT`.
+2. Atomically renames `tmp_<step>_<rank>` → `step=<N>/rank=<R>.pt`.
+3. Writes `.meta.json` with step, rank, timestamp, hostname.
+4. Copies shard to `checkpoint.remote_uri` (S3 or file://).
+5. Prunes checkpoints older than `retention` steps.
+
+On resume, `ElasticTrainerHarness` discovers the latest step via
+`AsyncCheckpointer.latest_step()` and loads before entering the training loop.
+
+If a remote URI is not configured, training continues with local-only
+checkpointing (no S3 upload). Loss of the node means loss of the checkpoint.
+
+---
+
+## Chaos and Failure Testing
+
+```bash
+# Baseline (no fault, verifies clean recovery path):
+GLOO_SOCKET_IFNAME=lo pytest tests/test_chaos.py -v -k "baseline"
+
+# Scenario B — storage stall (10s injected I/O latency, ✅ passes reliably):
+GLOO_SOCKET_IFNAME=lo pytest tests/test_chaos.py -v -k "scenario_b"
+
+# Scenario A — node kill + recovery (⚠️ ~85% pass rate; Gloo race):
+CHAOS_FAULT_TOLERANT=1 GLOO_SOCKET_IFNAME=lo \
+  pytest tests/test_chaos.py -v -k "scenario_a"
+
+# Manual failure injection (SIGKILL a rank):
+bash scripts/simulate_node_failure.sh -r 2,3
+```
+
+---
+
+## Observability
+
+### Telemetry JSON
+
+Each step emits one JSONL record to `telemetry.json_path`. Key fields:
+
+| Field | Description |
+|---|---|
+| `mfu` | Model FLOPs Utilization (sparse-aware, 0–1) |
+| `tokens_per_sec` | Training throughput |
+| `collective.all_to_all_dispatch_ms` | EP dispatch latency (CUDA event) |
+| `collective.all_to_all_combine_ms` | EP combine latency (CUDA event) |
+| `memory.peak_allocated_gb` | Peak CUDA memory (torch.cuda.memory_stats) |
+| `routing.expert_load_imbalance` | max/mean dispatch ratio (1.0 = perfect) |
+| `routing.router_z_loss` | Auxiliary regularisation signal |
+| `infra.async_ckpt_commit_ms` | Checkpoint background commit time |
+| `infra.lr` | Current learning rate (v0.2: cosine schedule) |
+
+### TensorBoard
+
+```bash
+tensorboard --logdir <telemetry.tensorboard_dir>
+```
+
+All numeric sub-fields are emitted as scalar summaries under their section
+prefix (e.g., `collective/all_to_all_dispatch_ms`).
+
+### Prometheus
+
+Start training with `--prometheus-port 9102`. Scrape at `http://host:9102/metrics`.
+Eight gauges: loss, mfu, tokens/sec, dispatch_ms, combine_ms, peak_memory_gb,
+expert_load_imbalance, router_z_loss.
+
+---
+
+## Operational Notes
+
+- Set `TORCH_NCCL_ASYNC_ERROR_HANDLING=1` and `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=30`
+  in all cluster environments. The Docker image and K8s ConfigMap set these
+  automatically.
+- Do not store S3 credentials in config YAML. Use environment variables or
+  Kubernetes secrets only.
+- For `tp_size > 1`, ensure `sequence_length % tp_size == 0` (assertion in
+  `scatter_to_sequence_parallel`).
+- Monitor `routing.expert_load_imbalance` per step. Values above 1.5 sustained
+  over many steps indicate routing collapse; add a z-loss auxiliary term
+  (weight ~1e-3) to your loss function.
+- `hardware_peak_tflops` in the telemetry config is used for MFU calculation.
+  Incorrect values produce misleading MFU numbers. See GPU spec sheets:
+  H100 SXM5 BF16 = 989 TFLOPS; A100 SXM4 BF16 = 312 TFLOPS.
