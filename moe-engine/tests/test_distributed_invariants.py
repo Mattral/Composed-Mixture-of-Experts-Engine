@@ -1,121 +1,213 @@
 """
-Distributed invariants tests (Week 2)
+tests/test_distributed_invariants.py
+=====================================
 
-- test_token_conservation_distributed: launches a 4-process Gloo world
-  runs DistributedMoELayer across ranks and verifies total dispatched tokens == N*K
+Distributed invariant tests — 4-process Gloo world (CPU-only, no GPU).
 
-- test_distributed_backward_no_nan: runs a forward/backward and ensures
-  no NaN gradients and that gradient norm is finite on all ranks.
+Two invariants verified across real multi-process collective execution:
 
-These tests are designed to run on CPU via Gloo so CI can validate them.
+  1. **Token conservation** — across a 4-rank EP world, the total dispatched
+     token count aggregated via all_reduce equals N_local × K × world_size
+     exactly.  No token is dropped, duplicated, or miscounted by the routing
+     or dispatch path.
+
+  2. **No NaN gradients** — a forward → loss → backward pass through
+     DistributedMoELayer produces finite gradients on every named parameter
+     across every rank.  This catches silent NaN propagation through the
+     SwiGLU expert or the combine weighted-sum.
+
+Design notes
+------------
+* Both tests share the same `_run_worker` function, which avoids duplicating
+  the process-group bootstrap and layer construction.
+* Ports are allocated dynamically (passed as arguments) to eliminate the
+  fixed-port collision that caused flakiness in earlier CI runs.
+* The `_SimpleMesh` shim has been replaced by a real `build_topology` call
+  so the test exercises the same code path as production.
+* Workers communicate results back to the test process via a shared
+  `mp.Queue` so assertion failures surface cleanly rather than as
+  mysterious non-zero exit codes.
 """
 
+from __future__ import annotations
+
 import os
-import time
+import socket
+from typing import Optional
+
+import pytest
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from pkg.distributed.parallel_mesh import DistributedMoELayer, ParallelTopology
+
+from pkg.distributed.parallel_mesh import (
+    DistributedMoELayer,
+    ParallelTopology,
+    build_topology,
+)
 
 
-def _run_worker(rank, world_size, port):
-    os.environ['MASTER_ADDR'] = '127.0.0.1'
-    os.environ['MASTER_PORT'] = str(port)
-    dist.init_process_group(backend='gloo', rank=rank, world_size=world_size)
-
-    # Build EP process-groups so all_to_all helpers can target the EP axis.
-    ep_size = 2
-    dp_size = world_size // ep_size
-
-    # Create EP groups: ranks with same ep_rank are grouped together
-    ep_groups = []
-    for ep_idx in range(ep_size):
-        ranks = [r for r in range(world_size) if (r % ep_size) == ep_idx]
-        ep_groups.append(dist.new_group(ranks=ranks))
-
-    class _SimpleMesh:
-        def __init__(self, groups, ep_size, rank):
-            self._groups = groups
-            self._ep_size = ep_size
-            self._rank = rank
-
-        def __getitem__(self, key):
-            if key == 'ep':
-                return self
-            raise KeyError(key)
-
-        def get_group(self):
-            return self._groups[self._rank % self._ep_size]
-
-    mesh = _SimpleMesh(ep_groups, ep_size, rank)
-
-    topo = ParallelTopology(world_size=world_size, rank=rank, dp_size=dp_size, ep_size=ep_size, mesh=mesh, device=torch.device('cpu'))
-
-    # Small layer
-    H = 64
-    F = 128
-    E = 8
-    K = 2
-    B = 2
-    S = 4
-
-    layer = DistributedMoELayer(hidden_dim=H, ffn_dim=F, num_experts=E, top_k=K, topology=topo, dtype=torch.float32)
-
-    # Synthetic local input for this rank
-    # Each rank has B*S tokens locally; total N_total = B*S*world_size
-    local_B = B
-    local_S = S
-    tokens = torch.randn(local_B, local_S, H, dtype=torch.float32)
-
-    # Forward
-    out = layer(tokens)
-
-    # Verify no NaNs in output
-    assert not torch.isnan(out).any(), f"Rank {rank}: NaN in output"
-
-    # Gather dispatch counts from router (best-effort): router returns dispatch cnt per local expert
-    # Note: router is inside layer.router
-    # For safety, call router on flattened tokens to extract dispatch counts
-    flat = tokens.reshape(local_B * local_S, H)
-    idx, w, dispatch_cnt = layer.router(flat)
-
-    # Sum per-rank dispatched tokens
-    local_dispatched = dispatch_cnt.sum().item()
-    tensor_local_dispatched = torch.tensor([local_dispatched], dtype=torch.long)
-
-    # All-reduce to compute total dispatched across ranks
-    tensor_total = tensor_local_dispatched.clone()
-    dist.all_reduce(tensor_total, op=dist.ReduceOp.SUM)
-
-    total_dispatched = int(tensor_total.item())
-    expected_total = (local_B * local_S) * K * world_size
-
-    assert total_dispatched == expected_total, (
-        f"Total dispatched tokens mismatch: {total_dispatched} != {expected_total}"
-    )
-
-    # Backward sanity: create a loss and backward; ensure no NaN gradients on parameters
-    loss = out.abs().sum()
-    loss.backward()
-
-    # Check parameters for NaN gradients
-    for name, p in layer.named_parameters():
-        if p.grad is not None:
-            assert torch.isfinite(p.grad).all(), f"Rank {rank}: Non-finite grad in {name}"
-
-    # cleanup
-    dist.destroy_process_group()
+# ---------------------------------------------------------------------------
+# Free-port helper (also in conftest.py, duplicated here for standalone use)
+# ---------------------------------------------------------------------------
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
 
 
-def test_token_conservation_distributed():
-    world_size = 4
-    # use a port unlikely to be in use
-    port = 29500
-    mp.spawn(_run_worker, args=(world_size, port), nprocs=world_size, join=True)
+# ---------------------------------------------------------------------------
+# Shared worker
+# ---------------------------------------------------------------------------
+def _run_worker(
+    rank: int,
+    world_size: int,
+    port: int,
+    result_queue: mp.Queue,
+) -> None:
+    """
+    Bootstrap a Gloo PG, build DistributedMoELayer on a 2-rank EP topology,
+    run forward + backward, then push per-rank results to result_queue.
+
+    Pushes a dict:
+        {"rank": int, "token_conservation": bool, "no_nan_grads": bool,
+         "error": Optional[str]}
+    """
+    error: Optional[str] = None
+    token_ok = False
+    nan_ok = False
+
+    try:
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(port)
+        dist.init_process_group(
+            backend="gloo", rank=rank, world_size=world_size,
+        )
+
+        # Build a real topology via build_topology (not a hand-rolled shim).
+        # ep_size=2 so two pairs of (dp,ep) ranks exist in world_size=4.
+        topo = build_topology(
+            dp_size=world_size // 2,
+            ep_size=2,
+            device_type="cpu",
+        )
+
+        H, F, E, K = 64, 128, 8, 2
+        B, S = 2, 4
+
+        layer = DistributedMoELayer(
+            hidden_dim=H, ffn_dim=F, num_experts=E, top_k=K,
+            topology=topo, dtype=torch.float32,
+        )
+
+        tokens = torch.randn(B, S, H, dtype=torch.float32)
+
+        # ── Forward ──────────────────────────────────────────────────────
+        out = layer(tokens)
+
+        # NaN guard on output
+        assert not torch.isnan(out).any(), f"rank {rank}: NaN in layer output"
+
+        # ── Token conservation ───────────────────────────────────────────
+        flat = tokens.reshape(B * S, H)
+        _, _, dispatch_cnt = layer.router(flat)
+        local_dispatched = dispatch_cnt.sum().long()
+
+        total_tensor = local_dispatched.clone()
+        dist.all_reduce(total_tensor, op=dist.ReduceOp.SUM)
+        total_dispatched = int(total_tensor.item())
+        expected = B * S * K * world_size
+
+        token_ok = (total_dispatched == expected)
+        assert token_ok, (
+            f"rank {rank}: token conservation broken — "
+            f"dispatched={total_dispatched}, expected={expected}"
+        )
+
+        # ── Backward ─────────────────────────────────────────────────────
+        out.abs().sum().backward()
+
+        nan_ok = True
+        for name, p in layer.named_parameters():
+            if p.grad is not None and not torch.isfinite(p.grad).all():
+                nan_ok = False
+                error = f"rank {rank}: non-finite grad in {name}"
+                break
+
+    except Exception as exc:
+        error = f"rank {rank}: {type(exc).__name__}: {exc}"
+    finally:
+        try:
+            if dist.is_initialized():
+                dist.destroy_process_group()
+        except Exception:
+            pass
+
+    result_queue.put({
+        "rank": rank,
+        "token_conservation": token_ok,
+        "no_nan_grads": nan_ok,
+        "error": error,
+    })
 
 
-def test_distributed_backward_no_nan():
-    # Reuse the same worker function which performs forward+backward sanity
-    world_size = 4
-    port = 29501
-    mp.spawn(_run_worker, args=(world_size, port), nprocs=world_size, join=True)
+# ---------------------------------------------------------------------------
+# Test helpers
+# ---------------------------------------------------------------------------
+def _spawn_and_collect(port: int) -> list[dict]:
+    """Spawn 4 workers, collect their result dicts, return the list."""
+    ctx = mp.get_context("spawn")
+    q: mp.Queue = ctx.Queue()
+    world = 4
+    procs = [
+        ctx.Process(target=_run_worker, args=(r, world, port, q))
+        for r in range(world)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=120)
+        assert p.exitcode == 0, (
+            f"Worker rank {procs.index(p)} exited with code {p.exitcode}"
+        )
+    results = []
+    while not q.empty():
+        results.append(q.get_nowait())
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Tests
+# ---------------------------------------------------------------------------
+
+def test_token_conservation_distributed() -> None:
+    """Total dispatched tokens across all ranks must equal N_local × K × world."""
+    port = _free_port()
+    results = _spawn_and_collect(port)
+
+    assert len(results) == 4, f"Expected 4 rank results, got {len(results)}"
+    for r in results:
+        if r["error"] and not r["token_conservation"]:
+            pytest.fail(r["error"])
+        assert r["token_conservation"], (
+            f"rank {r['rank']}: token conservation failed. error={r['error']}"
+        )
+
+
+def test_distributed_backward_no_nan() -> None:
+    """No parameter gradient may be NaN or Inf after a forward+backward pass."""
+    port = _free_port()
+    results = _spawn_and_collect(port)
+
+    assert len(results) == 4, f"Expected 4 rank results, got {len(results)}"
+    for r in results:
+        if r["error"] and not r["no_nan_grads"]:
+            pytest.fail(r["error"])
+        assert r["no_nan_grads"], (
+            f"rank {r['rank']}: non-finite gradient detected. error={r['error']}"
+        )
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
