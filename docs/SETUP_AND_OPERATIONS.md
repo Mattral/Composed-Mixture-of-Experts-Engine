@@ -1,6 +1,6 @@
 # Setup and Operations
 
-**Version:** v0.2  
+**Version:** v0.3  
 **Last updated:** June 2026
 
 ---
@@ -119,6 +119,8 @@ world size (useful when running at reduced scale for testing).
 ```bash
 cd moe-engine
 python train.py --config configs/smoke.yaml --smoke
+# With WandB (requires WANDB_API_KEY):
+# python train.py --config configs/smoke.yaml --smoke --wandb-project moe-engine
 ```
 
 Expected output: 2 training steps, structured JSON telemetry at
@@ -128,7 +130,9 @@ Expected output: 2 training steps, structured JSON telemetry at
 With benchmark profiling:
 
 ```bash
-python train.py --config configs/smoke.yaml --smoke --profile
+python train.py --config configs/smoke.yaml --smoke
+# With WandB (requires WANDB_API_KEY):
+# python train.py --config configs/smoke.yaml --smoke --wandb-project moe-engine --profile
 # Writes: benchmarks/run_<timestamp>_rank0.json
 ```
 
@@ -202,7 +206,7 @@ backend automatically based on this config value.
 
 ```bash
 # Build image
-docker build -f deploy/docker/Dockerfile -t moe-engine:v0.2 .
+docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3 .
 
 # CPU smoke test (no GPU required)
 docker compose -f deploy/docker/docker-compose.yml run --rm smoke
@@ -299,6 +303,8 @@ Each step emits one JSONL record to `telemetry.json_path`. Key fields:
 | `tokens_per_sec` | Training throughput |
 | `collective.all_to_all_dispatch_ms` | EP dispatch latency (CUDA event) |
 | `collective.all_to_all_combine_ms` | EP combine latency (CUDA event) |
+| `collective.expert_compute_ms` | Expert FFN wall-clock (v0.3) |
+| `collective.comm_compute_overlap_ratio` | dispatch_ms / expert_compute_ms (v0.3) |
 | `memory.peak_allocated_gb` | Peak CUDA memory (torch.cuda.memory_stats) |
 | `routing.expert_load_imbalance` | max/mean dispatch ratio (1.0 = perfect) |
 | `routing.router_z_loss` | Auxiliary regularisation signal |

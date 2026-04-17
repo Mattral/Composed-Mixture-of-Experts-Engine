@@ -1,6 +1,6 @@
 # Architecture Overview
 
-**Version:** v0.2  
+**Version:** v0.3  
 **Last updated:** June 2026
 
 ---
@@ -89,9 +89,10 @@ Parallelism (SP) activates automatically at `tp_size > 1`.
 
 **Pipeline Parallelism (PP):**  
 `PipelineStage` encapsulates a single pipeline stage. `run_1f1b(micro_batches)`
-implements the three-phase 1F1B schedule (warmup → steady-state → drain) in
-single-process mode. Multi-process `dist.send` / `dist.recv` wiring is the next
-milestone (see roadmap v0.3).
+implements the three-phase 1F1B schedule in single-process mode (test fast-path).
+`run_1f1b_distributed(micro_batches)` — **v0.3** — implements the full multi-process
+1F1B schedule with real `dist.send` / `dist.recv` on the PP group axis, activation
+tagging (stage_id + mb_index header), and three-phase execution (warmup → steady → drain).
 
 **Expert Parallelism (EP):**  
 Each EP rank owns `E // ep_size` experts (remainder experts are assigned
@@ -191,10 +192,14 @@ Every training step emits one `StepRecord` to three sinks simultaneously:
 | TensorBoard | scalar summaries | rank 0 only |
 | Prometheus | gauges on `/metrics` | optional; port configurable |
 
-v0.2 routing quality fields in every record:
+v0.2 routing quality fields: `routing.expert_load_imbalance`, `routing.router_z_loss`.
 
-- `routing.expert_load_imbalance` — `max_load / mean_load` per step
-- `routing.router_z_loss` — Switch-Transformer auxiliary regularisation signal
+v0.3 collective fields (new):
+- `collective.expert_compute_ms` — wall-clock time of expert FFN compute per step
+- `collective.comm_compute_overlap_ratio` — `dispatch_ms / expert_compute_ms` (overlap fraction)
+
+WandB sink (v0.3): active when `WANDB_API_KEY` is set; all numeric fields logged
+under section prefixes (`collective/dispatch_ms`, `routing/z_loss`, etc.).
 
 ---
 
@@ -236,19 +241,21 @@ re-describing behaviour inline. When behaviour changes, update both.
 | ColumnParallelLinear | ✅ | all-gathers to full width; tp=1 identity |
 | RowParallelLinear | ✅ | all_reduce(SUM); tp=1 identity |
 | SwiGLU w_gate + w_up both ColumnParallel | ✅ | Consistent shard space through SwiGLU |
-| Sequence Parallelism | ✅ | scatter/gather; no-op at tp_size=1 |
-| PipelineStage 1F1B | ✅ | Single-process scheduling; multi-process wiring v0.3 |
+| Sequence Parallelism (scatter/gather) | ✅ | no-op at tp_size=1 |
+| SP all-gather fusion | ✅ v0.3 | `next_weight` param fuses backward all-gather with next projection; halves SP collectives |
+| PipelineStage 1F1B (single-process) | ✅ | 3-phase schedule; 13 unit tests; fast-path |
+| PipelineStage multi-process PP | ✅ v0.3 | `run_1f1b_distributed`; dist.send/recv; 2-rank mp.spawn verified |
 | Async two-tier checkpointing | ✅ | NVMe (O_DIRECT) + S3; atomic rename |
 | TorchElastic state machine | ✅ | evict → reshard → reload → resume |
 | Etcd rendezvous (>100 nodes) | ✅ | Backend selector; c10d fallback |
 | MFU accounting (sparse-aware) | ✅ | `(K/E) × P_expert`; streaming tracker |
 | Routing quality metrics | ✅ | load imbalance + z-loss per step |
 | Structured JSONL + TensorBoard | ✅ | Thread-safe; RLock |
-| Prometheus `/metrics` endpoint | ✅ | Optional; 8 gauges |
+| Prometheus `/metrics` endpoint | ✅ | Optional; 10 gauges (v0.3: +expert_compute_ms, +overlap_ratio) |
+| WandB integration | ✅ v0.3 | `WandBSink`; `WANDB_API_KEY` env; `--wandb-project` flag; `log_config` |
 | Docker + docker-compose | ✅ | Multi-stage; smoke/4-GPU/8-GPU targets |
 | Kubernetes manifests | ✅ | Single-node Job + 16-node Indexed Job |
 | Benchmark suite | ✅ | `benchmarks/run_benchmark.py`; CPU+GPU; JSON/CSV |
-| PP dist.send/recv (multi-process) | ❌ | v0.3 |
-| Chaos Scenario A fix (NCCL) | ❌ | v0.3 — Gloo race mitigated ~85% |
-| Nsight/CUPTI roofline | ❌ | v0.3 |
-| Real multi-node benchmark data | ❌ | v0.3 — needs cluster |
+| Chaos Scenario A fix (NCCL) | ❌ | v0.4 — Gloo race mitigated ~85%; needs GPU |
+| Nsight/CUPTI roofline | ❌ | v0.4 |
+| Real multi-node benchmark data | ❌ | v0.4 — needs cluster |
