@@ -17,7 +17,7 @@ Custom Triton kernels · 4D parallelism (DP+EP+TP+PP) · Async two-tier checkpoi
 > **moe-engine: A Fault-Tolerant Runtime for Hyperscale Mixture-of-Experts Training**  
 > Min Htet Myet, June 2026  
 > [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20688837.svg)](https://doi.org/10.5281/zenodo.20688837)  
-> [Read the preprint on Zenodo](https://zenodo.org/records/20647577) · [PDF](https://zenodo.org/records/20647577/files/moe-engine-preprint-v1.pdf)
+> [Read the preprint on Zenodo](https://zenodo.org/records/20688837) · [PDF](https://zenodo.org/records/20688837/files/moe-engine-preprint-v1.pdf)
 
 ---
 
