@@ -10,7 +10,15 @@ Custom Triton kernels · 4D parallelism (DP+EP+TP+PP) · Async two-tier checkpoi
 [![Triton](https://img.shields.io/badge/Triton-3.x-9333ea.svg)](https://triton-lang.org/)
 [![Tests](https://img.shields.io/badge/tests-96%20passed-brightgreen.svg)](#test-suite)
 
+
 </div>
+
+> **Associated Publication**  
+> This repository is accompanied by the following preprint:  
+> **moe-engine: A Fault-Tolerant Runtime for Hyperscale Mixture-of-Experts Training**  
+> Min Htet Myet, June 2026  
+> [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20647577.svg)](https://doi.org/10.5281/zenodo.20647577)  
+> [Read the preprint on Zenodo](https://zenodo.org/records/20647577) · [PDF](https://zenodo.org/records/20647577/files/moe-engine-preprint-v1.pdf)
 
 ---
 
@@ -19,6 +27,8 @@ Custom Triton kernels · 4D parallelism (DP+EP+TP+PP) · Async two-tier checkpoi
 `moe-engine` is a research-grade infrastructure layer for training large Mixture-of-Experts language models at hyperscale. It is designed around one core constraint: **at 10K+ GPUs, nodes die continuously**. The system must keep training alive end-to-end — routing correctly, checkpointing durably, and resuming without operator intervention.
 
 This is not a model. It is the runtime that a model runs on.
+
+> This repository is accompanied by a preprint that describes the system design, correctness mechanisms, elastic recovery strategy, and engineering lessons learned during development.
 
 ---
 
@@ -173,7 +183,7 @@ python train.py --config configs/smoke.yaml --smoke
 
 ```bash
 pytest tests/ -v -x --ignore=tests/test_chaos.py
-# 96 tests, ~30 seconds on CPU
+# 138+ tests, ~30 seconds on CPU
 ```
 
 ### Run chaos tests (requires torchrun on PATH)
@@ -378,3 +388,20 @@ moe-engine/
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
+
+---
+
+## Citing this Work
+
+If you use `moe-engine` in your research, please cite the associated preprint:
+
+```bibtex
+@article{myet2026moeengine,
+  title   = {moe-engine: A Fault-Tolerant Runtime for Hyperscale Mixture-of-Experts Training},
+  author  = {Min Htet Myet},
+  year    = {2026},
+  month   = {June},
+  publisher = {Zenodo},
+  doi     = {10.5281/zenodo.20647577},
+  url     = {https://doi.org/10.5281/zenodo.20647577}
+}
