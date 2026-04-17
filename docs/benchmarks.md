@@ -1,6 +1,6 @@
 # Benchmarks Guide
 
-**Version:** v0.2  
+**Version:** v0.3  
 **Last updated:** June 2026
 
 This document explains how to measure performance using moe-engine's built-in
@@ -117,7 +117,16 @@ Set `hardware_peak_tflops` in your config to the correct value for your GPU:
 ### Collective latency
 
 **`all_to_all_dispatch_ms`** and **`all_to_all_combine_ms`** are measured with
-real CUDA events on the dedicated EP stream. At `ep_size=1` both are always 0.0
+real CUDA events on the dedicated EP stream.
+
+**`expert_compute_ms`** (v0.3) — wall-clock time of the expert FFN compute
+(all local experts) measured with `time.perf_counter`. At ep=1 this is the
+dominant compute cost; higher overlap_ratio means better utilisation.
+
+**`comm_compute_overlap_ratio`** (v0.3) — `dispatch_ms / expert_compute_ms`.
+A value near 1.0 means dispatch duration ≈ expert compute duration, so
+overlap is near-complete. A value > 1.0 means dispatch is the bottleneck
+(communication-bound). Target: 0.3–0.6 at EP=8 with NVLink. At `ep_size=1` both are always 0.0
 (no collective issued). At `ep_size>1` with NVLink, typical values at EP=8:
 
 | Metric | Expected range (H100 NVLink) |
