@@ -1,6 +1,6 @@
 # Testing Guide
 
-**Version:** v0.2  
+**Version:** v0.3  
 **Last updated:** June 2026
 
 ---
@@ -9,7 +9,7 @@
 
 ```
 pytest tests/ -v --ignore=tests/test_chaos.py
-# → 123 passed, 1 skipped (GPU-only Triton path)  ~45s on CPU
+# → 148 passed, 1 skipped (GPU-only Triton path)  ~60s on CPU
 ```
 
 | File | Tests | What it covers |
@@ -18,15 +18,16 @@ pytest tests/ -v --ignore=tests/test_chaos.py
 | `test_kernels_numerics.py` | 13 | 30-config Triton vs fp64 reference, `atol=rtol=1e-5` |
 | `test_routing_quality.py` | 12 | Load imbalance math, z-loss invariants, RouterProfile completeness |
 | `test_tensor_parallel.py` | 19 | Column/Row shape + grad + dtype + tp=1 equivalence; **2-rank mp.spawn** |
-| `test_pipeline_parallel.py` | 13 | 1F1B: all grads non-None, shapes match, edge cases |
+| `test_pipeline_parallel.py` | 16 | 1F1B schedule; **2-rank mp.spawn PP** (v0.3) |
 | `test_distributed.py` | 4 | MoE layer fwd/bwd shapes, topology construction |
 | `test_distributed_invariants.py` | 2 | 4-process Gloo: token conservation + NaN check |
 | `test_elastic.py` | 7 | NVMe round-trip, chunked writes, async save/load, retention |
 | `test_elastic_v02.py` | 10 | Reshard edge cases (primes, remainders), file-URI tier, harness |
 | `test_mfu.py` | 6 | MFU formula, sparse fraction, backward compat |
 | `test_mfu_v02.py` | 15 | MFUAccountant, MFUResult breakdown, smoothed window |
-| `test_telemetry.py` | 12 | JSON completeness, 100-thread safety, routing fields |
-| `test_smoke_e2e.py` | 2 | Full train.py loop, all v0.2 envelope keys, S3 mock |
+| `test_telemetry.py` | 17 | JSON completeness, 100-thread safety, WandB mock (v0.3) |
+| `test_sequence_parallel_v03.py` | 8 | SP fused path; **2-rank mp.spawn SP** (v0.3) |
+| `test_smoke_e2e.py` | 2 | Full train.py loop, all v0.3 envelope keys, S3 mock |
 | `test_chaos.py` | 3 | Baseline ✅, Scenario B ✅, Scenario A ⚠️ |
 
 ---
@@ -165,19 +166,18 @@ Additional structural tests verify:
 - `_SwiGLUExpert.w_gate` is `ColumnParallelLinear`, not `nn.Linear`
   (sharding consistency across the SwiGLU multiply)
 
-### Pipeline parallelism (`test_pipeline_parallel.py`) — v0.2
+### Pipeline parallelism (`test_pipeline_parallel.py`) — v0.3
 
-`PipelineStage.run_1f1b` is tested exhaustively in single-process mode:
+Single-process tests (all 13 from v0.2, unchanged) verify the `run_1f1b`
+scheduling invariants. Two new v0.3 tests exercise the real multi-process path:
 
-- Every micro-batch receives a non-None gradient
-- Gradient shapes match corresponding input shapes
-- `len(grads) == len(micro_batches)` across all `(num_stages, num_micro_batches)` pairs
-- Edge cases: `m=1, p=1`; `m < p`; empty list returns `[]`
-- Module is actually invoked during forward steps (not passthrough)
-- `num_stages` and `num_stages` are int (not float) — type safety
-
-**Multi-process PP activation passing is not tested here** — that requires
-`dist.send`/`dist.recv` wiring which is the v0.3 milestone.
+- `test_pp_multiprocess_2stage_activation_flow` — 2-rank `mp.spawn` + Gloo:
+  stage 0 (identity) → stage 1 (scale-by-2). Verifies activations flow
+  through real `dist.send`/`dist.recv` and last stage outputs are 2× input.
+- `test_pp_multiprocess_correct_micro_batch_count` — verifies last stage
+  produces exactly `m` outputs across `m=6` micro-batches.
+- `test_run_1f1b_distributed_raises_single_process` — verifies a clear
+  `RuntimeError` when `run_1f1b_distributed` is called without `dist` + `pp_size>1`.
 
 ### Elastic fault tolerance (`test_elastic.py`, `test_elastic_v02.py`)
 
@@ -193,7 +193,7 @@ Core invariants exercised:
 - `ClusterStateMachine` phase transitions: RUNNING → DRAINING → RECOVERING → RESUMED
 - `install_signal_handlers` is a no-op (not a raise) when called from a non-main thread
 
-### MFU accounting (`test_mfu.py`, `test_mfu_v02.py`) — v0.2 extended
+### MFU accounting (`test_mfu.py`, `test_mfu_v02.py`)
 
 - `compute_mfu_detailed` returns `MFUResult` with `flops_dense` and `flops_sparse`
 - Activation recompute multiplier: recompute path has exactly 1.5× the FLOPs of
@@ -202,13 +202,16 @@ Core invariants exercised:
 - `MFUAccountant.smoothed_mfu`: only reflects last `smoothing_window` steps
 - `MFUAccountant.summary_str()`: contains `tok/s`, `step=`, `MFU=`
 
-### Telemetry (`test_telemetry.py`) — v0.2
+### Telemetry (`test_telemetry.py`) — v0.3
 
 - **Thread safety:** 100 concurrent `emit()` calls produce 100 uncorrupted JSONL
   lines with no duplicate step numbers
 - **Field completeness:** all 12 keys in `REQUIRED_KEYS` present in every record
-- **Routing fields round-trip:** `expert_load_imbalance` and `router_z_loss`
-  written and read back verbatim (parametrised over 3 value pairs)
+- **v0.2 routing fields round-trip:** `expert_load_imbalance`, `router_z_loss`
+- **v0.3 overlap ratio round-trip:** `comm_compute_overlap_ratio` at 5 values
+- **v0.3 WandB mock tests:** `WandBSink` disabled without `WANDB_API_KEY`;
+  inactive at rank>0; `log()` calls `wandb.log` with correct section-prefixed
+  keys including v0.3 fields; `log_config` calls `wandb.config.update`
 - **Non-rank-0 suppresses TensorBoard:** `rank=1` must not create TB event files
 - **`close()` idempotence:** second call must not raise
 
@@ -216,8 +219,8 @@ Core invariants exercised:
 
 Runs a complete `train.py` loop (with `--smoke`) and asserts:
 - All REQUIRED_KEYS present in JSONL (including v0.2 `routing` section)
-- `routing.expert_load_imbalance` and `routing.router_z_loss` present when routing
-  section is non-empty
+- `routing.expert_load_imbalance` and `routing.router_z_loss` present
+- v0.3: `collective.expert_compute_ms` and `collective.comm_compute_overlap_ratio` present
 - Checkpoint shard written to local tier
 - S3 upload attempted (mocked via `moto`)
 
@@ -269,6 +272,16 @@ def test_my_distributed_primitive():
 )
 ```
 
+### Sequence Parallelism fused path (`test_sequence_parallel_v03.py`) — v0.3
+
+Tests the `next_weight` fused path introduced in v0.3:
+
+- At `tp_size=1`: fused output matches `nn.functional.linear(x, w)` exactly (7 configs)
+- `test_sp_fused_2rank_numerically_correct` — 2-rank `mp.spawn` + Gloo: each rank
+  computes `shard @ w.T` locally then `all_reduce(SUM)`; result matches full-sequence
+  `linear(x, w)` to atol=1e-5. This is the definitive multi-process SP correctness proof.
+- Scatter-only path (next_weight=None) is unchanged and identity at tp_size=1
+
 ### What every new test must have
 
 1. A docstring explaining the invariant being tested, not just the mechanism.
@@ -285,7 +298,7 @@ The GitHub Actions workflow (`.github/workflows/ci.yml`) runs:
 | Job | Trigger | What runs |
 |---|---|---|
 | `lint` | every push + PR | ruff + mypy |
-| `unit` | every push + PR | full suite on Python 3.10 and 3.11 |
+| `unit` | every push + PR | full suite (148 tests) on Python 3.10 and 3.11 |
 | `benchmark` | every push + PR | CPU benchmark smoke (verifies no regression) |
 | `docker` | push to main/dev | Docker build smoke |
 | `chaos` | push to main only | Scenario B (blocking) + Scenario A (non-blocking) |
