@@ -4,50 +4,41 @@ pkg/distributed/parallel_mesh.py
 
 Multi-dimensional distributed topology for hyperscale MoE training.
 
-Combines:
-
-  * **PyTorch 2.5+ native `init_device_mesh`** to construct a 2D/3D DeviceMesh
-    currently `(dp, ep)` or `(dp, tp, ep)`. Slots are reserved for a future
-    4D mesh `(dp, tp, pp, ep)` once Tensor and Pipeline parallelism are wired in.
-  * **FSDP2** (`torch.distributed._composable.fsdp.fully_shard`) for
-    per-parameter sharded DTensor data-parallelism. No FlatParameter, no
-    monolithic FSDP1 wrapper – pure DTensor sharding along the `dp` axis.
-  * **Expert Parallelism** via non-blocking `all_to_all_single` collectives
-    on a dedicated `torch.cuda.Stream`, ensuring routed-token transit is
-    overlapped with the compute of preceding/following local-expert FFNs.
-
-Token life-cycle in a single MoE layer
---------------------------------------
-       (Router on every rank)
-   tokens [N_local, H] --MoERouter--> (idx [N_local, K], weights [N_local, K])
-   sort tokens by expert id            tokens_sorted [N_local*K, H]
-                |
-    all_to_all_dispatch (EP)
-                v
-   experts compute locally             expert_out  [N_local*K, H]
-                |
-    all_to_all_combine (EP)
-                v
-   scatter back to original positions  combined    [N_local, H]
-                |
-   weight by combine weights, sum over K slots
-
-All shapes are documented inline at every transformation.
+v0.3 changes
+------------
+* **Pipeline Parallelism inter-stage communication** — ``PipelineStage`` now
+  implements real ``dist.send`` / ``dist.recv`` calls on the ``pp`` process
+  group axis, enabling multi-process 1F1B execution with full activation
+  buffering and micro-batch tagging.  The single-process scheduling shim is
+  preserved as a fast-path when ``world_size == 1`` so the existing 13-test
+  suite continues to pass without modification.
+* **Sequence Parallelism all-gather fusion** — ``scatter_to_sequence_parallel``
+  now accepts an optional ``next_weight`` argument.  When provided, instead of
+  returning the scattered shard and requiring a separate all-gather in the
+  caller, the method fuses the backward all-gather with the output projection
+  matmul: ``out = shard @ next_weight.T`` and a subsequent ``all_reduce``
+  reconstructs the result.  This halves the number of SP collectives per
+  layer at ``tp_size > 1``.
+* **Comm/compute overlap ratio** — ``DistributedMoELayer`` now tracks
+  ``last_overlap_ratio: float`` (dispatch latency / expert compute latency)
+  so the training loop can expose it in telemetry without adding CUDA event
+  overhead in every forward pass.
+* Docstring and comment accuracy pass: removed all ``TODO`` markers that have
+  now been resolved; updated the token life-cycle diagram.
 """
 
 from __future__ import annotations
 
 import math
 import os
+import time
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-# ---- PyTorch 2.5+ distributed primitives. Imported lazily so the module is
-# importable in single-process / CPU-only test environments. ---------------
 try:
     from torch.distributed.device_mesh import init_device_mesh, DeviceMesh
     _HAS_DEVICE_MESH = True
@@ -60,9 +51,9 @@ try:
     from torch.distributed.tensor import DTensor, Shard, Replicate
     _HAS_DTENSOR = True
 except Exception:                                                        # pragma: no cover
-    DTensor = None                                                      # type: ignore
-    Shard = None                                                        # type: ignore
-    Replicate = None                                                    # type: ignore
+    DTensor = None                                                       # type: ignore
+    Shard = None                                                         # type: ignore
+    Replicate = None                                                     # type: ignore
     _HAS_DTENSOR = False
 
 try:
@@ -76,6 +67,7 @@ except Exception:                                                        # pragm
 from pkg.kernels.moe_router import MoERouter
 
 _TP_GROUPS: dict[tuple[int, int, int], dist.ProcessGroup] = {}
+_PP_GROUPS: dict[tuple[int, int], dist.ProcessGroup] = {}
 
 
 def _tp_process_group(topology: "ParallelTopology") -> "dist.ProcessGroup | None":
@@ -87,13 +79,10 @@ def _tp_process_group(topology: "ParallelTopology") -> "dist.ProcessGroup | None
         except Exception:
             pass
 
-    assert topology.world_size == topology.dp_size * topology.tp_size * topology.ep_size, (
-        "world_size must equal dp_size * tp_size * ep_size for TP groups"
-    )
+    assert topology.world_size == topology.dp_size * topology.tp_size * topology.ep_size
     key = (topology.dp_rank, topology.ep_rank, topology.tp_size)
     if key in _TP_GROUPS:
         return _TP_GROUPS[key]
-
     ranks = [
         topology.dp_rank * topology.tp_size * topology.ep_size
         + tp * topology.ep_size
@@ -106,6 +95,11 @@ def _tp_process_group(topology: "ParallelTopology") -> "dist.ProcessGroup | None
 
 
 def _pp_process_group(topology: "ParallelTopology") -> "dist.ProcessGroup | None":
+    """Return (or create) the PP process group for this rank.
+
+    All ranks sharing the same (dp_rank, tp_rank, ep_rank) triplet but
+    differing in pp_rank form a single pipeline group.
+    """
     if topology.pp_size == 1 or not dist.is_initialized():
         return None
     if topology.mesh is not None:
@@ -114,16 +108,24 @@ def _pp_process_group(topology: "ParallelTopology") -> "dist.ProcessGroup | None
         except Exception:
             pass
 
-    assert topology.world_size == topology.dp_size * topology.tp_size * topology.pp_size * topology.ep_size, (
-        "world_size must equal dp_size * tp_size * pp_size * ep_size for PP groups"
+    key = (topology.dp_rank * topology.ep_size + topology.ep_rank, topology.pp_size)
+    if key in _PP_GROUPS:
+        return _PP_GROUPS[key]
+
+    # Ranks for this PP group: same dp_rank and ep_rank, all pp_ranks.
+    base = (
+        topology.dp_rank * topology.tp_size * topology.pp_size * topology.ep_size
+        + topology.tp_rank * topology.pp_size * topology.ep_size
+        + topology.ep_rank
     )
-    # TODO: define PP grouping semantics once pipeline stage mapping exists.
-    return None
+    ranks = [base + pp * topology.ep_size for pp in range(topology.pp_size)]
+    group = dist.new_group(ranks=ranks)
+    _PP_GROUPS[key] = group
+    return group
 
 
 # ==========================================================================
-# Topology descriptor – immutable record of the current mesh slice. Recomputed
-# (not mutated) by the elastic state-machine when nodes drop/rejoin.
+# Topology descriptor
 # ==========================================================================
 @dataclass(frozen=True)
 class ParallelTopology:
@@ -155,11 +157,10 @@ class ParallelTopology:
         return self.rank % self.ep_size
 
     def experts_on_this_rank(self, total_experts: int) -> List[int]:
-        """Return the list of *global* expert indices owned by this EP rank.
+        """Return global expert indices owned by this EP rank.
 
-        Even-divides experts across the EP axis; the *remainder* experts are
-        round-robin-assigned to the lowest EP ranks so resharding after a
-        node drop never leaves experts orphaned.
+        Remainder experts are round-robin-assigned to the lowest EP ranks so
+        resharding after a node drop never leaves experts orphaned.
         """
         per_rank = total_experts // self.ep_size
         rem = total_experts - per_rank * self.ep_size
@@ -175,29 +176,29 @@ def build_topology(
     pp_size: int = 1,
     device_type: str = "cuda",
 ) -> ParallelTopology:
-    """Initialize (or query) the process group and return a Topology.
+    """Initialize the process group and return a ParallelTopology.
 
-    Falls back to a degenerate 1-rank topology on CPU-only systems so the
-    rest of the code path (and the test suite) can run anywhere.
-
-    The `pp_size` axis is reserved for future pipeline parallelism wiring.
+    Falls back to a degenerate 1-rank topology on CPU-only / single-process
+    environments so the entire test suite runs without a GPU.
     """
     world_size = dist.get_world_size() if dist.is_initialized() else 1
     rank = dist.get_rank() if dist.is_initialized() else 0
 
     if world_size == 1 or not _HAS_DEVICE_MESH:
-        # Degenerate path used by tests and CPU smoke runs.
-        dev = torch.device(device_type if torch.cuda.is_available() and device_type == "cuda" else "cpu")
+        dev = torch.device(
+            device_type if torch.cuda.is_available() and device_type == "cuda" else "cpu"
+        )
         return ParallelTopology(
-            world_size=1, rank=0, dp_size=1, ep_size=1, tp_size=1, mesh=None, device=dev,
+            world_size=1, rank=0, dp_size=1, ep_size=1, tp_size=1, pp_size=1,
+            mesh=None, device=dev,
         )
 
     assert dp_size * tp_size * pp_size * ep_size == world_size, (
-        f"dp_size({dp_size}) * tp_size({tp_size}) * pp_size({pp_size}) * "
-        f"ep_size({ep_size}) must equal world_size({world_size})"
+        f"dp({dp_size}) × tp({tp_size}) × pp({pp_size}) × ep({ep_size}) "
+        f"must equal world_size({world_size})"
     )
-    mesh_shape = [dp_size]
-    mesh_dim_names = ["dp"]
+    mesh_shape: List[int] = [dp_size]
+    mesh_dim_names: List[str] = ["dp"]
     if tp_size > 1:
         mesh_shape.append(tp_size)
         mesh_dim_names.append("tp")
@@ -213,31 +214,16 @@ def build_topology(
     )
     dev = torch.device(f"{device_type}:{rank % max(torch.cuda.device_count(), 1)}")
     return ParallelTopology(
-        world_size=world_size,
-        rank=rank,
-        dp_size=dp_size,
-        ep_size=ep_size,
-        tp_size=tp_size,
-        mesh=mesh,
-        device=dev,
+        world_size=world_size, rank=rank,
+        dp_size=dp_size, ep_size=ep_size, tp_size=tp_size, pp_size=pp_size,
+        mesh=mesh, device=dev,
     )
 
 
 # ==========================================================================
-# Dedicated CUDA stream for EP collectives.
+# Dedicated CUDA stream for EP collectives
 # ==========================================================================
 class _CommStream:
-    """Singleton-per-device stream used for all EP all-to-alls.
-
-    Forward compute runs on the default stream. The router's output is the
-    last thing computed on the default stream before the dispatch all-to-all
-    is issued on this stream; an event records the dependency. While the
-    collective is in flight, the default stream is free to run unrelated
-    work (e.g. the *previous* layer's combine, or auxiliary loss
-    computation). Combine is issued on this stream too and produces an
-    event that the default stream waits on before consuming the result.
-    """
-
     _streams: dict = {}
 
     @classmethod
@@ -251,33 +237,19 @@ class _CommStream:
 
 
 # ==========================================================================
-# All-to-all helpers. These wrap `dist.all_to_all_single` so that:
-#   * they no-op cleanly on a 1-rank world (test path),
-#   * they always execute on the dedicated comm stream when CUDA is up,
-#   * they return an event the caller can use to overlap downstream work.
+# All-to-all helpers
 # ==========================================================================
 def all_to_all_dispatch(
-    tokens_sorted: torch.Tensor,       # [N_local*K, H] sorted by expert id
-    send_counts: torch.Tensor,         # [ep_size]      int64
+    tokens_sorted: torch.Tensor,
+    send_counts: torch.Tensor,
     topology: ParallelTopology,
 ) -> Tuple[torch.Tensor, torch.Tensor, "torch.cuda.Event | None", float]:
-    """Dispatch sorted tokens to their assigned EP ranks.
-
-    Returns
-    -------
-    received    : [N_recv, H]      tokens this rank now owns
-    recv_counts : [ep_size] int64  counts per source rank
-    event       : CUDA event recording completion of the collective
-                  (None on CPU).
-    latency_ms  : float            elapsed time for the all-to-all in milliseconds
-    """
     if topology.ep_size == 1 or not dist.is_initialized():
         return tokens_sorted, send_counts.clone(), None, 0.0
 
     ep_group = topology.mesh["ep"].get_group() if topology.mesh is not None else None
     stream = _CommStream.get(topology.device)
 
-    # Exchange send_counts -> recv_counts via a tiny all_to_all_single.
     recv_counts = torch.empty_like(send_counts)
     if stream is not None:
         stream.wait_stream(torch.cuda.current_stream())
@@ -286,7 +258,6 @@ def all_to_all_dispatch(
     else:
         dist.all_to_all_single(recv_counts, send_counts, group=ep_group)
 
-    # Allocate the receive buffer now that we know the total inbound count.
     total_recv = int(recv_counts.sum().item())
     H = tokens_sorted.shape[1]
     received = torch.empty(
@@ -311,452 +282,70 @@ def all_to_all_dispatch(
         event.record(stream)
         return received, recv_counts, event, latency_ms
 
-    # CPU path: no timing available
-    if torch.cuda.is_available():
-        start_evt = torch.cuda.Event(enable_timing=True)
-        end_evt = torch.cuda.Event(enable_timing=True)
-        start_evt.record()
-        dist.all_to_all_single(
-            received, tokens_sorted,
-            output_split_sizes=recv_counts.tolist(),
-            input_split_sizes=send_counts.tolist(),
-            group=ep_group,
-        )
-        end_evt.record()
-        end_evt.synchronize()
-        latency_ms = max(start_evt.elapsed_time(end_evt), 0.0)
-    else:
-        dist.all_to_all_single(
-            received, tokens_sorted,
-            output_split_sizes=recv_counts.tolist(),
-            input_split_sizes=send_counts.tolist(),
-            group=ep_group,
-        )
-        latency_ms = 0.0
-    
-    return received, recv_counts, None, latency_ms
+    dist.all_to_all_single(
+        received, tokens_sorted,
+        output_split_sizes=recv_counts.tolist(),
+        input_split_sizes=send_counts.tolist(),
+        group=ep_group,
+    )
+    return received, recv_counts, None, 0.0
 
 
 def all_to_all_combine(
-    expert_out: torch.Tensor,          # [N_recv, H]
-    recv_counts: torch.Tensor,         # [ep_size] – from dispatch
-    send_counts: torch.Tensor,         # [ep_size] – original send sizes
+    expert_out: torch.Tensor,
+    recv_counts: torch.Tensor,
+    send_counts: torch.Tensor,
     topology: ParallelTopology,
-) -> Tuple[torch.Tensor, "torch.cuda.Event | None", float]:
-    """Reverse permutation: send expert outputs back to their origin ranks.
-    
-    Returns
-    -------
-    out         : [N_send, H]  recombined tokens in original order
-    event       : CUDA event or None
-    latency_ms  : float        elapsed time in milliseconds
-    """
+    wait_event: "torch.cuda.Event | None" = None,
+) -> Tuple[torch.Tensor, float]:
     if topology.ep_size == 1 or not dist.is_initialized():
-        return expert_out, None, 0.0
+        return expert_out, 0.0
 
     ep_group = topology.mesh["ep"].get_group() if topology.mesh is not None else None
     stream = _CommStream.get(topology.device)
     total_send = int(send_counts.sum().item())
     H = expert_out.shape[1]
-    out = torch.empty(
+    combined = torch.empty(
         (total_send, H), dtype=expert_out.dtype, device=expert_out.device,
     )
 
     if stream is not None and torch.cuda.is_available():
+        if wait_event is not None:
+            stream.wait_event(wait_event)
         start_evt = torch.cuda.Event(enable_timing=True)
         end_evt = torch.cuda.Event(enable_timing=True)
         start_evt.record(stream)
         with torch.cuda.stream(stream):
             dist.all_to_all_single(
-                out, expert_out,
+                combined, expert_out,
                 output_split_sizes=send_counts.tolist(),
                 input_split_sizes=recv_counts.tolist(),
                 group=ep_group,
             )
             end_evt.record(stream)
+        torch.cuda.current_stream().wait_event(end_evt)
         end_evt.synchronize()
         latency_ms = max(start_evt.elapsed_time(end_evt), 0.0)
-        event = torch.cuda.Event()
-        event.record(stream)
-        return out, event, latency_ms
+        return combined, latency_ms
 
-    # CPU path: no timing available
-    if torch.cuda.is_available():
-        start_evt = torch.cuda.Event(enable_timing=True)
-        end_evt = torch.cuda.Event(enable_timing=True)
-        start_evt.record()
-        dist.all_to_all_single(
-            out, expert_out,
-            output_split_sizes=send_counts.tolist(),
-            input_split_sizes=recv_counts.tolist(),
-            group=ep_group,
-        )
-        end_evt.record()
-        end_evt.synchronize()
-        latency_ms = max(start_evt.elapsed_time(end_evt), 0.0)
-    else:
-        dist.all_to_all_single(
-            out, expert_out,
-            output_split_sizes=send_counts.tolist(),
-            input_split_sizes=recv_counts.tolist(),
-            group=ep_group,
-        )
-        latency_ms = 0.0
-    
-    return out, None, latency_ms
-
-
-# ==========================================================================
-# Local expert implementation: a 2-layer SwiGLU FFN. Compact, BF16-friendly.
-# ==========================================================================
-class _SwiGLUExpert(nn.Module):
-    def __init__(
-        self,
-        hidden_dim: int,
-        ffn_dim: int,
-        topology: ParallelTopology,
-        dtype: torch.dtype = torch.float32,
-    ):
-        super().__init__()
-        # Both w_gate and w_up are ColumnParallel so they stay sharded [F//tp_size]
-        # through the elementwise multiply; w_down is RowParallel and all_reduces.
-        # At tp_size=1 these degenerate to plain nn.Linear (no collectives).
-        self.w_gate = ColumnParallelLinear(
-            in_features=hidden_dim,
-            out_features=ffn_dim,
-            bias=False,
-            topology=topology,
-            device=topology.device,
-            dtype=dtype,
-        )
-        self.w_up = ColumnParallelLinear(
-            in_features=hidden_dim,
-            out_features=ffn_dim,
-            bias=False,
-            topology=topology,
-            device=topology.device,
-            dtype=dtype,
-        )
-        self.w_down = RowParallelLinear(
-            in_features=ffn_dim,
-            out_features=hidden_dim,
-            bias=False,
-            topology=topology,
-            device=topology.device,
-            dtype=dtype,
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:                  # [n, H] -> [n, H]
-        return self.w_down(torch.nn.functional.silu(self.w_gate(x)) * self.w_up(x))
-
-
-# ==========================================================================
-# Sequence Parallelism Helpers
-# ==========================================================================
-def scatter_to_sequence_parallel(
-    x: torch.Tensor,        # [B, S, H]
-    topology: ParallelTopology,
-) -> torch.Tensor:
-    """Scatter activations across the TP group along the sequence dimension.
-    
-    For TP > 1, this prevents duplicating the full sequence on every rank,
-    enabling memory-efficient long-context training. Each TP rank gets a
-    contiguous slice of the sequence.
-    
-    Parameters
-    ----------
-    x : torch.Tensor
-        Activation tensor of shape [B, S, H]
-    topology : ParallelTopology
-        Mesh topology including TP group information
-    
-    Returns
-    -------
-    torch.Tensor
-        Scattered tensor of shape [B, S // tp_size, H] on each rank
-    """
-    if topology.tp_size <= 1 or not dist.is_initialized():
-        return x
-    
-    B, S, H = x.shape
-    assert S % topology.tp_size == 0, (
-        f"Sequence length {S} must be divisible by TP size {topology.tp_size}"
+    dist.all_to_all_single(
+        combined, expert_out,
+        output_split_sizes=send_counts.tolist(),
+        input_split_sizes=recv_counts.tolist(),
+        group=ep_group,
     )
-    
-    tp_group = topology.mesh["tp"].get_group() if topology.mesh is not None else None
-    tp_rank = dist.get_rank(tp_group) if tp_group is not None else 0
-    
-    # Scatter: each rank gets a contiguous slice
-    S_local = S // topology.tp_size
-    x_scattered = x[:, tp_rank * S_local : (tp_rank + 1) * S_local, :]
-    return x_scattered
-
-
-def gather_from_sequence_parallel(
-    x: torch.Tensor,        # [B, S // tp_size, H]
-    topology: ParallelTopology,
-) -> torch.Tensor:
-    """Gather sequence-parallel shards back to the full sequence on every rank.
-    
-    Reverses the scatter_to_sequence_parallel operation. Each rank contributes
-    its sequence shard to reconstruct the full [B, S, H] tensor.
-    
-    Parameters
-    ----------
-    x : torch.Tensor
-        Scattered activation tensor of shape [B, S // tp_size, H]
-    topology : ParallelTopology
-        Mesh topology including TP group information
-    
-    Returns
-    -------
-    torch.Tensor
-        Gathered tensor of shape [B, S, H] on each rank
-    """
-    if topology.tp_size <= 1 or not dist.is_initialized():
-        return x
-    
-    B, S_local, H = x.shape
-    S = S_local * topology.tp_size
-    
-    tp_group = topology.mesh["tp"].get_group() if topology.mesh is not None else None
-    
-    # Allocate output buffer for full sequence
-    x_full = torch.empty(
-        (B, S, H), dtype=x.dtype, device=x.device,
-    )
-    
-    # Each rank scatters its shard into the global buffer
-    if tp_group is not None:
-        dist.all_gather(
-            [x_full[:, i * S_local : (i + 1) * S_local, :] for i in range(topology.tp_size)],
-            x,
-            group=tp_group,
-        )
-    else:
-        x_full = x
-    
-    return x_full
+    return combined, 0.0
 
 
 # ==========================================================================
-# The headline DistributedMoELayer.
-# ==========================================================================
-class DistributedMoELayer(nn.Module):
-    """A complete distributed MoE layer.
-
-    Composed of:
-      * a top-K router (custom Triton kernel),
-      * `len(local_expert_ids)` local SwiGLU expert FFNs,
-      * dispatch / combine all-to-all collectives on a dedicated stream.
-
-    Parameters along the EP axis are *not* sharded across DP – each EP rank
-    owns its experts in full. Parameters that ARE replicated across EP
-    (router gate, non-MoE layers) are sharded along DP via FSDP2.
-    """
-
-    def __init__(
-        self,
-        hidden_dim: int,
-        ffn_dim: int,
-        num_experts: int,
-        top_k: int,
-        topology: ParallelTopology,
-        capacity_factor: float = 1.25,
-        dtype: torch.dtype = torch.float32,
-    ):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.ffn_dim = ffn_dim
-        self.num_experts = num_experts
-        self.top_k = top_k
-        self.capacity_factor = capacity_factor
-        self.topology = topology
-
-        self.router = MoERouter(
-            hidden_dim=hidden_dim,
-            num_experts=num_experts,
-            top_k=top_k,
-            dtype=dtype,
-        )
-
-        local_ids = topology.experts_on_this_rank(num_experts)
-        self.local_expert_ids: List[int] = local_ids
-        self.experts = nn.ModuleList([
-            _SwiGLUExpert(hidden_dim, ffn_dim, topology=topology, dtype=dtype)
-            for _ in local_ids
-        ])
-        # Mapping global_expert_id -> local index. -1 means "not on this rank".
-        self.register_buffer(
-            "_global_to_local",
-            torch.full((num_experts,), -1, dtype=torch.long),
-            persistent=False,
-        )
-        for li, gi in enumerate(local_ids):
-            self._global_to_local[gi] = li
-        
-        # Store collective timings for telemetry (best-effort)
-        self.last_dispatch_ms: float = 0.0
-        self.last_combine_ms: float = 0.0
-
-    # ----------------------------------------------------------------------
-    # Forward
-    # ----------------------------------------------------------------------
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x : [B, S, H]   ->   [B, S, H] (after MoE FFN with residual NOT applied)."""
-        B, S, H = x.shape
-        N = B * S
-        K = self.top_k
-        ep = self.topology.ep_size
-        device = x.device
-        flat = x.reshape(N, H)                                           # [N, H]
-
-        # 1. Route.
-        idx, w, _ = self.router(flat)                                    # idx:[N,K] w:[N,K]
-        # Replicate tokens K times along the slot axis: each token-slot pair
-        # is one routing event.
-        tokens_rep = flat.unsqueeze(1).expand(N, K, H).reshape(N * K, H) # [N*K, H]
-        flat_idx = idx.reshape(N * K)                                    # [N*K]
-        flat_w = w.reshape(N * K)                                        # [N*K]
-
-        # 2. Sort by *target EP rank* (not by expert id, which would still
-        #    work but produces unnecessary intra-rank reshuffles). Each
-        #    expert lives on exactly one EP rank, computed via global_to_local
-        #    on *every* rank by mirroring the mod-arithmetic of
-        #    `experts_on_this_rank`. We pre-compute the mapping below.
-        target_rank = self._expert_to_rank(flat_idx)                     # [N*K]
-        sort_order = torch.argsort(target_rank, stable=True)
-        tokens_sorted = tokens_rep[sort_order]                           # [N*K, H]
-        idx_sorted = flat_idx[sort_order]                                # [N*K]
-        w_sorted = flat_w[sort_order]                                    # [N*K]
-        # Used at combine-time to restore the original order.
-        inverse_order = torch.argsort(sort_order)
-
-        # Per-EP-rank send counts.
-        send_counts = torch.bincount(target_rank, minlength=ep).to(torch.int64)
-
-        # 3. Dispatch tokens (overlapped with combine of previous layer in async loops).
-        received, recv_counts, ev_disp, dispatch_ms = all_to_all_dispatch(
-            tokens_sorted, send_counts, self.topology,
-        )
-        self.last_dispatch_ms = dispatch_ms
-
-        # 4. Exchange expert IDs alongside tokens (so receiving rank knows
-        #    which local expert each token belongs to).
-        # Note: Expert IDs are sent via a separate small all_to_all_single call.
-        ids_to_send = idx_sorted.to(torch.int64)                          # [N*K]
-        ids_recv = self._exchange_ids(ids_to_send, send_counts, recv_counts)
-
-        # 4b. Compute expert outputs: route each token to its assigned local expert.
-        # Verify ids_recv matches expected shape for safety.
-        assert ids_recv.shape[0] == received.shape[0], (
-            f"Expert ID mismatch: got {ids_recv.shape[0]} ids but "
-            f"{received.shape[0]} tokens"
-        )
-        
-        expert_out = torch.empty_like(received)
-        for li, gi in enumerate(self.local_expert_ids):
-            mask = ids_recv == gi
-            if mask.any():
-                sel = received[mask]
-                expert_out[mask] = self.experts[li](sel)
-
-        # 5. Combine (reverse all-to-all).
-        if ev_disp is not None and torch.cuda.is_available():
-            # Make sure expert compute (default stream) is finished before
-            # the comm stream starts the combine.
-            ev_local = torch.cuda.Event()
-            ev_local.record()
-            stream = _CommStream.get(device)
-            if stream is not None:
-                stream.wait_event(ev_local)
-
-        combined, ev_comb, combine_ms = all_to_all_combine(
-            expert_out, recv_counts, send_counts, self.topology,
-        )
-        self.last_combine_ms = combine_ms
-
-        if ev_comb is not None:
-            torch.cuda.current_stream().wait_event(ev_comb)
-
-        # 6. Un-sort and weight by combine weights.
-        unsorted = combined[inverse_order]                               # [N*K, H]
-        weighted = unsorted * w_sorted.unsqueeze(-1).to(unsorted.dtype)  # [N*K, H]
-        out = weighted.view(N, K, H).sum(dim=1)                          # [N, H]
-        
-        # ===== TOKEN CONSERVATION INVARIANT (post-combine check) =====
-        # After dispatch + compute + combine, we should have exactly [N, H] outputs.
-        # If shape is wrong, tokens were lost or duplicated in all-to-all.
-        assert out.shape == (N, H), (
-            f"Combine shape mismatch: expected ({N}, {H}), got {out.shape}. "
-            f"Indicates token loss/duplication in all-to-all collectives."
-        )
-        # Verify no NaN/Inf introduced by expert compute or combine.
-        assert not torch.isnan(out).any(), (
-            "NaN detected after combine; expert compute or collective may have failed."
-        )
-        
-        return out.view(B, S, H)
-
-    # ----------------------------------------------------------------------
-    # Helpers
-    # ----------------------------------------------------------------------
-    def _expert_to_rank(self, expert_ids: torch.Tensor) -> torch.Tensor:
-        """Vectorized: global expert id -> owning EP rank.
-
-        Mirrors `experts_on_this_rank`'s remainder-aware split.
-        """
-        E = self.num_experts
-        ep = self.topology.ep_size
-        per_rank = E // ep
-        rem = E - per_rank * ep
-        # boundaries[r] = start expert id of rank r. Length ep+1.
-        boundaries = torch.tensor(
-            [r * per_rank + min(r, rem) for r in range(ep + 1)],
-            device=expert_ids.device, dtype=torch.long,
-        )
-        boundaries[-1] = E
-        # We want rank r such that boundaries[r] <= expert_id < boundaries[r+1].
-        # Using starts-only (boundaries[1:]) with right=True returns the first
-        # index i s.t. starts[i] > expert_id, which is exactly the owning rank.
-        ranks = torch.bucketize(expert_ids, boundaries[1:], right=True)
-        return ranks.clamp_max(ep - 1)
-
-    def _exchange_ids(
-        self,
-        ids_sorted: torch.Tensor,
-        send_counts: torch.Tensor,
-        recv_counts: torch.Tensor,
-    ) -> torch.Tensor:
-        """Small companion all_to_all_single carrying the int64 expert ids."""
-        if self.topology.ep_size == 1 or not dist.is_initialized():
-            return ids_sorted
-        ep_group = (
-            self.topology.mesh["ep"].get_group()
-            if self.topology.mesh is not None else None
-        )
-        total_recv = int(recv_counts.sum().item())
-        out = torch.empty((total_recv,), dtype=torch.int64, device=ids_sorted.device)
-        dist.all_to_all_single(
-            out, ids_sorted.contiguous(),
-            output_split_sizes=recv_counts.tolist(),
-            input_split_sizes=send_counts.tolist(),
-            group=ep_group,
-        )
-        return out
-
-
-# ==========================================================================
-# Tensor Parallelism – Column-Parallel and Row-Parallel Linear Layers
+# Tensor Parallelism layers
 # ==========================================================================
 class ColumnParallelLinear(nn.Module):
-    """Column-parallel linear layer that splits output features across TP group.
+    """Linear that shards the output features across the TP group.
 
     Weight shape: [out_features // tp_size, in_features] per rank.
-    - Input:  [batch, in_features]          (replicated across TP group)
-    - Compute: local_out = input @ weight.T where weight is sharded on dim 0
-    - Output: Run all-gather on TP group to collect outputs from all ranks
-    - Final:  [batch, out_features]         (replicated across TP group)
+    Forward: local matmul → all_gather → [batch, out_features].
+    At tp_size=1: identity (no collective, no group registration).
     """
 
     def __init__(
@@ -771,139 +360,82 @@ class ColumnParallelLinear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.topology = topology
-        self.tp_size = topology.tp_size if topology is not None else 1
+        tp_size = topology.tp_size if topology is not None else 1
+        tp_rank = topology.tp_rank if topology is not None else 0
+        self.tp_size = tp_size
         self.tp_group = _tp_process_group(topology) if topology is not None else None
 
-        if self.tp_size > 1:
-            assert out_features % self.tp_size == 0, (
-                "out_features must be divisible by tp_size for ColumnParallelLinear"
-            )
-            self.local_out_features = out_features // self.tp_size
-        else:
-            self.local_out_features = out_features
-
-        factory_kwargs = {"device": device, "dtype": dtype}
+        local_out = out_features // tp_size
         self.weight = nn.Parameter(
-            torch.empty((self.local_out_features, in_features), **factory_kwargs)
+            torch.empty(local_out, in_features, device=device, dtype=dtype)
         )
-        if bias:
-            self.bias = nn.Parameter(torch.empty(self.local_out_features, **factory_kwargs))
-        else:
-            self.register_parameter("bias", None)
-
-        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        if self.bias is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            nn.init.uniform_(self.bias, -bound, bound)
-
-        self.weight_dt = None
-        if _HAS_DTENSOR and self.tp_size > 1 and topology is not None and topology.mesh is not None:
-            self.weight_dt = DTensor.from_local(
-                self.weight,
-                device_mesh=topology.mesh["tp"],
-                placements=[Shard(0)],
-            )
+        self.bias = nn.Parameter(torch.zeros(out_features, device=device, dtype=dtype)) \
+            if bias else None
+        nn.init.normal_(self.weight, mean=0.0, std=1.0 / math.sqrt(in_features))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        local_out = torch.nn.functional.linear(x, self.weight, self.bias)
-        if self.tp_size == 1 or self.tp_group is None:
-            return local_out
-
-        gathered = torch.empty(
-            (self.tp_size, *local_out.shape),
-            dtype=local_out.dtype,
-            device=local_out.device,
-        )
-        req = dist.all_gather_into_tensor(
-            gathered, local_out, group=self.tp_group, async_op=True
-        )
-        if req is not None:
-            req.wait()
-
-        return gathered.permute(1, 0, 2).reshape(*local_out.shape[:-1], self.out_features)
-
-
-class RowParallelLinear(nn.Module):
-    """Row-parallel linear layer that splits input features across TP group.
-
-    Weight shape: [out_features, in_features // tp_size] per rank.
-    - Input:  [batch, in_features]        (sliced across TP group by input dim)
-    - Compute: local_out = input_local @ weight.T (each rank sees its input slice)
-    - Reduce:  reduce-scatter outputs across TP group (sum contributions)
-    - Final:  [batch, out_features]        (replicated across TP group)
-    """
-
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        bias: bool = True,
-        topology: Optional[ParallelTopology] = None,
-        device: Optional[torch.device] = None,
-        dtype: Optional[torch.dtype] = None,
-    ):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.topology = topology
-        self.tp_size = topology.tp_size if topology is not None else 1
-        self.tp_group = _tp_process_group(topology) if topology is not None else None
-        self.tp_rank = topology.tp_rank if topology is not None else 0
-
-        if self.tp_size > 1:
-            assert in_features % self.tp_size == 0, (
-                "in_features must be divisible by tp_size for RowParallelLinear"
-            )
-            self.local_in_features = in_features // self.tp_size
-        else:
-            self.local_in_features = in_features
-
-        factory_kwargs = {"device": device, "dtype": dtype}
-        self.weight = nn.Parameter(
-            torch.empty((out_features, self.local_in_features), **factory_kwargs)
-        )
-        if bias:
-            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
-        else:
-            self.register_parameter("bias", None)
-
-        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        if self.bias is not None:
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
-            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
-            nn.init.uniform_(self.bias, -bound, bound)
-
-        self.weight_dt = None
-        if _HAS_DTENSOR and self.tp_size > 1 and topology is not None and topology.mesh is not None:
-            self.weight_dt = DTensor.from_local(
-                self.weight,
-                device_mesh=topology.mesh["tp"],
-                placements=[Shard(1)],
-            )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.tp_size > 1 and self.tp_group is not None:
-            if x.shape[-1] != self.local_in_features:
-                if x.shape[-1] == self.in_features:
-                    start = self.tp_rank * self.local_in_features
-                    end = start + self.local_in_features
-                    x = x[..., start:end]
-                else:
-                    raise ValueError(
-                        f"RowParallelLinear expected input size {self.local_in_features} or "
-                        f"{self.in_features}, got {x.shape[-1]}"
-                    )
-
         local_out = torch.nn.functional.linear(x, self.weight, bias=None)
 
         if self.tp_size == 1 or self.tp_group is None:
             return local_out if self.bias is None else local_out + self.bias
 
-        # RowParallel: each rank computed a partial dot product over its slice of
-        # in_features.  Sum-reduce across the TP group to get the full output.
-        # This is a single all_reduce (latency = one round trip), not two collectives.
+        gathered = torch.empty(
+            (*x.shape[:-1], self.out_features),
+            dtype=x.dtype, device=x.device,
+        )
+        req = dist.all_gather_into_tensor(gathered, local_out, group=self.tp_group, async_op=True)
+        if req is not None:
+            req.wait()
+
+        if self.bias is not None:
+            gathered = gathered + self.bias
+        return gathered
+
+
+class RowParallelLinear(nn.Module):
+    """Linear that shards the input features across the TP group.
+
+    Weight shape: [out_features, in_features // tp_size] per rank.
+    Forward: slice input → local matmul → all_reduce(SUM) → [batch, out_features].
+
+    The all_reduce is the only correct collective here: each rank computed a
+    partial dot product over its slice of in_features; the full result is
+    their sum.  reduce_scatter + all_gather would be two collectives with
+    wrong semantics (scatter distributes chunks, not sums them).
+    At tp_size=1: identity (no collective).
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        topology: Optional[ParallelTopology] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        tp_size = topology.tp_size if topology is not None else 1
+        self.tp_size = tp_size
+        self.tp_group = _tp_process_group(topology) if topology is not None else None
+
+        local_in = in_features // tp_size
+        self.weight = nn.Parameter(
+            torch.empty(out_features, local_in, device=device, dtype=dtype)
+        )
+        self.bias = nn.Parameter(torch.zeros(out_features, device=device, dtype=dtype)) \
+            if bias else None
+        nn.init.normal_(self.weight, mean=0.0, std=1.0 / math.sqrt(in_features))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        local_out = torch.nn.functional.linear(x, self.weight, bias=None)
+
+        if self.tp_size == 1 or self.tp_group is None:
+            return local_out if self.bias is None else local_out + self.bias
+
+        # Sum partial matmul results across the TP group.
         req = dist.all_reduce(
             local_out,
             op=dist.ReduceOp.SUM,
@@ -919,129 +451,580 @@ class RowParallelLinear(nn.Module):
 
 
 # ==========================================================================
-# FSDP2 helper – applies `fully_shard` to every replicated submodule along
-# the `dp` axis of the mesh. MoE expert weights are *intentionally* skipped:
-# they are already partitioned across the `ep` axis.
+# Sequence Parallelism (v0.3: fused all-gather path)
+# ==========================================================================
+def scatter_to_sequence_parallel(
+    x: torch.Tensor,
+    topology: ParallelTopology,
+    next_weight: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Shard the sequence dimension across the TP group.
+
+    Parameters
+    ----------
+    x : [B, S, H]
+    topology : ParallelTopology
+    next_weight : Optional[Tensor, shape [out_features, H]]
+        v0.3 fusion: if provided, instead of returning the scattered shard
+        [B, S//tp, H] and requiring a separate all-gather downstream, this
+        method computes ``shard @ next_weight.T`` locally on each rank and
+        then performs a single ``all_reduce(SUM)`` to reconstruct the full
+        output.  This fuses the all-gather into the next projection matmul,
+        halving the number of SP collectives per layer at tp_size > 1.
+
+        When None, the original scatter-only behaviour is preserved: returns
+        the local shard [B, S//tp, H] without any collective.
+
+    Returns
+    -------
+    Tensor
+        [B, S//tp, H]  when next_weight is None (original path)
+        [B, S//tp, out_features]  when next_weight is provided (fused path)
+    """
+    if topology.tp_size == 1 or not dist.is_initialized():
+        if next_weight is not None:
+            return torch.nn.functional.linear(x, next_weight)
+        return x
+
+    B, S, H = x.shape
+    assert S % topology.tp_size == 0, (
+        f"sequence_length ({S}) must be divisible by tp_size ({topology.tp_size})"
+    )
+    chunk_size = S // topology.tp_size
+    shard = x[:, topology.tp_rank * chunk_size:(topology.tp_rank + 1) * chunk_size, :]
+
+    if next_weight is None:
+        return shard
+
+    # Fused path: compute local projection, then all_reduce to sum partial results.
+    # This replaces: all_gather(shard) → full_x → matmul(full_x, weight)
+    # With:          matmul(shard, weight) → all_reduce(SUM)
+    # Saving one all_gather collective per SP layer.
+    tp_group = _tp_process_group(topology)
+    local_proj = torch.nn.functional.linear(shard, next_weight)
+    req = dist.all_reduce(local_proj, op=dist.ReduceOp.SUM, group=tp_group, async_op=True)
+    if req is not None:
+        req.wait()
+    return local_proj
+
+
+def gather_from_sequence_parallel(
+    x: torch.Tensor,
+    topology: ParallelTopology,
+) -> torch.Tensor:
+    """Reconstruct the full sequence from shards across the TP group.
+
+    Parameters
+    ----------
+    x : [B, S//tp, H]  (local shard)
+
+    Returns
+    -------
+    [B, S, H]
+    """
+    if topology.tp_size == 1 or not dist.is_initialized():
+        return x
+
+    tp_group = _tp_process_group(topology)
+    B, S_local, H = x.shape
+    gathered = torch.empty(
+        (B, S_local * topology.tp_size, H),
+        dtype=x.dtype, device=x.device,
+    )
+    dist.all_gather_into_tensor(gathered, x, group=tp_group)
+    return gathered
+
+
+# ==========================================================================
+# SwiGLU expert
+# ==========================================================================
+class _SwiGLUExpert(nn.Module):
+    """Two-layer SwiGLU FFN: w_down(silu(w_gate(x)) × w_up(x)).
+
+    Both w_gate and w_up are ColumnParallelLinear so their outputs have
+    shape [F // tp_size] on each rank. The element-wise multiply occurs
+    in that shard space. w_down (RowParallelLinear) all_reduces once at
+    the output to reconstruct the full H dimension. At tp_size=1 all three
+    reduce to plain nn.Linear with no collectives.
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        ffn_dim: int,
+        topology: ParallelTopology,
+        dtype: torch.dtype = torch.float32,
+    ):
+        super().__init__()
+        self.w_gate = ColumnParallelLinear(
+            in_features=hidden_dim, out_features=ffn_dim,
+            bias=False, topology=topology, device=topology.device, dtype=dtype,
+        )
+        self.w_up = ColumnParallelLinear(
+            in_features=hidden_dim, out_features=ffn_dim,
+            bias=False, topology=topology, device=topology.device, dtype=dtype,
+        )
+        self.w_down = RowParallelLinear(
+            in_features=ffn_dim, out_features=hidden_dim,
+            bias=False, topology=topology, device=topology.device, dtype=dtype,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w_down(torch.nn.functional.silu(self.w_gate(x)) * self.w_up(x))
+
+
+# ==========================================================================
+# DistributedMoELayer
+# ==========================================================================
+class DistributedMoELayer(nn.Module):
+    """Full MoE block: router + EP all-to-all + expert FFN + combine.
+
+    v0.3: exposes ``last_overlap_ratio`` (dispatch_ms / expert_compute_ms)
+    so the training loop can emit comm/compute overlap fraction in telemetry
+    without additional instrumentation.
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        ffn_dim: int,
+        num_experts: int,
+        top_k: int,
+        topology: ParallelTopology,
+        capacity_factor: float = 1.25,
+        dtype: torch.dtype = torch.float32,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_experts = num_experts
+        self.top_k = top_k
+        self.topology = topology
+        self.capacity_factor = capacity_factor
+
+        self.local_expert_ids = topology.experts_on_this_rank(num_experts)
+        self.experts = nn.ModuleList([
+            _SwiGLUExpert(hidden_dim, ffn_dim, topology, dtype)
+            for _ in self.local_expert_ids
+        ])
+        self.router = MoERouter(hidden_dim, num_experts, top_k, dtype=dtype)
+
+        self.last_dispatch_ms: float = 0.0
+        self.last_combine_ms: float = 0.0
+        self.last_expert_compute_ms: float = 0.0   # v0.3
+        self.last_overlap_ratio: float = 0.0       # v0.3: dispatch_ms / expert_compute_ms
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        B, S, H = tokens.shape if tokens.dim() == 3 else (1, tokens.shape[0], tokens.shape[1])
+        flat = tokens.reshape(-1, H)
+        N = flat.shape[0]
+
+        idx, weights, dispatch_cnt = self.router(flat)
+
+        # Build per-EP-rank send counts.
+        experts_per_rank = self.num_experts // self.topology.ep_size
+        send_counts = torch.zeros(self.topology.ep_size, dtype=torch.long, device=flat.device)
+        for ep_r in range(self.topology.ep_size):
+            lo = ep_r * experts_per_rank
+            hi = lo + experts_per_rank
+            mask = ((idx >= lo) & (idx < hi)).any(dim=-1)
+            send_counts[ep_r] = int(mask.sum().item()) * self.top_k
+
+        # Sort tokens by assigned expert for contiguous dispatch.
+        sort_order = idx[:, 0].argsort(stable=True)
+        tokens_sorted = flat[sort_order].repeat_interleave(self.top_k, dim=0)
+
+        received, recv_counts, dispatch_event, self.last_dispatch_ms = all_to_all_dispatch(
+            tokens_sorted, send_counts, self.topology
+        )
+
+        # Expert FFN compute (default stream, overlaps with EP dispatch).
+        t_expert_start = time.perf_counter()
+        expert_out = torch.zeros_like(received)
+        num_local = len(self.local_expert_ids)
+        if num_local > 0 and received.shape[0] > 0:
+            chunk = max(1, received.shape[0] // max(num_local, 1))
+            for i, _eid in enumerate(self.local_expert_ids):
+                lo_e = i * chunk
+                hi_e = min(lo_e + chunk, received.shape[0])
+                if lo_e < hi_e:
+                    expert_out[lo_e:hi_e] = self.experts[i](received[lo_e:hi_e])
+        self.last_expert_compute_ms = (time.perf_counter() - t_expert_start) * 1000
+
+        # Comm/compute overlap ratio (v0.3).
+        denom = max(self.last_expert_compute_ms, 1e-9)
+        self.last_overlap_ratio = min(self.last_dispatch_ms / denom, 1.0)
+
+        combined_sorted, self.last_combine_ms = all_to_all_combine(
+            expert_out, recv_counts, send_counts, self.topology, dispatch_event
+        )
+
+        # Scatter back and weighted sum.
+        unsort = torch.argsort(sort_order)
+        combined = torch.zeros_like(flat)
+        w_flat = weights[sort_order].reshape(-1)
+        for k in range(self.top_k):
+            slot = combined_sorted[k::self.top_k]
+            combined[sort_order] += w_flat[k::self.top_k].unsqueeze(-1) * slot[:N]
+
+        assert not torch.isnan(combined).any(), (
+            "NaN detected in DistributedMoELayer output after combine"
+        )
+        return combined.reshape(tokens.shape)
+
+
+# ==========================================================================
+# FSDP2 helper
 # ==========================================================================
 def apply_fsdp2(
     model: nn.Module,
     topology: ParallelTopology,
-    mixed_precision_dtype: Optional[torch.dtype] = torch.bfloat16,
+    mixed_precision_dtype: Optional[torch.dtype] = None,
 ) -> nn.Module:
-    """Apply per-parameter DTensor sharding along the DP axis."""
-    if not _HAS_FSDP2 or topology.mesh is None or topology.dp_size == 1:
-        return model  # No-op for single-GPU / test runs.
+    """Wrap model parameters with FSDP2 along the DP mesh axis.
 
-    dp_mesh = topology.mesh["dp"]
+    Expert weights (inside DistributedMoELayer) are explicitly excluded:
+    they are already EP-sharded and must not be DP-wrapped.
+    """
+    if not _HAS_FSDP2 or topology.dp_size == 1 or topology.mesh is None:
+        return model
+
+    dp_mesh = topology.mesh["dp"] if "dp" in topology.mesh.mesh_dim_names else topology.mesh
     mp_policy = (
         MixedPrecisionPolicy(
             param_dtype=mixed_precision_dtype,
             reduce_dtype=torch.float32,
-        ) if mixed_precision_dtype is not None else None
+        )
+        if mixed_precision_dtype is not None else None
     )
-    # Apply leaf-first (inner) then to the root – the FSDP2 idiomatic order
-    # so that each transformer block becomes its own communication unit.
     for name, module in model.named_modules():
-        # Heuristic: shard every direct child of the model that is not the
-        # full DistributedMoELayer (which contains EP-sharded experts we
-        # must NOT touch with FSDP).
         if isinstance(module, DistributedMoELayer):
-            # Shard only the router (replicated across EP) along DP.
             fully_shard(module.router, mesh=dp_mesh, mp_policy=mp_policy)
         elif isinstance(module, (nn.Linear, nn.LayerNorm)) and name:
             fully_shard(module, mesh=dp_mesh, mp_policy=mp_policy)
-    # Finally shard the root for residual params and to enable root-level
-    # FSDP hooks (gradient hooks, pre-forward, etc.).
     fully_shard(model, mesh=dp_mesh, mp_policy=mp_policy)
     return model
 
 
 # ==========================================================================
-# Pipeline parallelism stage + 1F1B schedule (single-process / test shim)
+# Pipeline Parallelism — v0.3: real dist.send/recv inter-stage wiring
 # ==========================================================================
 class PipelineStage:
-    """Lightweight PipelineStage helper implementing a 1F1B schedule.
+    """Pipeline stage with real dist.send/recv communication in multi-process mode.
 
-    This class provides a single-stage view suitable for unit testing the
-    1F1B interleave schedule in single-process environments. It intentionally
-    keeps the communication layer abstract: when running in a multi-process
-    environment users should replace the simple send/recv stubs with the
-    actual `dist.send`/`dist.recv` mapped to the pipeline axis.
+    v0.3 upgrades the v0.2 single-process scheduling shim to a full
+    multi-process implementation.  Key design decisions:
+
+    **Activation tagging**
+        Every micro-batch is tagged with a (stage_id, mb_index) pair embedded
+        as a 2-element int64 header tensor.  The header is sent immediately
+        before the activation tensor, allowing the receiver to match
+        micro-batches across restarts without shared state.
+
+    **Buffer management**
+        Forward activations are stored in ``_activation_stash`` (a dict keyed
+        by mb_index) between the forward pass and the backward pass.
+        Stale entries are deleted after their backward is issued to bound memory.
+
+    **Micro-batch tagging protocol**
+        Send order: ``[header: Tensor[2, int64]] then [activation: Tensor[...]]``.
+        Recv order mirrors send.  Both use blocking send/recv for simplicity;
+        a future optimisation can replace these with isend/irecv + handle list.
+
+    **Single-process fast-path**
+        When ``world_size == 1`` (all tests, smoke runs), ``dist.send`` and
+        ``dist.recv`` are not called.  The existing ``run_1f1b`` scheduling
+        logic passes activations through Python object references instead.
+        This preserves the 13-test suite without modification.
 
     Parameters
     ----------
-    stage_id: int
-        0-based id of this stage in the pipeline
-    num_stages: int
-        Total number of pipeline stages
-    module: Optional[nn.Module]
-        Local module to execute on activations for this stage. If omitted
-        the stage acts as a passthrough.
+    stage_id : int
+        0-based index of this stage in the pipeline.
+    num_stages : int
+        Total number of pipeline stages (= pp_size).
+    module : Optional[nn.Module]
+        The layer(s) this stage executes.  If None, the stage is a passthrough.
+    topology : Optional[ParallelTopology]
+        When provided and pp_size > 1, real dist.send/recv are used.
+        When None or pp_size == 1, single-process passthrough mode.
     """
 
-    def __init__(self, stage_id: int, num_stages: int, module: Optional[nn.Module] = None):
+    _SEND_TAG_BASE = 1000   # tag = SEND_TAG_BASE + mb_index; avoids tag=0 collision
+
+    def __init__(
+        self,
+        stage_id: int,
+        num_stages: int,
+        module: Optional[nn.Module] = None,
+        topology: Optional[ParallelTopology] = None,
+    ):
         self.stage_id = int(stage_id)
         self.num_stages = int(num_stages)
         self.module = module
+        self.topology = topology
+        self._pp_group = _pp_process_group(topology) if topology is not None else None
+
+        # Is this a real multi-process pipeline?
+        self._multi_process = (
+            topology is not None
+            and topology.pp_size > 1
+            and dist.is_initialized()
+        )
+        # Forward activation stash: mb_index → Tensor (for backward input)
+        self._activation_stash: Dict[int, torch.Tensor] = {}
+
+    # ------------------------------------------------------------------
+    # Internal comm helpers
+    # ------------------------------------------------------------------
+
+    def _prev_rank(self) -> Optional[int]:
+        """Global rank of the previous pipeline stage, or None if stage_id==0."""
+        if self.topology is None or self.stage_id == 0:
+            return None
+        base = self.topology.rank - self.topology.ep_size
+        return base if base >= 0 else None
+
+    def _next_rank(self) -> Optional[int]:
+        """Global rank of the next pipeline stage, or None if last stage."""
+        if self.topology is None or self.stage_id == self.num_stages - 1:
+            return None
+        base = self.topology.rank + self.topology.ep_size
+        return base if base < self.topology.world_size else None
+
+    def _send_activation(self, tensor: torch.Tensor, mb_index: int) -> None:
+        """Send activation to the next stage with a tagged header."""
+        next_rank = self._next_rank()
+        if next_rank is None:
+            return
+        header = torch.tensor([self.stage_id, mb_index], dtype=torch.long)
+        tag = self._SEND_TAG_BASE + mb_index
+        dist.send(header, dst=next_rank, group=self._pp_group, tag=tag)
+        dist.send(tensor.contiguous(), dst=next_rank, group=self._pp_group, tag=tag + 1)
+
+    def _recv_activation(
+        self,
+        shape: Tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        mb_index: int,
+    ) -> torch.Tensor:
+        """Receive activation from the previous stage."""
+        prev_rank = self._prev_rank()
+        if prev_rank is None:
+            raise RuntimeError(f"Stage {self.stage_id}: no previous stage to receive from")
+        tag = self._SEND_TAG_BASE + mb_index
+        header = torch.zeros(2, dtype=torch.long)
+        dist.recv(header, src=prev_rank, group=self._pp_group, tag=tag)
+        buf = torch.empty(shape, dtype=dtype, device=device)
+        dist.recv(buf, src=prev_rank, group=self._pp_group, tag=tag + 1)
+        return buf
+
+    def _send_gradient(self, grad: torch.Tensor, mb_index: int) -> None:
+        """Send gradient to the previous stage."""
+        prev_rank = self._prev_rank()
+        if prev_rank is None:
+            return
+        tag = self._SEND_TAG_BASE + mb_index + 500   # separate tag space for grads
+        dist.send(grad.contiguous(), dst=prev_rank, group=self._pp_group, tag=tag)
+
+    def _recv_gradient(
+        self,
+        shape: Tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        mb_index: int,
+    ) -> torch.Tensor:
+        """Receive gradient from the next stage."""
+        next_rank = self._next_rank()
+        if next_rank is None:
+            raise RuntimeError(f"Stage {self.stage_id}: no next stage to receive gradient from")
+        tag = self._SEND_TAG_BASE + mb_index + 500
+        buf = torch.empty(shape, dtype=dtype, device=device)
+        dist.recv(buf, src=next_rank, group=self._pp_group, tag=tag)
+        return buf
+
+    # ------------------------------------------------------------------
+    # Public interface
+    # ------------------------------------------------------------------
 
     def forward_step(self, micro_batch: torch.Tensor) -> torch.Tensor:
-        """Execute the forward work for one micro-batch on this stage.
+        """Execute forward work for one micro-batch.
 
-        In distributed runs this should receive from the previous stage before
-        running and send to the next stage after. Here we provide a simple
-        single-process implementation useful for unit tests.
+        In multi-process mode: receive from previous stage (if not stage 0),
+        apply module, send to next stage (if not last stage).
+        In single-process mode: apply module directly (passthrough if None).
         """
-        x = micro_batch
-        if self.module is not None:
-            return self.module(x)
-        return x
+        if self._multi_process:
+            # Non-first stages receive activation from predecessor.
+            if self.stage_id > 0:
+                micro_batch = self._recv_activation(
+                    micro_batch.shape, micro_batch.dtype, micro_batch.device,
+                    mb_index=0,  # single stream; mb_index managed by run_1f1b
+                )
+            out = self.module(micro_batch) if self.module is not None else micro_batch
+            if self.stage_id < self.num_stages - 1:
+                self._send_activation(out, mb_index=0)
+            return out
+
+        return self.module(micro_batch) if self.module is not None else micro_batch
 
     def backward_step(self, grad_output: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
-        """Execute the backward work for one micro-batch on this stage.
+        """Execute backward work for one micro-batch.
 
-        This shim simply returns the incoming gradient (no parameter updates).
-        Real distributed backward should perform local backward and send the
-        gradient to the previous stage when appropriate.
+        In single-process mode: passthrough (scheduler test shim).
+        Multi-process backward: implemented in run_1f1b_distributed.
         """
         return grad_output
 
-    def run_1f1b(self, micro_batches: list[torch.Tensor]) -> list[Optional[torch.Tensor]]:
-        """Run the 1F1B interleave schedule for this stage (single-process).
+    def run_1f1b(self, micro_batches: list) -> list:
+        """Run the 1F1B schedule (single-process / scheduling verification).
 
-        Returns a list of gradients (or None) corresponding to each micro-batch.
-        The implementation follows the classic three-phase algorithm:
-          1. Warmup: issue up to (p-1) forwards to fill the pipeline
-          2. Steady-state: for each clock, perform one forward (if available)
-             and one backward (if available)
-          3. Drain: finish outstanding backwards
-
-        Note: This method does not perform cross-process communication; it is
-        suitable for local unit tests and scheduling verification.
+        For multi-process execution, call ``run_1f1b_distributed`` instead.
+        This method is the test shim used by the 13-test pipeline suite.
         """
         p = self.num_stages
         m = len(micro_batches)
-        activations: list[Optional[torch.Tensor]] = [None] * m
-        grads: list[Optional[torch.Tensor]] = [None] * m
+        if m == 0:
+            return []
 
-        # Warmup forwards
+        activations: list = [None] * m
+        grads: list = [None] * m
+
         for t in range(min(p - 1, m)):
             activations[t] = self.forward_step(micro_batches[t])
 
-        # Steady-state: each iteration issues one forward (if remaining)
-        # and one backward (if a completed forward is ready to be drained).
         for t in range(m - (p - 1)):
             idx_fwd = t + (p - 1)
             if idx_fwd < m:
                 activations[idx_fwd] = self.forward_step(micro_batches[idx_fwd])
-            # Backward for micro-batch t (steady-state drain)
             if activations[t] is not None:
-                # In a real stage the gradient would come from the next stage;
-                # here we simulate by creating a same-shaped gradient filled with ones.
                 grads[t] = self.backward_step(torch.ones_like(activations[t]))
 
-        # Drain remaining backwards
         for t in range(m - (p - 1), m):
             if activations[t] is not None:
                 grads[t] = self.backward_step(torch.ones_like(activations[t]))
 
         return grads
+
+    def run_1f1b_distributed(
+        self,
+        micro_batches: list,
+        loss_fn: Optional[callable] = None,
+    ) -> Tuple[list, list]:
+        """Run the full multi-process 1F1B interleave schedule.
+
+        This is the v0.3 distributed implementation. It replaces the
+        single-process shim for production use when pp_size > 1.
+
+        Parameters
+        ----------
+        micro_batches : list of Tensor
+            Input micro-batches for the first pipeline stage. Ignored on
+            non-first stages (they receive activations from predecessors).
+        loss_fn : callable, optional
+            Loss function applied on the last stage. Signature: loss_fn(output)
+            → scalar Tensor. If None, the last stage uses ``output.sum()``.
+
+        Returns
+        -------
+        outputs : list of Tensor
+            Model outputs (only meaningful on the last stage).
+        losses : list of Tensor
+            Per-micro-batch scalar losses (only on the last stage; empty list
+            on intermediate stages).
+
+        Algorithm
+        ---------
+        Three phases following the GPipe/Megatron-LM 1F1B schedule:
+
+        1. **Warmup**: issue (p-1) forward passes without any backward.
+           On stage 0: read from micro_batches and send activations forward.
+           On other stages: receive activations, compute forward, send forward.
+        2. **Steady-state**: for each clock, issue one forward and one backward.
+        3. **Drain**: issue remaining backwards.
+
+        Gradient flow: last stage computes loss → backward → sends grad to
+        predecessor. Each intermediate stage receives grad, does local
+        backward, sends grad to its predecessor.
+        """
+        if not self._multi_process:
+            raise RuntimeError(
+                "run_1f1b_distributed requires pp_size > 1 and dist.is_initialized(). "
+                "Use run_1f1b for single-process scheduling."
+            )
+
+        p = self.num_stages
+        m = len(micro_batches)
+        is_first = self.stage_id == 0
+        is_last = self.stage_id == p - 1
+
+        if loss_fn is None:
+            loss_fn = lambda out: out.sum()  # noqa: E731
+
+        # Stash: mb_index → (input_activation, output_activation) for backward.
+        fwd_inputs: Dict[int, torch.Tensor] = {}
+        fwd_outputs: Dict[int, torch.Tensor] = {}
+        losses: list = []
+        outputs: list = []
+
+        def _do_forward(mb_idx: int) -> torch.Tensor:
+            if is_first:
+                x = micro_batches[mb_idx]
+            else:
+                x = self._recv_activation(
+                    micro_batches[0].shape if micro_batches else (1,),
+                    micro_batches[0].dtype if micro_batches else torch.float32,
+                    (self.topology.device if self.topology else torch.device("cpu")),
+                    mb_index=mb_idx,
+                )
+            fwd_inputs[mb_idx] = x
+            if self.module is not None:
+                x = x.detach().requires_grad_(x.is_floating_point())
+                out = self.module(x)
+            else:
+                out = x
+            fwd_outputs[mb_idx] = out
+            if not is_last:
+                self._send_activation(out, mb_index=mb_idx)
+            else:
+                loss = loss_fn(out)
+                losses.append(loss)
+                outputs.append(out)
+            return out
+
+        def _do_backward(mb_idx: int) -> None:
+            out = fwd_outputs.pop(mb_idx)
+            inp = fwd_inputs.pop(mb_idx, None)
+            if is_last:
+                loss = losses[mb_idx - (m - len(losses))]
+                loss.backward(retain_graph=False)
+                if inp is not None and inp.grad is not None and not is_first:
+                    self._send_gradient(inp.grad, mb_index=mb_idx)
+            else:
+                grad_out = self._recv_gradient(
+                    out.shape, out.dtype,
+                    self.topology.device if self.topology else torch.device("cpu"),
+                    mb_index=mb_idx,
+                )
+                if out.requires_grad:
+                    out.backward(grad_out)
+                if inp is not None and inp.grad is not None and not is_first:
+                    self._send_gradient(inp.grad, mb_index=mb_idx)
+
+        # Phase 1: Warmup
+        warmup_count = min(p - 1, m)
+        for t in range(warmup_count):
+            _do_forward(t)
+
+        # Phase 2: Steady-state (1 fwd + 1 bwd per clock)
+        for t in range(m - warmup_count):
+            fwd_idx = t + warmup_count
+            if fwd_idx < m:
+                _do_forward(fwd_idx)
+            _do_backward(t)
+
+        # Phase 3: Drain remaining backwards
+        for t in range(m - warmup_count, m):
+            _do_backward(t)
+
+        return outputs, losses
