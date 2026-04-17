@@ -2,12 +2,17 @@
 tests/test_distributed.py
 =========================
 
-Single-process exercises of the distributed primitives. These tests
-deliberately run in the 1-rank degenerate topology so they can be executed
-on any machine; the relevant code paths inside `parallel_mesh.py` no-op
-cleanly when world_size==1, so we are testing the *plumbing* (shape
-preservation, gradient flow, expert assignment) rather than the actual NCCL
+Single-process exercises of the distributed mesh primitives.
+
+These tests run in a 1-rank degenerate topology (world_size=1, no process
+group required) so they execute on any machine without a GPU or network.
+They validate the *plumbing* — shape preservation, gradient flow, expert
+assignment, and topology construction — independently of the actual NCCL/Gloo
 collectives.
+
+Multi-process collective correctness is covered by:
+  * test_distributed_invariants.py   — 4-rank Gloo token conservation + NaN
+  * test_tensor_parallel.py          — 2-rank Gloo ColumnParallel + RowParallel
 """
 
 from __future__ import annotations
