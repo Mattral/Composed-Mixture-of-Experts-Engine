@@ -50,6 +50,7 @@ def _smoke_yaml(work_dir: Path, remote_uri: str) -> Path:
           log_interval: 1
           ckpt_interval: 1
           warmup_steps: 0
+          gradient_accumulation_steps: 1
         parallelism:
           data_parallel: 1
           expert_parallel: 1
@@ -102,6 +103,13 @@ def _assert_telemetry_envelope(jsonl_path: Path) -> None:
         # Collective block must include all_to_all timing measurements.
         assert "all_to_all_dispatch_ms" in rec["collective"]
         assert "all_to_all_combine_ms" in rec["collective"]
+        # v0.3: expert compute and overlap ratio fields.
+        assert "expert_compute_ms" in rec["collective"], (
+            "v0.3 expert_compute_ms missing from collective block"
+        )
+        assert "comm_compute_overlap_ratio" in rec["collective"], (
+            "v0.3 comm_compute_overlap_ratio missing from collective block"
+        )
         # Infra block must surface async ckpt commit time + cluster size.
         assert "async_ckpt_commit_ms" in rec["infra"]
         assert "active_nodes" in rec["infra"]
