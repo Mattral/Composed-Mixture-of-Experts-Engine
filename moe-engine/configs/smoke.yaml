@@ -24,6 +24,7 @@ training:
   log_interval: 1
   ckpt_interval: 1
   warmup_steps: 0
+  gradient_accumulation_steps: 1
 
 parallelism:
   data_parallel: 1
