@@ -2,7 +2,7 @@
 train.py
 ========
 
-Unified training entrypoint for moe-engine v0.2.
+Unified training entrypoint for moe-engine v0.3.
 
 Launch via TorchElastic:
 
@@ -18,11 +18,14 @@ Launch via TorchElastic:
 v0.2 additions
 --------------
 * Routing quality telemetry: expert_load_imbalance, router_z_loss per step.
+* Comm/compute overlap ratio in collective telemetry block (v0.3).
 * ``--profile`` flag: emits a structured benchmark summary to benchmarks/
 * ``compute_mfu_detailed`` for accurate dense + sparse FLOP accounting.
 * Warm-up LR schedule with cosine decay.
 * Gradient accumulation support (``gradient_accumulation_steps`` config key).
 * Rank-0 console summary with smoothed MFU.
+* WandB integration via StructuredLogger (WANDB_API_KEY env var).
+* ``--wandb-project`` flag for WandB project name.
 """
 
 from __future__ import annotations
@@ -122,6 +125,10 @@ def parse_args():
                    help="Write a benchmark JSON to benchmarks/ on exit")
     p.add_argument("--prometheus-port", type=int, default=0,
                    help="Port for Prometheus /metrics endpoint (0=disabled)")
+    p.add_argument("--wandb-project", type=str, default=None,
+                   help="WandB project name (requires WANDB_API_KEY env var)")
+    p.add_argument("--no-wandb", action="store_true",
+                   help="Disable WandB logging even if WANDB_API_KEY is set")
     return p.parse_args()
 
 
@@ -197,12 +204,19 @@ def main() -> None:
     # ----------------------------------------------------------------
     # Telemetry + MFU.
     # ----------------------------------------------------------------
+    wandb_kwargs = {}
+    if args.wandb_project:
+        wandb_kwargs["project"] = args.wandb_project
     logger = StructuredLogger(
         json_path=cfg["telemetry"]["json_path"],
         tensorboard_dir=cfg["telemetry"]["tensorboard_dir"],
         rank=topology.rank,
         prometheus_port=args.prometheus_port,
+        wandb_enabled=not args.no_wandb,
+        wandb_init_kwargs=wandb_kwargs if wandb_kwargs else None,
     )
+    # Log hyperparameters to WandB run config (no-op if WandB inactive)
+    logger.log_config(cfg.raw)
     mfu_acct = MFUAccountant(
         peak_tflops=cfg["telemetry"]["hardware_peak_tflops"],
         mfu_target=cfg["telemetry"]["mfu_target"],
@@ -327,6 +341,8 @@ def main() -> None:
             rec.collective = {
                 "all_to_all_dispatch_ms": first_moe.last_dispatch_ms,
                 "all_to_all_combine_ms": first_moe.last_combine_ms,
+                "expert_compute_ms": first_moe.last_expert_compute_ms,
+                "comm_compute_overlap_ratio": first_moe.last_overlap_ratio,
             }
         except (AttributeError, IndexError):
             pass
