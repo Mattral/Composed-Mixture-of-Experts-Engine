@@ -8,7 +8,7 @@ Custom Triton kernels · 4D parallelism (DP+EP+TP+PP) · Async two-tier checkpoi
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.5%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Triton](https://img.shields.io/badge/Triton-3.x-9333ea.svg)](https://triton-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-144%20passed-brightgreen.svg)](#test-suite)
+[![Tests](https://img.shields.io/badge/tests-147%20passed-brightgreen.svg)](#test-suite)
 
 </div>
 
@@ -19,12 +19,14 @@ Custom Triton kernels · 4D parallelism (DP+EP+TP+PP) · Async two-tier checkpoi
 > [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20688837.svg)](https://doi.org/10.5281/zenodo.20688837)  
 > [Read the preprint on Zenodo](https://zenodo.org/records/20688837) · [PDF](https://zenodo.org/records/20688837/files/moe-engine-preprint-v2.pdf)
 
-> **v0.3.1 patch (June 2026):** Fixes a crash in `train.py`
-> (`AttributeError: 'dict' object has no attribute 'raw'`) that blocked
-> all execution since v0.3 shipped. Also adds `pytest-repeat` to dev deps,
-> implements the dense-baseline benchmark, and ships real CPU benchmark
-> numbers from a Colab run. See `benchmarks/BENCHMARKS.md §v0.3.1 Patch Notes`.
-
+> **v0.3.2 patch (June 2026):** Fixes a Triton kernel compile-time crash
+> (`AssertionError: int32[] used as tl.static_range end value is not a
+> constexpr`) that broke every real-GPU invocation since v0.2 — undetected
+> because CPU-only CI never compiles the Triton kernel. Also fixes a
+> missing `pytest-repeat` dependency and adds real dense-baseline
+> measurements. v0.3.1 fixed a separate `train.py` crash
+> (`cfg.raw` AttributeError). See `benchmarks/BENCHMARKS.md` for both
+> patch note sections.
 
 ---
 
@@ -209,7 +211,7 @@ python train.py --config configs/smoke.yaml --smoke --wandb-project moe-engine
 
 ```bash
 pytest tests/ -v --ignore=tests/test_chaos.py
-# 144 passed, 1 skipped, ~60 seconds on CPU
+# 147 passed, 1 skipped, ~60 seconds on CPU
 ```
 
 ### Run chaos tests (requires torchrun on PATH)
@@ -360,11 +362,11 @@ tests/
   test_mfu.py                  – MFU formula, sparse accounting
   test_mfu_v02.py              – MFUAccountant, detailed breakdown, smoothing (v0.2)
   test_telemetry.py            – JSON emission, thread safety, WandB mock (v0.3)
-  test_smoke_e2e.py            – full train.py loop, JSONL envelope, S3 (mocked)
+  test_smoke_e2e.py            – full train.py loop, JSONL envelope, S3 (mocked); v0.3.1 regression test
   test_chaos.py                – torchrun chaos scenarios A (⚠️ flaky) and B (✅)
 ```
 
-`pytest tests/ -v --ignore=tests/test_chaos.py` → **144 passed, 1 skipped** on CPU in ~60s (includes 2-rank mp.spawn tests for TP, PP, and SP).
+`pytest tests/ -v --ignore=tests/test_chaos.py` → **147 passed, 1 skipped** on CPU in ~60s (includes 2-rank mp.spawn tests for TP, PP, and SP; v0.3.1 `cfg.raw` regression test; v0.3.2 Triton `K`-constexpr regression tests).
 
 ---
 
@@ -397,7 +399,7 @@ moe-engine/
 ├── configs/
 │   ├── default.yaml                 H100-scale production config
 │   └── smoke.yaml                   CPU-only 2-step test config
-├── tests/                           Full test suite (15 files, 144 tests)
+├── tests/                           Full test suite (15 files, 145 tests)
 ├── docs/                            Architecture, design, operations docs
 ├── train.py                         TorchElastic entrypoint
 ├── roadmap.md                       Honest status + next actions
