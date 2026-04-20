@@ -216,7 +216,10 @@ def main() -> None:
         wandb_init_kwargs=wandb_kwargs if wandb_kwargs else None,
     )
     # Log hyperparameters to WandB run config (no-op if WandB inactive)
-    logger.log_config(cfg.raw)
+    # NOTE (v0.3.1 fix): `cfg` is already the raw dict — `load_config(...).raw`
+    # was unwrapped on line ~150. `cfg.raw` does not exist on a dict and
+    # raised AttributeError on every invocation of main(). Pass `cfg` directly.
+    logger.log_config(cfg)
     mfu_acct = MFUAccountant(
         peak_tflops=cfg["telemetry"]["hardware_peak_tflops"],
         mfu_target=cfg["telemetry"]["mfu_target"],
