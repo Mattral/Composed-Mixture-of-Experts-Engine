@@ -19,6 +19,13 @@ Custom Triton kernels · 4D parallelism (DP+EP+TP+PP) · Async two-tier checkpoi
 > [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20688837.svg)](https://doi.org/10.5281/zenodo.20688837)  
 > [Read the preprint on Zenodo](https://zenodo.org/records/20688837) · [PDF](https://zenodo.org/records/20688837/files/moe-engine-preprint-v2.pdf)
 
+> **v0.3.1 patch (June 2026):** Fixes a crash in `train.py`
+> (`AttributeError: 'dict' object has no attribute 'raw'`) that blocked
+> all execution since v0.3 shipped. Also adds `pytest-repeat` to dev deps,
+> implements the dense-baseline benchmark, and ships real CPU benchmark
+> numbers from a Colab run. See `benchmarks/BENCHMARKS.md §v0.3.1 Patch Notes`.
+
+
 ---
 
 ## What this is
