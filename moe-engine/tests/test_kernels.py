@@ -131,3 +131,80 @@ def test_router_profile_populated():
     assert prof is not None
     assert prof.sram_bytes_per_block > 0
     assert prof.tokens_per_expert_mean > 0
+
+
+def test_triton_kernels_declare_k_as_constexpr():
+    """Regression test (v0.3.2): both Triton kernels must declare ``K`` as
+    ``tl.constexpr``, not as a plain runtime argument.
+
+    The kernels use ``tl.static_range(0, K)`` as a loop bound. Triton's
+    ``static_range`` requires a compile-time constant; passing a runtime
+    ``int32`` value raises
+    ``AssertionError('int32[] used as tl.static_range end value is not
+    a constexpr')`` at kernel compile time — but only on an actual GPU with
+    Triton installed. Every test in this suite runs the CPU fp64 reference
+    path (`_triton_forward` is only reachable when
+    ``TRITON_AVAILABLE and tokens.is_cuda``), so this bug shipped in v0.2/v0.3
+    completely undetected by CI and was only caught on a real T4 GPU run.
+
+    This test inspects the kernel source directly (via `inspect.getsource`)
+    so it can catch a regression on CPU-only CI, the same way
+    `test_row_parallel_uses_all_reduce_not_reduce_scatter` in
+    `test_tensor_parallel.py` guards the RowParallel collective bug.
+    """
+    import inspect
+    from pkg.kernels.moe_router import TRITON_AVAILABLE
+
+    if not TRITON_AVAILABLE:
+        pytest.skip("Triton not installed; kernel source unavailable to inspect")
+
+    import pkg.kernels.moe_router as mod
+
+    for kernel_name in ("_router_fwd_kernel", "_router_bwd_kernel"):
+        # triton.jit wraps the function; the underlying source is on .fn
+        kernel = getattr(mod, kernel_name)
+        src = inspect.getsource(kernel.fn if hasattr(kernel, "fn") else kernel)
+        assert "K: tl.constexpr" in src, (
+            f"{kernel_name} must declare 'K: tl.constexpr' in its signature — "
+            f"found a plain 'K' argument, which breaks tl.static_range(0, K) "
+            f"on every real GPU invocation (v0.3.2 regression)"
+        )
+
+
+def test_triton_kernel_source_declares_k_as_constexpr():
+    """Regression test (v0.3.2), Triton-independent variant.
+
+    Unlike `test_triton_kernels_declare_k_as_constexpr`, this test reads the
+    raw source file directly and does not require Triton to be installed —
+    it therefore runs unconditionally on CPU-only CI, which is exactly the
+    environment that let the original bug ship undetected through v0.2 and
+    v0.3. See that test's docstring for the full root-cause explanation.
+    """
+    import pkg.kernels.moe_router as mod
+    src_path = mod.__file__
+    with open(src_path, encoding="utf-8") as f:
+        src = f.read()
+
+    # Both kernel signatures must declare K as tl.constexpr.
+    # Count only the actual parameter declarations (indented, trailing comma),
+    # not the explanatory mention in the module docstring above.
+    sig_count = src.count("        K: tl.constexpr,\n")
+    assert sig_count == 2, (
+        f"Expected both _router_fwd_kernel and _router_bwd_kernel to declare "
+        f"'K: tl.constexpr,' as a parameter — found {sig_count} occurrence(s). "
+        f"If K is reintroduced as a plain runtime argument, "
+        f"tl.static_range(0, K) will fail on every real GPU invocation with "
+        f"\"AssertionError('int32[] used as tl.static_range end value is not "
+        f"a constexpr')\" (v0.3.2 regression)."
+    )
+    # The bare positional 'K,' pattern (the buggy v0.2/v0.3 form) must be gone
+    # from both kernel parameter lists.
+    assert "N, H, E, K,\n" not in src, (
+        "_router_fwd_kernel signature still declares K as a plain positional "
+        "argument (the v0.3.2 bug pattern)"
+    )
+    assert "N, E, K,\n" not in src, (
+        "_router_bwd_kernel signature still declares K as a plain positional "
+        "argument (the v0.3.2 bug pattern)"
+    )
+
