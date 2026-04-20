@@ -119,15 +119,19 @@ socket cleanup after SIGKILL. The root cause and mitigation are documented in
 `roadmap.md §Known Deficiencies`. Do not mark Scenario A as blocking in CI —
 the `.github/workflows/ci.yml` runs it with `continue-on-error: true`.
 
-### Measuring pass rate over many runs (v0.3.1)
+### Measuring pass rate over many runs (v0.3.1, dependency fixed in v0.3.2)
 
 To measure the actual Scenario A pass rate on your machine, run the test
 multiple times. Two options, depending on what's installed:
 
-**Option A — `pytest-repeat`** (included in `dev` extras as of v0.3.1):
+**Option A — `pytest-repeat`** (now in `requirements.txt` directly as of
+v0.3.2 — previously it was only in `pyproject.toml`'s `dev` extras, which a
+plain `pip install -r requirements.txt && pip install -e .` would silently
+skip):
 
 ```bash
-pip install -e ".[dev]"   # now includes pytest-repeat>=0.9.3
+pip install -r requirements.txt   # now includes pytest-repeat>=0.9.3
+# or: pip install -e ".[dev]"
 
 CHAOS_FAULT_TOLERANT=1 GLOO_SOCKET_IFNAME=lo \
   pytest tests/test_chaos.py -v -m chaos -k "scenario_a" --count=20
