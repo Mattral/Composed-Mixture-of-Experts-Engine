@@ -9,6 +9,7 @@ Measures:
   1. Router forward + backward throughput (tokens/sec)
   2. DistributedMoELayer single-process forward latency
   3. All-to-all overhead vs expert compute ratio
+  4. MoE layer vs dense SwiGLU baseline (routing overhead ratio) [v0.3.1]
 
 Run:
   python benchmarks/run_benchmark.py                  # CPU sweep
@@ -35,7 +36,7 @@ sys.path.insert(0, str(ROOT))
 import torch
 
 from pkg.kernels.moe_router import MoERouter, moe_topk_route
-from pkg.distributed.parallel_mesh import DistributedMoELayer, build_topology
+from pkg.distributed.parallel_mesh import DistributedMoELayer, _SwiGLUExpert, build_topology
 from pkg.utils.mfu import compute_mfu_detailed
 
 
@@ -173,6 +174,53 @@ def bench_moe_layer(
     )
 
 
+def bench_dense_baseline(
+    B: int, S: int, H: int, F: int, device: str, iters: int = 10
+) -> BenchResult:
+    """Benchmark a single dense SwiGLU FFN block — the MoE-vs-dense reference point.
+
+    This is the ``E=1, K=1`` baseline: identical hidden/FFN dimensions and
+    identical compute-per-token as one expert in ``bench_moe_layer``, but with
+    zero routing overhead (no MoERouter call, no token sort, no all-to-all).
+
+    Comparing ``bench_moe_layer(B, S, H, F, E, K, ...)`` against
+    ``bench_dense_baseline(B, S, H, F, ...)`` with the same ``(B, S, H, F)``
+    isolates the cost of routing + dispatch: at ``ep_size=1`` the all-to-all
+    is a no-op, so the difference is almost entirely the router kernel call
+    and the token sort/scatter in ``DistributedMoELayer.forward``.
+
+    Note this is NOT a "MoE does E times less work" claim — a single MoE
+    layer with ``E`` experts holds ``E``x the parameters of this dense
+    baseline, but each token still only activates ``K`` experts, so per-token
+    FLOPs are comparable to this baseline (up to routing overhead).
+    """
+    topo = build_topology(dp_size=1, ep_size=1, tp_size=1, device_type=device)
+    ffn = _SwiGLUExpert(hidden_dim=H, ffn_dim=F, topology=topo, dtype=torch.float32).to(device)
+    x = torch.randn(B, S, H, device=device)
+
+    def fwd():
+        with torch.no_grad():
+            return ffn(x)
+
+    mean_ms, std_ms = _time_fn(fwd, sync_cuda=(device != "cpu"), iters=iters)
+    N = B * S
+    tps = N / (mean_ms / 1000)
+
+    mfu = compute_mfu_detailed(
+        batch_tokens=N, param_dense=3 * H * F, param_expert=0,
+        num_experts=1, top_k=1, world_size=1,
+        hardware_peak_tflops=989.0,
+        step_time_sec=mean_ms / 1000,
+    ).mfu
+
+    return BenchResult(
+        name="dense_baseline_fwd", device=device, N=N, H=H, E=1, K=1,
+        batch_ms_mean=mean_ms, batch_ms_std=std_ms,
+        tokens_per_sec=tps, mfu_estimate=mfu, passed=True,
+        notes=f"B={B} S={S} F={F} (single SwiGLU FFN, no router/dispatch)",
+    )
+
+
 def bench_token_conservation(
     N: int, H: int, E: int, K: int, device: str
 ) -> BenchResult:
@@ -240,8 +288,10 @@ def run_suite(device: str) -> List[BenchResult]:
     ]
     for B, S, H, F, E, K in moe_configs:
         tag = f"B={B} S={S} H={H} F={F} E={E} K={K}"
+        moe_result: Optional[BenchResult] = None
         try:
             r = bench_moe_layer(B, S, H, F, E, K, device)
+            moe_result = r
             print(f"  moe_layer    {tag}  {r.batch_ms_mean:.2f}±{r.batch_ms_std:.2f}ms  "
                   f"{r.tokens_per_sec/1e3:.1f}k tok/s")
             results.append(r)
@@ -249,6 +299,22 @@ def run_suite(device: str) -> List[BenchResult]:
             print(f"  moe_layer    {tag}  FAILED: {exc}")
             results.append(BenchResult("moe_layer_fwd", device, B * S, H, E, K,
                                         0, 0, 0, 0, False, str(exc)))
+
+        # Dense baseline: same (B,S,H,F), E=1/K=1, no router/dispatch (v0.3.1)
+        try:
+            d = bench_dense_baseline(B, S, H, F, device)
+            ratio_str = ""
+            if moe_result is not None and moe_result.passed and d.batch_ms_mean > 0:
+                ratio = moe_result.batch_ms_mean / d.batch_ms_mean
+                ratio_str = f"  ({ratio:.2f}x dense; MoE holds {E}x the params)"
+            print(f"  dense_base   {tag}  {d.batch_ms_mean:.2f}±{d.batch_ms_std:.2f}ms  "
+                  f"{d.tokens_per_sec/1e3:.1f}k tok/s{ratio_str}")
+            results.append(d)
+        except Exception as exc:
+            print(f"  dense_base   {tag}  FAILED: {exc}")
+            results.append(BenchResult("dense_baseline_fwd", device, B * S, H, 1, 1,
+                                        0, 0, 0, 0, False, str(exc)))
+
 
     # Token conservation
     r = bench_token_conservation(512, 128, 32, 2, device)
