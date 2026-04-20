@@ -1,6 +1,6 @@
 # Results & Evidence
 
-**Version:** v0.3.1  
+**Version:** v0.3.2  
 **Updated:** June 2026
 
 This document contains reproducible results from `moe-engine`. Every number
@@ -100,18 +100,21 @@ vary together across these configs (not a controlled single-variable sweep).
 
 ![MoE layer throughput](moe-engine/benchmarks/charts/moe_layer_throughput_v0.3.1.png)
 
-### MoE vs Dense Baseline (v0.3.1 — added, not yet run)
+### MoE vs Dense Baseline (Real Measurements, v0.3.2)
 
-`bench_dense_baseline` was implemented in v0.3.1 to satisfy the "compare
-against a dense baseline" requirement. It has not yet been executed — the
-real-data run above predates this addition. Re-run
-`python benchmarks/run_benchmark.py --json results.json` to populate:
+`bench_dense_baseline` (implemented v0.3.1, measured v0.3.2) isolates pure
+routing + token-sort overhead at `ep_size=1`:
 
 | B | S | H | F | E | K | MoE (ms) | Dense (ms) | Routing overhead |
 |--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 2 | 16 | 128 | 256 | 8  | 2 | (rerun) | (rerun) | (rerun) |
-| 2 | 32 | 256 | 512 | 16 | 2 | (rerun) | (rerun) | (rerun) |
-| 4 | 16 | 512 | 1024| 32 | 2 | (rerun) | (rerun) | (rerun) |
+| 2 | 16 | 128 | 256  | 8  | 2 | 2.582  | 0.260 | **9.93x** |
+| 2 | 32 | 256 | 512  | 16 | 2 | 7.934  | 0.956 | **8.30x** |
+| 4 | 16 | 512 | 1024 | 32 | 2 | 44.288 | 3.593 | **12.33x** |
+
+This is the unoptimized CPU fp64 reference-path overhead, not a production
+GPU number — the dense baseline also holds 8–32x fewer parameters than the
+MoE config it's compared against. See `benchmarks/BENCHMARKS.md` for the
+full interpretation note.
 
 ---
 
@@ -229,7 +232,7 @@ pytest tests/ -v --ignore=tests/test_chaos.py
 
 | File | Tests | Result |
 |---|--:|---|
-| test_kernels.py | 5 | ✅ |
+| test_kernels.py | 7 | ✅ (v0.3.2: +2 Triton constexpr regression tests) |
 | test_kernels_numerics.py | 13 | ✅ |
 | test_routing_quality.py | 12 | ✅ |
 | test_tensor_parallel.py | 19 | ✅ (incl. 2-rank mp.spawn) |
@@ -243,7 +246,7 @@ pytest tests/ -v --ignore=tests/test_chaos.py
 | test_mfu_v02.py | 15 | ✅ |
 | test_telemetry.py | 22 | ✅ (incl. WandB mock, v0.3) |
 | test_smoke_e2e.py | 3 | ✅ (incl. v0.3.1 regression test) |
-| **Total** | **145** | **✅** |
+| **Total** | **147** | **✅** |
 
 _1 test skipped: GPU-only Triton kernel path (requires CUDA)._
 
@@ -261,3 +264,22 @@ catchable by static analysis. Full details in
    dev deps + bash-loop alternative documented.
 3. Dense baseline benchmark was a stub — **implemented** in
    `benchmarks/run_benchmark.py`.
+
+## v0.3.2 Patch Summary
+
+Two more bugs were found via a real T4 GPU run on Google Colab — bug 4 is
+the most consequential one found so far, because it is the first bug that
+**cannot be reproduced on CPU-only CI at all**:
+
+4. Both Triton kernels crashed at compile time on every real GPU invocation
+   (`K` used in `tl.static_range(0, K)` without being declared
+   `tl.constexpr`) — **fixed**, two regression tests added (one
+   Triton-independent, runs on CPU-only CI).
+5. `pytest-repeat` was missing from `requirements.txt` (only in `pyproject.toml`
+   dev extras) — **fixed**, added to `requirements.txt` directly.
+6. The dense-baseline table above is now populated with real measurements
+   from this same Colab run (9.93x–12.33x routing overhead at `ep_size=1`,
+   CPU reference path).
+
+Full details: `benchmarks/BENCHMARKS.md §v0.3.2 Patch Notes`.
+

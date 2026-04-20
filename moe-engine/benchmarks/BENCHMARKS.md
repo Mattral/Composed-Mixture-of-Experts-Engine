@@ -1,6 +1,6 @@
 # moe-engine Benchmark Results
 
-**Version:** v0.3.1  
+**Version:** v0.3.2  
 **Updated:** June 2026
 
 ---
@@ -79,29 +79,33 @@ _Triton GPU path: run with `--cuda` on H100 — expect 10–20× speedup at H=40
 
 ---
 
-## MoE vs Dense Baseline (v0.3.1 — new)
+## MoE vs Dense Baseline (Real Measurements, v0.3.2)
 
-`bench_dense_baseline` (added in v0.3.1) measures a single `_SwiGLUExpert`
-(E=1, K=1, no `MoERouter` call, no token sort, no all-to-all) at the same
-`(B, S, H, F)` as each `moe_layer_fwd` config above. The ratio
-`moe_layer_ms / dense_baseline_ms` isolates the cost of routing + dispatch at
-`ep_size=1` (where all-to-all is a no-op):
+`bench_dense_baseline` (implemented in v0.3.1) measures a single
+`_SwiGLUExpert` (E=1, K=1, no `MoERouter` call, no token sort, no
+all-to-all) at the same `(B, S, H, F)` as each `moe_layer_fwd` config above.
+The ratio `moe_layer_ms / dense_baseline_ms` isolates the cost of routing +
+dispatch at `ep_size=1` (where all-to-all is a no-op):
 
 ```bash
 python benchmarks/run_benchmark.py --json benchmarks/cpu_results.json
-# Look for "dense_base" rows and the "(N.NNx dense; MoE holds Ex the params)" annotation
 ```
-
-This benchmark was added in this release and has not yet been run — the
-`cpu_results_colab.json` above predates it. **Action item:** re-run
-`run_benchmark.py` with v0.3.1 to populate this table with real
-`dense_baseline_fwd` rows and routing-overhead ratios.
 
 | B | S | H | F | E | K | MoE latency (ms) | Dense latency (ms) | Routing overhead |
 |--:|--:|--:|--:|--:|--:|--:|--:|--:|
-| 2 | 16 | 128 | 256 | 8 | 2 | — | — | — |
-| 2 | 32 | 256 | 512 | 16 | 2 | — | — | — |
-| 4 | 16 | 512 | 1024 | 32 | 2 | — | — | — |
+| 2 | 16 | 128 | 256  | 8  | 2 | 2.582  | 0.260 | **9.93x** |
+| 2 | 32 | 256 | 512  | 16 | 2 | 7.934  | 0.956 | **8.30x** |
+| 4 | 16 | 512 | 1024 | 32 | 2 | 44.288 | 3.593 | **12.33x** |
+
+**Reading this table correctly:** this is *not* "MoE is 8–12x slower than
+dense" in the production sense — at `ep_size=1` there is no all-to-all
+overlap to amortize this cost against, and the dense baseline holds only
+`1/E` the parameters (8x, 16x, 32x fewer respectively). What this isolates
+is the pure CPU reference-path routing + token-sort overhead, which is
+substantial in the unoptimized fp64 fallback. On GPU with the fused Triton
+kernel (fixed in v0.3.2 — see Patch Notes below), the entire router is a
+single kernel launch; this ratio is expected to shrink substantially. This
+is the right benchmark to re-run once `--cuda` numbers are available (v0.4).
 
 
 
@@ -229,4 +233,43 @@ because they are runtime-only failures:
 can detect. The fix process here is the textbook case for why "tests must
 actually execute, not just parse" is non-negotiable — and why this regression
 shipped in v0.3 despite 0 syntax errors across 33 files.
+
+---
+
+## v0.3.2 Patch Notes
+
+A real T4 GPU run on Google Colab surfaced a fourth bug — this one **only
+reachable on actual CUDA hardware with Triton installed**, which is exactly
+why it shipped silently through v0.2, v0.3, and v0.3.1 despite 145+ tests:
+
+4. **Both Triton kernels crashed at compile time on every GPU invocation**
+   (`AssertionError('int32[] used as tl.static_range end value is not a
+   constexpr')`). `_router_fwd_kernel` and `_router_bwd_kernel` both declared
+   `K` as a plain runtime `int32` argument while using it as the loop bound
+   in `tl.static_range(0, K)` — Triton's `static_range` requires a
+   compile-time constant. Fixed: `K` is now declared `K: tl.constexpr` in
+   both signatures, and all three call sites pass it as the keyword `K=k`
+   (matching how `BLOCK_N`/`BLOCK_H`/`BLOCK_E` were already passed).
+   Regression tests added: `test_triton_kernels_declare_k_as_constexpr`
+   (skips without Triton installed) and
+   `test_triton_kernel_source_declares_k_as_constexpr` (Triton-independent,
+   runs unconditionally on CPU-only CI — the exact environment that let this
+   bug through three releases).
+
+5. **`pytest-repeat` was declared only in `pyproject.toml`'s `dev` extras**,
+   not in `requirements.txt`. A notebook running
+   `pip install -r requirements.txt && pip install -e .` (without `[dev]`)
+   silently skipped it, causing `--count=N` to fail with
+   `unrecognized arguments: --count=20`. Fixed: added to `requirements.txt`
+   directly so both install paths work identically.
+
+**Lesson, continued from v0.3.1:** every test in this suite that calls
+`MoERouterAutograd.apply` runs the CPU fp64 reference path, because
+`_triton_forward` is gated on `TRITON_AVAILABLE and tokens.is_cuda`. A
+CPU-only CI matrix — however large — provides **zero** coverage of the
+actual Triton kernel source. The two regression tests added in this release
+intentionally include a Triton-independent variant precisely so a CPU-only
+CI run can still catch a regression of this exact class without requiring a
+GPU runner.
+
 
