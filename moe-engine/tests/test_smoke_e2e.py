@@ -17,6 +17,7 @@ import json
 import os
 import shutil
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 
@@ -124,6 +125,45 @@ def _assert_telemetry_envelope(jsonl_path: Path) -> None:
             assert "router_z_loss" in rec["routing"], (
                 "router_z_loss missing from routing section"
             )
+
+
+def test_load_config_raw_is_plain_dict() -> None:
+    """Regression test (v0.3.1): ``load_config(path).raw`` must be a plain
+    ``dict``, not a ``Config`` object.
+
+    v0.3 introduced ``logger.log_config(cfg.raw)`` in ``train.py`` while
+    ``cfg`` was already assigned as ``load_config(args.config).raw`` two
+    statements above — i.e. ``cfg`` was already the raw dict. Calling
+    ``.raw`` on a dict raised ``AttributeError: 'dict' object has no
+    attribute 'raw'`` on every invocation of ``main()``, including
+    ``--smoke``.
+
+    This test asserts the invariant the fix depends on: ``Config.raw`` is a
+    plain ``dict`` and therefore has no ``.raw`` attribute of its own. If a
+    future change re-wraps ``cfg`` in a ``Config``-like object, this test
+    will fail loudly instead of surfacing as a runtime crash in ``main()``.
+    """
+    from pkg.utils.config import load_config
+    from pkg.telemetry.logger import StructuredLogger
+
+    with tempfile.TemporaryDirectory() as td:
+        cfg_path = _smoke_yaml(Path(td) / "run", remote_uri=f"file://{td}/remote")
+        cfg = load_config(cfg_path).raw
+
+        assert isinstance(cfg, dict), f"Config.raw must be dict, got {type(cfg)}"
+        assert not hasattr(cfg, "raw"), (
+            "cfg.raw must NOT exist on the unwrapped config dict — "
+            "if it does, train.py's `cfg = load_config(args.config).raw` "
+            "followed by `logger.log_config(cfg.raw)` is reintroducing the "
+            "v0.3 AttributeError regression"
+        )
+        # The actual call made in train.py — must not raise.
+        logger = StructuredLogger(
+            json_path=str(Path(td) / "step.jsonl"), rank=0, also_stdout=False,
+            wandb_enabled=False,
+        )
+        logger.log_config(cfg)  # must not raise AttributeError
+        logger.close()
 
 
 def test_smoke_local_file_tier(tmp_path: Path) -> None:
