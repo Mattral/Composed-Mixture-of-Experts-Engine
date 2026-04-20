@@ -8,5 +8,6 @@ tensorboard>=2.16.0
 pytest>=8.0.0
 pytest-mock>=3.12.0
 pytest-timeout>=2.3.0
+pytest-repeat>=0.9.3
 moto>=5.0.0
 psutil>=5.9.0
