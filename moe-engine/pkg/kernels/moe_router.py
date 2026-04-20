@@ -38,12 +38,20 @@ Token Conservation Invariant
     sum(dispatch_cnt) == N * K        (asserted every forward pass)
     idx values in [0, E)              (no -1 / NaN entries)
 
-Shape glossary
---------------
-    N  = Batch × Sequence   (flattened token count)
-    H  = hidden_dim
-    E  = num_experts
-    K  = top_k
+v0.3.2 fix
+----------
+Both Triton kernels previously declared ``K`` as a plain runtime int32
+argument while using it as the loop bound in ``tl.static_range(0, K)``.
+``static_range`` requires a compile-time constant; passing a runtime value
+raised ``AssertionError('int32[] used as tl.static_range end value is not
+a constexpr')`` on every GPU invocation. This was never caught by CI because
+every test runs on the CPU fp64 reference path — ``_triton_forward`` is only
+reachable when ``TRITON_AVAILABLE and tokens.is_cuda``, which is false on
+CI runners. ``K`` is now declared ``K: tl.constexpr`` in both kernel
+signatures, and all three call sites pass it as the keyword ``K=k``
+(consistent with ``BLOCK_N``/``BLOCK_H``/``BLOCK_E``). A practical
+consequence: Triton recompiles a specialised kernel per distinct ``k``
+value, the same way it already does per ``BLOCK_E``.
 """
 
 from __future__ import annotations
@@ -99,7 +107,8 @@ if TRITON_AVAILABLE:
         stride_in, stride_ik,
         stride_wn, stride_wk,
         stride_ln, stride_le,
-        N, H, E, K,
+        N, H, E,
+        K: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_H: tl.constexpr,
         BLOCK_E: tl.constexpr,
@@ -159,7 +168,8 @@ if TRITON_AVAILABLE:
         stride_in, stride_ik,
         stride_ln, stride_le,
         stride_dn, stride_de,
-        N, E, K,
+        N, E,
+        K: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_E: tl.constexpr,
     ):
@@ -287,7 +297,7 @@ def _triton_forward(
             topk_idx.stride(0), topk_idx.stride(1),
             topk_w.stride(0), topk_w.stride(1),
             logits.stride(0), logits.stride(1),
-            N, H, E, k, BLOCK_N=BLOCK_N, BLOCK_H=BLOCK_H, BLOCK_E=BLOCK_E,
+            N, H, E, K=k, BLOCK_N=BLOCK_N, BLOCK_H=BLOCK_H, BLOCK_E=BLOCK_E,
         )
         end.record(); end.synchronize()
         kernel_ms = max(end.elapsed_time(start), 0.0)
@@ -299,7 +309,7 @@ def _triton_forward(
             topk_idx.stride(0), topk_idx.stride(1),
             topk_w.stride(0), topk_w.stride(1),
             logits.stride(0), logits.stride(1),
-            N, H, E, k, BLOCK_N=BLOCK_N, BLOCK_H=BLOCK_H, BLOCK_E=BLOCK_E,
+            N, H, E, K=k, BLOCK_N=BLOCK_N, BLOCK_H=BLOCK_H, BLOCK_E=BLOCK_E,
         )
         kernel_ms = 0.0
 
@@ -375,7 +385,7 @@ class MoERouterFunction(torch.autograd.Function):
                 topk_idx.stride(0), topk_idx.stride(1),
                 logits.stride(0), logits.stride(1),
                 grad_logits.stride(0), grad_logits.stride(1),
-                N, E, k, BLOCK_N=BLOCK_N, BLOCK_E=BLOCK_E,
+                N, E, K=k, BLOCK_N=BLOCK_N, BLOCK_E=BLOCK_E,
             )
             grad_logits = grad_logits.to(tokens.dtype)
         else:
