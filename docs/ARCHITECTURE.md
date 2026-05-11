@@ -66,12 +66,12 @@ train.py
 ```
 World = dp_size × tp_size × pp_size × ep_size
 
-  ┌─────────────────────────────────────────────────┐
+  ┌──────────────────────────────────────────────────┐
   │  DP axis  (FSDP2 per-parameter DTensor sharding) │
   │  TP axis  (ColumnParallel / RowParallel / SP)    │
   │  PP axis  (PipelineStage 1F1B schedule)          │
   │  EP axis  (all_to_all_single on dedicated stream)│
-  └─────────────────────────────────────────────────┘
+  └──────────────────────────────────────────────────┘
 ```
 
 **Data Parallelism (DP):**  
