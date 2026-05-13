@@ -21,11 +21,15 @@ import torch
 import pytest
 
 from pkg.distributed.parallel_mesh import (
+
+
     DistributedMoELayer,
     ParallelTopology,
     build_topology,
 )
 
+
+pytestmark = pytest.mark.cpu
 
 def test_topology_singleton_cpu():
     topo = build_topology(dp_size=1, ep_size=1, device_type="cpu")
@@ -33,7 +37,6 @@ def test_topology_singleton_cpu():
     assert topo.rank == 0
     assert topo.ep_size == 1
     assert topo.experts_on_this_rank(64) == list(range(64))
-
 
 def test_topology_expert_split_remainder():
     """Even-split with remainder must keep every expert assigned exactly once."""
@@ -50,7 +53,6 @@ def test_topology_expert_split_remainder():
         local = fake_r.experts_on_this_rank(10)
         seen.update(local)
     assert seen == set(range(10))
-
 
 @pytest.mark.parametrize("B,S,H,F,E,K", [
     (2, 8, 32, 64, 4, 2),
@@ -70,7 +72,6 @@ def test_moe_layer_forward_shape_and_grad(B, S, H, F, E, K):
     assert x.grad is not None and torch.isfinite(x.grad).all()
     assert layer.router.gate_w.grad is not None
     assert torch.isfinite(layer.router.gate_w.grad).all()
-
 
 def test_expert_to_rank_round_trip():
     topo = ParallelTopology(

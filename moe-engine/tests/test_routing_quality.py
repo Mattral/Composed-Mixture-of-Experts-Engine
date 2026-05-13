@@ -21,11 +21,15 @@ import pytest
 import torch
 
 from pkg.kernels.moe_router import (
+
+
     MoERouter,
     _compute_load_imbalance,
     _compute_router_z_loss,
 )
 
+
+pytestmark = pytest.mark.cpu
 
 # ---------------------------------------------------------------------------
 # Load imbalance helpers
@@ -36,26 +40,22 @@ def test_load_imbalance_perfect_balance():
     cnt = torch.tensor([10, 10, 10, 10], dtype=torch.long)
     assert abs(_compute_load_imbalance(cnt) - 1.0) < 1e-6
 
-
 def test_load_imbalance_all_to_one():
     """All tokens routed to one expert yields high imbalance."""
     cnt = torch.tensor([100, 0, 0, 0], dtype=torch.long)
     # max=100, mean=25 → ratio=4.0
     assert abs(_compute_load_imbalance(cnt) - 4.0) < 1e-6
 
-
 def test_load_imbalance_two_experts():
     cnt = torch.tensor([30, 10, 20, 40], dtype=torch.long)
     expected = 40.0 / 25.0   # max=40, mean=25
     assert abs(_compute_load_imbalance(cnt) - expected) < 1e-6
-
 
 def test_load_imbalance_zero_counts():
     """All-zero counts should not divide by zero."""
     cnt = torch.zeros(8, dtype=torch.long)
     result = _compute_load_imbalance(cnt)
     assert result == 1.0
-
 
 # ---------------------------------------------------------------------------
 # Z-loss
@@ -68,7 +68,6 @@ def test_router_z_loss_positive():
     z = _compute_router_z_loss(logits)
     assert z >= 0.0
 
-
 def test_router_z_loss_zero_logits():
     """With all-zero logits, log(sum(exp(0))) = log(E), z_loss = log(E)^2."""
     E = 16
@@ -76,7 +75,6 @@ def test_router_z_loss_zero_logits():
     z = _compute_router_z_loss(logits)
     expected = math.log(E) ** 2
     assert abs(z - expected) < 1e-4
-
 
 def test_router_z_loss_large_logits_bigger():
     """Larger logit magnitudes should produce larger z-loss."""
@@ -86,7 +84,6 @@ def test_router_z_loss_large_logits_bigger():
     z_small = _compute_router_z_loss(logits_small)
     z_large = _compute_router_z_loss(logits_large)
     assert z_large > z_small
-
 
 # ---------------------------------------------------------------------------
 # RouterProfile completeness
@@ -100,7 +97,6 @@ def test_router_profile_populated_after_forward():
     router(tokens)
     p = router.last_profile
     assert p is not None
-
 
 def test_router_profile_fields_v02():
     """v0.2 RouterProfile must include load_imbalance and z_loss fields."""
@@ -118,7 +114,6 @@ def test_router_profile_fields_v02():
     assert p.tokens_per_expert_std >= 0.0
     assert isinstance(p.used_triton, bool)
 
-
 def test_router_profile_consistent_with_dispatch():
     """tokens_per_expert_mean == N*K/E exactly."""
     H, E, K, N = 32, 8, 2, 64
@@ -128,7 +123,6 @@ def test_router_profile_consistent_with_dispatch():
     p = router.last_profile
     expected_mean = (N * K) / E
     assert abs(p.tokens_per_expert_mean - expected_mean) < 1e-4
-
 
 # ---------------------------------------------------------------------------
 # Imbalance improves with uniform initialization
@@ -159,7 +153,6 @@ def test_uniform_init_lower_imbalance(seed):
         f"sharp init ({p_sharp.expert_load_imbalance:.3f})"
     )
 
-
 # ---------------------------------------------------------------------------
 # Integration: imbalance and z_loss in training loop (no torch.distributed)
 # ---------------------------------------------------------------------------
@@ -182,7 +175,6 @@ def test_routing_quality_emitted_per_step():
     # Profile should differ across steps (different tokens → different routing)
     # (With high probability; technically could all be equal with tiny prob)
     assert len(set(round(v, 6) for v in imbalances)) > 1 or len(imbalances) == 1
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
