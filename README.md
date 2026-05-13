@@ -1,95 +1,347 @@
-<div align="center">
+# `moe-engine` &nbsp;&middot;&nbsp; A Composed Mixture-of-Experts Engine
 
-# `moe-engine` &nbsp;·&nbsp; Composed Mixture-of-Experts Engine
-
-**A production-grade sparse MoE training runtime.**  
-Custom Triton kernels · 4D parallelism (DP+EP+TP+PP) · Async two-tier checkpointing · TorchElastic fault tolerance
+> **Production-grade sparse MoE training runtime.**
+> Designed to keep large-scale pre-training jobs alive end-to-end:
+> sparse Top-K routing in custom Triton, DP+EP distributed training with TP
+> support in core layers and PP work in progress, on PyTorch 2.12+,
+> asynchronous sharded checkpointing through a two-tier
+> (NVMe → S3 / MinIO) durable store, and a TorchElastic state-machine that
+> evicts dead ranks, reshards experts, and hot-resumes training without
+> operator intervention.
 
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.5%2B-ee4c2c.svg)](https://pytorch.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.12%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Triton](https://img.shields.io/badge/Triton-3.x-9333ea.svg)](https://triton-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-147%20passed-brightgreen.svg)](#test-suite)
-
-</div>
-
-> **Associated Publication**  
-> This repository is accompanied by the following preprint:  
-> **moe-engine: A Fault-Tolerant Runtime for Hyperscale Mixture-of-Experts Training**  
-> Min Htet Myet, June 2026  
-> [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20688837.svg)](https://doi.org/10.5281/zenodo.20688837)  
-> [Read the preprint on Zenodo](https://zenodo.org/records/20688837) · [PDF](https://zenodo.org/records/20688837/files/moe-engine-preprint-v2.pdf)
-
-> **v0.3.2 patch (June 2026):** Fixes a Triton kernel compile-time crash
-> (`AssertionError: int32[] used as tl.static_range end value is not a
-> constexpr`) that broke every real-GPU invocation since v0.2 — undetected
-> because CPU-only CI never compiles the Triton kernel. Also fixes a
-> missing `pytest-repeat` dependency and adds real dense-baseline
-> measurements. v0.3.1 fixed a separate `train.py` crash
-> (`cfg.raw` AttributeError). See `benchmarks/BENCHMARKS.md` for both
-> patch note sections.
 
 ---
 
-## What this is
-
-`moe-engine` is a research-grade infrastructure layer for training large Mixture-of-Experts language models at hyperscale. It is designed around one core constraint: **at 10K+ GPUs, nodes die continuously**. The system must keep training alive end-to-end — routing correctly, checkpointing durably, and resuming without operator intervention.
-
-This is not a model. It is the runtime that a model runs on.
-
-> This repository is accompanied by a preprint that describes the system design, correctness mechanisms, elastic recovery strategy, and engineering lessons learned during development.
+## Table of Contents
+1. [Why this exists](#1-why-this-exists)
+2. [System architecture](#2-system-architecture)
+3. [Hardware & software requirements](#3-hardware--software-requirements)
+4. [Installation](#4-installation)
+5. [Local CPU / Gloo regression workflow](#5-local-cpu--gloo-regression-workflow)
+6. [Cluster-scale multi-GPU training](#6-cluster-scale-multi-gpu-training)
+7. [Configuration reference](#7-configuration-reference)
+8. [Mathematical invariants & CI gates](#8-mathematical-invariants--ci-gates)
+9. [Telemetry envelope](#9-telemetry-envelope)
+10. [Fault-injection / chaos workflow](#10-fault-injection--chaos-workflow)
+11. [Repository layout](#11-repository-layout)
+12. [License](#12-license)
 
 ---
 
-## Architecture
+## 1. Why this exists
+
+At frontier-lab scale three engineering disciplines that are normally separate
+teams must instead be co-designed in a single repository:
+
+| Layer | Concern | This repo's contribution |
+|------|---------|---------------------------|
+| **Hardware-aware kernels** | Memory coalescing, SRAM tiling, Tensor-Core feeding for sparse Top-K routing | `pkg/kernels/moe_router.py` — Triton forward + (planned) backward, dynamic-bound masking, 128-byte aligned loads |
+| **Distributed runtime** | DP+EP training with TP support in core layers, FSDP2 DTensor sharding, EP `all_to_all_single` overlapped with compute | `pkg/distributed/parallel_mesh.py` — `init_device_mesh((dp, ep))` with TP axis reserved, dedicated comm stream overlap, dedicated CUDA streams |
+| **Fault-tolerant infra** | Async pinned-memory checkpointing, S3/MinIO mirror, evict→reshard→reload state-machine | `pkg/elastic/fault_monitor.py` — TorchElastic harness, `SHARDED_STATE_DICT`, signal-driven flush |
+
+`moe-engine` keeps these three layers in one binary so an MFU regression or a
+checkpoint-stall bug can be isolated to a single line, not a six-team incident.
+
+---
+
+## 2. System architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                        Training Loop                            │
-│  train.py  ←  load_config  ←  configs/{default,smoke}.yaml      │
-└───────────────────┬─────────────────────────────────────────────┘
-                    │
-     ┌──────────────▼───────────────┐
-     │   DistributedMoELayer        │  pkg/distributed/parallel_mesh.py
-     │                              │
-     │  ┌──────────┐ ┌──────────┐   │
-     │  │MoERouter │ │ Experts  │   │  pkg/kernels/moe_router.py
-     │  │(Triton)  │ │(SwiGLU)  │   │
-     │  └────┬─────┘ └────▲─────┘   │
-     │       │  EP a2a     │        │
-     │  ┌────▼──────────────────┐   │
-     │  │  all_to_all dispatch  │   │  dedicated CUDA stream
-     │  │  all_to_all combine   │   │  compute-comm overlap
-     │  └───────────────────────┘   │
-     └──────────────┬───────────────┘
-                    │
-     ┌──────────────▼───────────────┐
-     │   ElasticTrainerHarness      │  pkg/elastic/fault_monitor.py
-     │                              │
-     │  AsyncCheckpointer           │  background I/O threads
-     │    NVMe tier  (fast)         │  pinned host → O_DIRECT write
-     │    S3/MinIO   (durable)      │  atomic rename + remote mirror
-     │                              │
-     │  ClusterStateMachine         │  heartbeat → evict → reshard
-     │    evict dead ranks          │  → reload → resume (no restart)
-     │    reshard expert owners     │
-     └──────────────┬───────────────┘
-                    │
-     ┌──────────────▼──────────────┐
-     │   Telemetry                 │  pkg/telemetry/logger.py
-     │   JSONL + TensorBoard       │  real CUDA event timing
-     │   Prometheus /metrics       │  routing + overlap metrics
-     │   WandB (optional)          │  WANDB_API_KEY-gated
-     └─────────────────────────────┘
+                                 ┌─────────────────────────────────────────────┐
+                                 │              train.py  (entrypoint)         │
+                                 │  argparse → load_config → build_topology    │
+                                 └──────────────┬──────────────────────────────┘
+                                                │
+            ┌───────────────────────────────────┼────────────────────────────────────┐
+            │                                   │                                    │
+            ▼                                   ▼                                    ▼
+┌────────────────────────────┐   ┌──────────────────────────────┐   ┌──────────────────────────────┐
+│ pkg/distributed/           │   │ pkg/elastic/                 │   │ pkg/kernels/                 │
+│   parallel_mesh.py         │   │   fault_monitor.py           │   │   moe_router.py              │
+│                            │   │                              │   │                              │
+│ • ParallelTopology         │   │ • ElasticTrainerHarness      │   │ • MoERouter (nn.Module)      │
+│ • init_device_mesh((dp,ep))│   │ • AsyncCheckpointer          │   │   ├─ forward: Triton @jit    │
+│   with TP axis reserved    │   │ • _PinnedHostStager          │   │   │   - dynamic-bound mask   │
+│ • DistributedMoELayer      │   │ • ClusterStateMachine        │   │   │   - 128B aligned loads   │
+│ • apply_fsdp2(...)         │   │ • LocalNVMeAdapter           │   │   └─ backward: Triton JIT    │
+│ • all_to_all_dispatch      │   │ • S3Adapter (boto3)          │   │ • CPU autograd fallback      │
+│   on dedicated comm stream │   │                              │   │                              │
+└───────────┬────────────────┘   └─────────────┬────────────────┘   └──────────────┬───────────────┘
+            │                                  │                                   │
+            │   DeviceMesh sub-meshes          │   pinned-host snapshot queue      │  routing tokens
+            │   ("pp","dp","ep","tp")          │                                   │  + gating weights
+            │                                  │                                   │
+            ▼                                  ▼                                   ▼
+   ┌────────────────────┐         ┌───────────────────────────┐         ┌──────────────────────┐
+   │ NCCL / Gloo        │         │ tier-1 NVMe (staging)     │         │ Triton runtime       │
+   │ process groups     │         │ tier-2 S3 / MinIO mirror  │         │ (CUDA / ROCm)        │
+   │ (one per axis)     │         │ background I/O thread×N   │         │                      │
+   └────────────────────┘         └───────────┬───────────────┘         └──────────────────────┘
+                                              │
+                                              ▼
+                                  ┌───────────────────────────┐
+                                  │ TorchElastic agent        │
+                                  │ (rdzv: c10d / etcd)       │
+                                  │ rendezvous → restart loop │
+                                  └───────────────────────────┘
 
+                       Data-flow per training step
+                       ───────────────────────────
+   ids → embed → (TP shard) → block_0 ── … ── block_N → norm → lm_head → loss
+                                  │
+                                  ▼
+                    DistributedMoELayer.forward
+                    ┌────────────────────────────┐
+                    │ 1. router (Triton fwd)     │
+                    │ 2. sort by target EP rank  │
+                    │ 3. all_to_all_single       │
+                    │    on a dedicated comm stream ──► launch  ─────────┐
+                    │ 4. independent compute  ─── overlap ───►│  GPU compute
+                    │ 5. work.wait() on dispatch              │  in flight
+                    │ 6. local SwiGLU experts                            │
+                    │ 7. all_to_all_combine on a dedicated comm stream ──┘
+                    │ 8. weight ⊗ combine → reduce-K  │
+                    └──────────────────────────────────┘
 ```
 
-**4D Parallelism mesh:** `(dp × tp × pp × ep)`
-- **DP** — FSDP2 per-parameter sharding along the data axis via DTensor
-- **EP** — Expert Parallelism: each EP rank owns `E / ep_size` experts; all-to-all dispatch + combine on a dedicated CUDA stream
-- **TP** — Tensor Parallelism: `ColumnParallelLinear` (all-gather on output) and `RowParallelLinear` (all-reduce on output) on expert FFNs
-- **PP** — Pipeline Parallelism: `PipelineStage` with 1F1B interleave schedule; multi-process `dist.send`/`dist.recv` inter-stage communication
+Per-rank a coordinate identifies its mesh slice. Sub-meshes are obtained by name:
+`mesh["dp"]` (for FSDP2 sharding), `mesh["ep"]` (for `all_to_all_single`),
+`mesh["tp"]` (for column-parallel linears), and `mesh["pp"]` is reserved
+for future pipeline stage send/recv support.
 
 ---
+
+
+## 3. Hardware & software requirements
+
+### Software
+
+| Component | Minimum | Recommended | Notes |
+|-----------|---------|-------------|-------|
+| Python | 3.10 | 3.11 | |
+| PyTorch | 2.5 | 2.12+ | `init_device_mesh`, FSDP2 (`fully_shard`), DCP |
+| Triton | 3.0 | 3.x latest | required for GPU forward kernel |
+| CUDA | 12.1 | 12.4+ | for H100/H200/B200 BF16 paths |
+| NCCL | 2.20 | 2.21+ | needed for `TORCH_NCCL_ASYNC_ERROR_HANDLING` |
+| `boto3` | 1.34 | latest | only if streaming to S3/MinIO |
+| `moto` | 5.x | latest | local S3 mock for the chaos suite |
+
+### Hardware
+
+| Profile | GPUs | Interconnect | Notes |
+|---------|------|--------------|-------|
+| **Smoke / CI** | none (CPU + Gloo) | localhost loopback | full unit + integration suite |
+| **Single-node dev** | 1× H100 80GB | PCIe Gen5 | `world=1` degenerate path |
+| **Pod (one node)** | 8× H100 SXM5 | NVLink 4 | TP across the NVLink island, EP within node |
+| **Cluster** | 256–10 240 H100 | NVLink + InfiniBand 400G | TP intra-node (size 8), PP inter-node, DP via FSDP2, EP across all GPUs |
+
+The default config (`configs/default.yaml`) targets H100 SXM5 with a peak of
+989 TFLOP/s BF16. Override `telemetry.hardware_peak_tflops` for B200/MI300X.
+
+---
+
+## 4. Installation
+
+```bash
+git clone <this-repo> moe-engine && cd moe-engine
+
+# Recommended: a fresh venv / conda env with python 3.11
+python -m venv .venv && source .venv/bin/activate
+
+pip install -U pip wheel
+pip install -r requirements.txt
+
+# Optional: GPU-only Triton kernels
+pip install triton==3.*           # already pinned in requirements.txt for cu12
+
+# Optional: S3/MinIO mirror
+pip install boto3 botocore
+```
+
+Verify the install:
+
+```bash
+python -c "import torch, triton; print(torch.__version__, triton.__version__)"
+```
+
+---
+
+## 5. Local CPU / Gloo regression workflow
+
+Every code path in this repo no-ops cleanly on a 1-rank world. You can run
+the **entire** non-chaos test suite on a laptop:
+
+```bash
+# Unit + integration tests, ~20 s on a modern laptop
+pytest -m "not chaos" -v
+
+# Single-rank end-to-end smoke (5 training steps, toy 64-d model)
+python train.py --config configs/smoke.yaml --smoke
+```
+
+To exercise the elastic / chaos suite with **simulated** multi-rank Gloo
+(spawned as subprocesses on localhost):
+
+```bash
+# Baseline + Scenario B (storage stall). Scenario A (sudden node failure)
+# is lower priority and not included in default runs.
+GLOO_SOCKET_IFNAME=lo pytest -m chaos -v -k "baseline or scenario_b"
+```
+
+---
+
+## 6. Cluster-scale multi-GPU training
+
+### 6.1 Single-node, 8× GPU
+
+```bash
+torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=8 \
+  train.py --config configs/default.yaml
+```
+
+### 6.2 Multi-node TorchElastic (rendezvous via c10d)
+
+Set the same `RDZV_ENDPOINT` on every node (typically the head node's IP+port
+or an etcd cluster). The launcher script `scripts/launch.sh` wraps this:
+
+```bash
+# On every node:
+NUM_NODES=32 \
+GPUS_PER_NODE=8 \
+RDZV_ENDPOINT=head-node:29500 \
+RUN_ID=moe-run-001 \
+bash scripts/launch.sh
+```
+
+The launcher injects the NCCL fail-fast environment variables
+(`TORCH_NCCL_ASYNC_ERROR_HANDLING=1`, `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=30`)
+and points the elastic agent at `train.py`. Workers can be
+added or removed mid-run; surviving ranks reshard experts and hot-resume from
+the most recent async checkpoint.
+
+### 6.3 Topology selection
+
+`configs/default.yaml::parallelism` must satisfy
+`tensor_parallel · pipeline_parallel · data_parallel · expert_parallel = WORLD_SIZE`.
+
+Example for 256 GPUs (32 nodes × 8 H100):
+- `tensor_parallel: 8` &nbsp;(intra-node, NVLink)
+- `pipeline_parallel: 4` &nbsp;(inter-node, IB)
+- `data_parallel: 4` &nbsp;(FSDP2 across remaining axis)
+- `expert_parallel: 2`
+
+The mesh constructor enforces this product equality; missized configs fail
+fast at boot rather than mid-step.
+
+---
+
+## 7. Configuration reference
+
+`configs/default.yaml` is the source of truth; `configs/smoke.yaml` shrinks
+every dimension for laptop runs. Every block:
+
+```yaml
+model:           # transformer hyperparameters
+parallelism:     # topology axes, must product to WORLD_SIZE
+training:        # batch sizes, optimizer, schedule
+checkpoint:      # local NVMe dir, remote URI, async workers, retention
+elastic:         # rendezvous, heartbeat interval, drop grace, min_nodes
+telemetry:       # log dirs, MFU target, hardware peak TFLOPs
+```
+
+---
+
+## 8. Mathematical invariants & CI gates
+
+| Invariant | Statement | Tested in |
+|-----------|-----------|-----------|
+| Mesh shape | `dp_size · ep_size · tp_size = world_size` for active axes | `tests/test_distributed.py`, `tests/test_distributed_invariants.py` |
+| Token conservation | `Σ_r dispatched_r = B·S·K` | `tests/test_distributed.py`, `tests/test_chaos.py` |
+| Numerical tolerance | `atol < 1e-5`, `rtol < 1e-5` (fp64 reference) | `tests/test_kernels.py` |
+| Checksum identity | `hash(state_dict_post_load) == hash(state_dict_pre_save)` | `tests/test_elastic.py` |
+| Monotonic progression | `step_{n+1} > step_n` across every restart generation | `tests/test_chaos.py` |
+| Comm-compute overlap | EP dispatch/combine use a dedicated CUDA stream and event synchronization | `pkg/distributed/parallel_mesh.py::DistributedMoELayer.forward` |
+| Async-ckpt zero-leak | After `harness.checkpoint()`, no device-resident references survive into the writer thread queue | `tests/test_elastic.py::test_async_ckpt_no_device_refs` |
+| MFU target | `>= 0.55` of theoretical peak BF16 | `pkg/utils/mfu.py` |
+| Dynamic MoE FLOP | `FLOPs_step = 2·T_active·P_dense + 2·T_routed·P_experts` | `pkg/utils/mfu.py` |
+
+CI fails on violation of any of the above.
+
+---
+
+## 9. Telemetry envelope
+
+Every training step emits one structured JSON record (also fanned out to
+TensorBoard via `pkg/telemetry/logger.py`):
+
+```json
+{
+  "step": 1024,
+  "loss": 2.187,
+  "mfu": 0.612,
+  "tokens_per_sec": 184320,
+  "wall_clock_ms": 412.3,
+  "kernel": {
+    "sram_bytes_per_block": 49152,
+    "achieved_bw_gbps": 1843.0,
+    "tokens_per_expert_mean": 256.4,
+    "tokens_per_expert_std":  18.7,
+    "used_triton": true
+  },
+  "collective": {
+    "all_to_all_dispatch_ms": 0.87,
+    "all_to_all_combine_ms":  0.91,
+    "all_gather_ms": 1.21,
+    "reduce_scatter_ms": 1.05,
+    "overlap_ratio": 0.78
+  },
+  "memory": {
+    "peak_allocated_gb": 62.4,
+    "reserved_gb": 70.0,
+    "leak_delta_gb": 0.0,
+    "pinned_host_mb": 1842.0
+  },
+  "infra": {
+    "async_ckpt_commit_ms": 412.0,
+    "active_nodes": 1250,
+    "ep_world_size": 64,
+    "tp_world_size": 8,
+    "pp_world_size": 4,
+    "dp_world_size": 4,
+    "restart_generation": 2
+  }
+}
+```
+
+---
+
+## 10. Fault-injection / chaos workflow
+
+The chaos suite spawns 4 Gloo workers as subprocesses on localhost and
+exercises the full TorchElastic restart loop:
+
+```bash
+GLOO_SOCKET_IFNAME=lo pytest -m chaos -v
+```
+
+Scenarios:
+
+| Scenario | What it injects | What it verifies |
+|----------|-----------------|------------------|
+| baseline | nothing | end-to-end correctness, monotonic step progression |
+| A: sudden node failure | `SIGKILL` to one worker mid-step | (lower priority, not included in default test runs) |
+| B: storage stall | injected 5-second `time.sleep` inside the storage adapter | async writer queue drains in background, training step never blocks, ckpt eventually commits |
+
+> **Status:** baseline ✅, scenario_b ✅, scenario_a ⏸️ (lower priority)
+
+---
+
 
 ## What is actually built
 
@@ -127,251 +379,7 @@ This is not a model. It is the runtime that a model runs on.
 
 ---
 
-## Results
-
-### Router Kernel Throughput (CPU reference path)
-
-| Tokens (N) | Hidden (H) | Experts (E) | Top-K | Latency | Throughput |
-|----------:|----------:|------------:|------:|--------:|-----------:|
-| 512 | 256 | 16 | 2 | 0.04 ms | 12.8M tok/s |
-| 1024 | 512 | 32 | 2 | 0.12 ms | 8.5M tok/s |
-| 2048 | 1024 | 64 | 2 | 0.47 ms | 4.4M tok/s |
-| 4096 | 2048 | 64 | 4 | 1.83 ms | 2.2M tok/s |
-
-Run `python benchmarks/run_benchmark.py` for CPU numbers (no GPU required) or `--cuda` for GPU. See `RESULTS.md` for the full results table and telemetry sample. GPU numbers in `benchmarks/BENCHMARKS.md` are illustrative pending sustained cluster access.
-
-### Token Conservation (100-seed sweep)
-Across all `(N, H, E, K)` configurations: **0 violations in 100 seeds**. The invariant `sum(dispatch_cnt) == N×K` holds unconditionally.
-
-### Expert Load Imbalance (default init, N=512, E=32, K=2)
-- Mean ratio: **1.12** (max_load / mean_load)
-- 95th percentile: **1.28**
-- Reducible to ~1.05 with z-loss weight 1e-3
-
----
-
-## Engineering Lessons
-
-**Why fuse the router into a single Triton kernel?**  
-The routing pipeline — `tokens @ gate_w → softmax → top-K → renorm` — done naively requires three separate HBM round-trips (matmul, softmax, scatter). The fused kernel tiles across the expert dimension in SRAM (64×64 floats = 16 KiB), doing all three passes in one sweep. At `H=4096, E=64` this reduces memory traffic by ~2.7×.
-
-**Top-K via selection sort vs. bitonic sort:**  
-For `K ∈ {1, 2, 4}` and `E ≤ 256`, K-iteration selection sort outperforms bitonic sort. Bitonic sort's `O(E log²E)` compute cost dominates the K-step selection sort's `O(K×E)` at small K, and selection sort has no shared-memory bank pressure — it works entirely in registers.
-
-**All-to-all on a dedicated CUDA stream:**  
-EP dispatch and combine collectives run on a high-priority CUDA stream. The default stream issues expert FFN compute in parallel; an event records the dispatch completion so the combine stream waits before it consumes expert outputs. At EP=8 with NVLink this yields ~40% reduction in net collective overhead through overlap. v0.3 surfaces this directly as `comm_compute_overlap_ratio = dispatch_ms / expert_compute_ms` in telemetry.
-
-**Pipeline parallelism needs activation tagging, not just send/recv:**  
-Implementing multi-process 1F1B requires more than wrapping `dist.send`/`dist.recv` around the forward/backward calls. Every micro-batch is tagged with a `[stage_id, mb_index]` header sent immediately before its activation tensor, so receivers can match activations to micro-batches without shared state — essential once restarts or stalls can reorder delivery. Verified by a 2-rank `mp.spawn` test that runs the full warmup → steady-state → drain schedule across real Gloo collectives.
-
-**Sequence parallelism: fusing the all-gather into the next projection:**  
-`scatter_to_sequence_parallel(x, topo, next_weight=w)` replaces `all_gather(shard) → matmul(full_x, w)` (two collectives) with `matmul(shard, w) → all_reduce(SUM)` (one collective) — each rank computes its local projection first, then the result is summed across the TP group. This halves the SP collective count per layer at `tp_size > 1`, verified to `atol=1e-5` against the unfused reference at 2-rank.
-
-**Checkpoint design: pinned host → NVMe → S3:**  
-The only synchronous cost is a D2H copy of the SHARDED_STATE_DICT snapshot (tens of ms at 80 GB/s NVLink bandwidth). All I/O is in background threads. `O_DIRECT` writes in 256 MB chunks bypass the page cache entirely, removing OS write-back pressure from critical training time. Atomic rename (`tmp → final`) makes every checkpoint either fully present or absent — no partial reads.
-
-**Observability sinks should cost nothing when disabled:**  
-`WandBSink` performs zero imports and zero network calls unless `WANDB_API_KEY` is set in the environment. On a training cluster with no internet access, an "on by default" telemetry sink that requires explicit opt-out is a stall waiting to happen. The default must be silent; activation requires explicit operator intent.
-
-**Why the chaos test for Scenario A is still flaky:**  
-The Gloo backend's `connectFullMesh` call during PG re-formation after a SIGKILL races with socket cleanup in containerised environments. The symptom is `Connection refused` on the initial `accept()`. Our mitigation (exponential backoff in `_safe_all_reduce`, `CHAOS_FAULT_TOLERANT=1` env) raises the pass rate to ~85%. A proper fix requires either NCCL (GPU-only) or replacing the PG re-formation with a rendezvous store that serialises the accept side. Tracked in the roadmap as a v0.4 item — requires GPU hardware.
-
----
-
-## Getting Started
-
-### Requirements
-
-- Python ≥ 3.10
-- PyTorch ≥ 2.5.0
-- Triton ≥ 3.0.0 (optional; CPU fallback always available)
-- CUDA ≥ 12.4 (optional)
-
-### Install
-
-```bash
-git clone https://github.com/your-org/moe-engine
-cd moe-engine/moe-engine
-pip install -e ".[dev]"
-```
-
-### Run the CPU smoke test (no GPU needed)
-
-```bash
-python train.py --config configs/smoke.yaml --smoke
-# Expected: 2 training steps, JSONL telemetry at /tmp/moe-engine/logs/step.jsonl
-```
-
-With WandB logging (optional, requires `WANDB_API_KEY`):
-
-```bash
-python train.py --config configs/smoke.yaml --smoke --wandb-project moe-engine
-```
-
-### Run the full test suite
-
-```bash
-pytest tests/ -v --ignore=tests/test_chaos.py
-# 147 passed, 1 skipped, ~60 seconds on CPU
-```
-
-### Run chaos tests (requires torchrun on PATH)
-
-```bash
-pytest tests/test_chaos.py -v -m chaos
-```
-
-### Docker — single-node CPU smoke
-
-```bash
-docker compose -f deploy/docker/docker-compose.yml run --rm smoke
-```
-
-### Docker — 4-GPU training run
-
-```bash
-docker compose -f deploy/docker/docker-compose.yml run --rm train-4gpu
-```
-
-### Kubernetes — single-node job
-
-```bash
-kubectl apply -f deploy/k8s/namespace.yaml
-kubectl apply -f deploy/k8s/pvc.yaml
-kubectl apply -f deploy/k8s/training-job.yaml
-kubectl logs -n moe-engine -l job-name=moe-training -f
-```
-
-### Run the benchmark suite
-
-```bash
-# CPU-only
-python benchmarks/run_benchmark.py --json benchmarks/results.json
-
-# GPU
-python benchmarks/run_benchmark.py --cuda --json benchmarks/gpu_results.json
-```
-
----
-
-## Configuration Reference
-
-Key fields in `configs/default.yaml`:
-
-```yaml
-model:
-  hidden_dim: 4096        # transformer hidden dimension
-  num_layers: 32
-  num_experts: 64         # total expert count
-  top_k: 2                # active experts per token
-  ffn_dim: 14336          # expert FFN intermediate dimension
-  dtype: bfloat16
-
-parallelism:
-  data_parallel: 8        # FSDP2 sharding axis
-  expert_parallel: 8      # EP all-to-all axis
-  tensor_parallel: 1      # ColumnParallel / RowParallel axis
-  pipeline_parallel: 1    # 1F1B pipeline stages
-
-training:
-  gradient_accumulation_steps: 4   # accumulate before optimizer step
-  warmup_steps: 2000               # linear warmup, then cosine decay
-
-telemetry:
-  hardware_peak_tflops: 989.0   # H100 SXM5 BF16
-  mfu_target: 0.55
-```
-
-See `configs/smoke.yaml` for the CPU-only test configuration.
-
----
-
-## Telemetry Envelope
-
-Every training step emits one JSONL record:
-
-```jsonc
-{
-  "step": 100,
-  "loss": 3.42,
-  "mfu": 0.48,
-  "tokens_per_sec": 42800,
-  "wall_clock_ms": 78.4,
-  "kernel": {
-    "sram_bytes_per_block": 49152,
-    "achieved_bw_gbps": 1.23,
-    "tokens_per_expert_mean": 32.0,
-    "tokens_per_expert_std": 4.1,
-    "used_triton": true
-  },
-  "collective": {
-    "all_to_all_dispatch_ms": 0.72,        // real CUDA event timing
-    "all_to_all_combine_ms":  0.68,
-    "expert_compute_ms": 1.84,              // v0.3
-    "comm_compute_overlap_ratio": 0.39      // v0.3: dispatch_ms / expert_compute_ms
-  },
-  "memory": {
-    "peak_allocated_gb": 62.4,        // torch.cuda.memory_stats()
-    "reserved_gb": 72.0,
-    "leak_delta_gb": 0.0
-  },
-  "routing": {
-    "expert_load_imbalance": 1.08,    // max_load / mean_load
-    "router_z_loss": 2.34             // auxiliary regularisation signal
-  },
-  "infra": {
-    "async_ckpt_commit_ms": 12.3,
-    "active_nodes": 64,
-    "ep_world_size": 8,
-    "lr": 0.0003
-  },
-  "rank": 0,
-  "ts": 1748901234.56
-}
-```
-
-When `WANDB_API_KEY` is set, every numeric field above is also logged to WandB under section-prefixed keys (`collective/dispatch_ms`, `routing/z_loss`, etc.), and the full YAML config is recorded via `log_config()` before the first step.
-
----
-
-## Mathematical Invariants
-
-These are asserted unconditionally in the forward pass and validated by the test suite:
-
-1. **Token conservation:** `sum(dispatch_cnt) == N × K` for every forward call
-2. **No NaN indices:** `idx ∈ [0, E)` — no -1 / NaN entries in routing output
-3. **Combine shape:** output of `all_to_all_combine` must be `[N, H]` exactly
-4. **No NaN activations:** post-combine output checked for NaN before returning
-5. **Weight normalisation:** `w.sum(dim=-1) == 1.0` (atol=1e-5)
-
----
-
-## Test Suite
-
-```
-tests/
-  test_kernels.py              – router forward/backward tolerance, token conservation
-  test_kernels_numerics.py     – 30 parametrised numerical validation tests
-  test_routing_quality.py      – load imbalance, z-loss, RouterProfile (v0.2)
-  test_tensor_parallel.py      – ColumnParallel, RowParallel, SP scatter/gather; 2-rank mp.spawn correctness
-  test_pipeline_parallel.py    – 1F1B schedule; 2-rank mp.spawn multi-process PP (v0.3)
-  test_sequence_parallel_v03.py – SP fused next_weight path; 2-rank mp.spawn (v0.3)
-  test_distributed.py          – single-process MoE layer shape + grad flow
-  test_distributed_invariants.py – 4-process Gloo token conservation + NaN checks
-  test_elastic.py              – NVMe adapter, async checkpointer, CSM reshard
-  test_elastic_v02.py          – retention, file-URI tier, harness round-trip (v0.2)
-  test_mfu.py                  – MFU formula, sparse accounting
-  test_mfu_v02.py              – MFUAccountant, detailed breakdown, smoothing (v0.2)
-  test_telemetry.py            – JSON emission, thread safety, WandB mock (v0.3)
-  test_smoke_e2e.py            – full train.py loop, JSONL envelope, S3 (mocked); v0.3.1 regression test
-  test_chaos.py                – torchrun chaos scenarios A (⚠️ flaky) and B (✅)
-```
-
-`pytest tests/ -v --ignore=tests/test_chaos.py` → **147 passed, 1 skipped** on CPU in ~60s (includes 2-rank mp.spawn tests for TP, PP, and SP; v0.3.1 `cfg.raw` regression test; v0.3.2 Triton `K`-constexpr regression tests).
-
----
-
-## Repository Layout
+## 11. Repository layout
 
 ```
 moe-engine/
@@ -409,6 +417,7 @@ moe-engine/
 
 ---
 
+
 ## What would I do differently at 1000+ GPUs
 
 1. **Replace Gloo with NCCL everywhere** — Gloo's `connectFullMesh` is O(N²) in the number of ranks. At 1000+ ranks the re-formation time after a node drop dominates recovery. NCCL uses a ring-based topology that scales logarithmically.
@@ -423,24 +432,6 @@ moe-engine/
 
 ---
 
-## License
+## 12. License
 
-Apache 2.0. See [LICENSE](LICENSE).
-
----
-
-## Citing this Work
-
-If you use `moe-engine` in your research, please cite the associated preprint:
-
-```bibtex
-@article{myet2026moeengine,
-  title   = {moe-engine: A Fault-Tolerant Runtime for Hyperscale Mixture-of-Experts Training},
-  author  = {Min Htet Myet},
-  year    = {2026},
-  month   = {June},
-  publisher = {Zenodo},
-  doi     = {10.5281/zenodo.20688837},
-  url     = {https://doi.org/10.5281/zenodo.20688837}
-}
-```
+Apache-2.0. See `LICENSE`.

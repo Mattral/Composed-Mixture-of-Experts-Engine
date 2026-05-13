@@ -60,8 +60,9 @@ include = ["pkg*"]
 testpaths = ["tests"]
 addopts = "-ra -q --strict-markers"
 markers = [
+    "cpu: tests that run on CPU only and require no GPU — the Tier-0 fast suite (`pytest -m cpu`)",
+    "gpu: tests that require a CUDA-capable GPU; skipped automatically on CPU-only machines (`pytest -m gpu`)",
     "chaos: heavy fault-injection / TorchElastic recovery scenarios; opt-in via `pytest -m chaos`",
-    "gpu: tests that require a CUDA-capable GPU; skipped automatically on CPU-only machines",
 ]
 filterwarnings = [
     "ignore::DeprecationWarning:pkg.*",
