@@ -1,62 +1,91 @@
 # Architecture Overview
 
-**Version:** v0.3  
+**Version:** v0.3.2  
 **Last updated:** June 2026
 
 ---
 
 ## Purpose
 
-`moe-engine` is a production-grade training runtime for large Mixture-of-Experts
-language models. It is not a model definition — it is the infrastructure layer
-that distributes, checkpoints, and recovers training across thousands of GPUs.
+`moe-engine` is a research-grade training runtime for large Mixture-of-Experts
+language models at hyperscale (10K+ GPUs). It is not a model definition — it
+is the infrastructure layer that distributes, checkpoints, and recovers training
+across thousands of GPUs under continuous node failure.
 
 The central constraint: **at hyperscale, nodes die continuously**. Every design
 decision flows from that premise.
 
 ---
 
-## Component Map
+## Component Map (v0.3.2)
+
+The v0.3.2 refactoring split the original 1,165-line `parallel_mesh.py` monolith
+into focused single-responsibility modules. Each module now has one concern.
 
 ```
 train.py
 │
-├── pkg/utils/config.py          YAML config loader
+├── pkg/utils/
+│   ├── config.py               MoEConfig (Pydantic v2 validated hierarchy)
+│   │                           ModelConfig / TrainingConfig / ParallelismConfig
+│   │                           CheckpointConfig / ElasticConfig / TelemetryConfig
+│   │                           load_config() (legacy shim)
+│   └── mfu.py                  MFUAccountant, MFUResult
+│                               compute_mfu / compute_mfu_detailed / compute_moe_flops
 │
 ├── pkg/distributed/
-│   └── parallel_mesh.py         4D topology (DP × TP × PP × EP)
-│                                DistributedMoELayer
-│                                ColumnParallelLinear / RowParallelLinear
-│                                scatter/gather_sequence_parallel
-│                                PipelineStage (1F1B schedule)
-│                                apply_fsdp2
+│   ├── __init__.py             Curated public API surface (__all__)
+│   ├── mesh.py                 ParallelTopology (frozen dataclass)
+│   │                           build_topology() — DeviceMesh + process groups
+│   │                           tp_process_group() / pp_process_group()
+│   │                           experts_on_this_rank() — round-robin EP ownership
+│   ├── tensor_parallel.py      ColumnParallelLinear / RowParallelLinear
+│   │                           scatter_to_sequence_parallel (fused next_weight path)
+│   │                           gather_from_sequence_parallel
+│   ├── expert_parallel.py      all_to_all_dispatch / all_to_all_combine
+│   │                           _CommStream — dedicated high-priority CUDA stream
+│   │                           comm/compute overlap telemetry
+│   ├── pipeline_parallel.py    PipelineStage — real dist.send/recv (v0.3)
+│   │                           run_1f1b() — single-process scheduling shim
+│   │                           run_1f1b_distributed() — multi-process 1F1B
+│   │                           Activation tagging (mb_index headers)
+│   ├── data_parallel.py        apply_fsdp2() — expert-weights-excluded FSDP2
+│   ├── moe_layer.py            DistributedMoELayer (thin orchestrator)
+│   │                           _SwiGLUExpert (TP-aware two-layer FFN)
+│   │                           _expert_to_rank() — EP rank lookup
+│   │                           Telemetry: last_dispatch_ms, last_overlap_ratio
+│   └── parallel_mesh.py        ← backward-compat shim only (re-exports all of above)
+│                               New code should not import from here.
+│
+├── pkg/models/
+│   └── moe.py                  RMSNorm, ToyMoEBlock, ToyMoEModel
+│                               build_model() — factory, moves to topology.device
+│                               count_parameters() — breakdown by component
 │
 ├── pkg/kernels/
-│   └── moe_router.py            MoERouter
-│                                MoERouterFunction (autograd.Function)
-│                                Triton fwd + bwd kernels
-│                                _reference_route_fp64 (CPU fallback)
-│                                _compute_load_imbalance
-│                                _compute_router_z_loss
-│                                RouterProfile dataclass
+│   └── moe_router.py           MoERouter (public interface)
+│                               MoERouterFunction (autograd.Function)
+│                               Triton fwd kernel (moe_topk_route_fwd)
+│                               Triton bwd kernel (moe_topk_route_bwd)
+│                               _reference_route_fp64 (CPU fallback)
+│                               _compute_load_imbalance / _compute_router_z_loss
+│                               RouterProfile dataclass
 │
 ├── pkg/elastic/
-│   └── fault_monitor.py         AsyncCheckpointer
-│                                LocalNVMeAdapter / S3Adapter
-│                                ClusterStateMachine
-│                                ElasticTrainerHarness
-│                                _largest_divisor_le
+│   └── fault_monitor.py        AsyncCheckpointer (NVMe + S3 two-tier)
+│                               LocalNVMeAdapter / S3Adapter
+│                               ClusterStateMachine (RUNNING→DRAINING→RECOVERING)
+│                               ElasticTrainerHarness
+│                               _largest_divisor_le (resharding math)
 │
 ├── pkg/telemetry/
-│   └── logger.py                StructuredLogger
-│                                StepRecord
-│                                PrometheusExporter
+│   └── logger.py               StructuredLogger (thread-safe JSONL)
+│                               StepRecord (full v0.3 envelope)
+│                               PrometheusExporter / WandBSink
 │
-└── pkg/utils/
-    └── mfu.py                   MFUAccountant
-                                 MFUResult
-                                 compute_mfu / compute_mfu_detailed
-                                 compute_moe_flops
+└── scripts/
+    ├── validate_config.py      Validate configs/*.yaml at load time
+    └── cli.py                  typer CLI: train / benchmark / validate
 ```
 
 ---
@@ -66,196 +95,133 @@ train.py
 ```
 World = dp_size × tp_size × pp_size × ep_size
 
-  ┌──────────────────────────────────────────────────┐
-  │  DP axis  (FSDP2 per-parameter DTensor sharding) │
-  │  TP axis  (ColumnParallel / RowParallel / SP)    │
-  │  PP axis  (PipelineStage 1F1B schedule)          │
-  │  EP axis  (all_to_all_single on dedicated stream)│
-  └──────────────────────────────────────────────────┘
+  ┌──────────────────────────────────────────────────────────────┐
+  │  DP axis  (FSDP2 per-parameter DTensor sharding)            │
+  │  TP axis  (ColumnParallel / RowParallel / SP fused gather)  │
+  │  PP axis  (PipelineStage 1F1B; real dist.send/recv in v0.3) │
+  │  EP axis  (all_to_all_single on dedicated CUDA stream)      │
+  └──────────────────────────────────────────────────────────────┘
 ```
 
-**Data Parallelism (DP):**  
-`apply_fsdp2()` wraps every non-MoE module with `fully_shard` along the `dp`
-mesh axis using PyTorch 2.5+ DTensor. Expert weights are explicitly excluded —
-they are already partitioned across the `ep` axis and must not be FSDP-wrapped.
-
-**Tensor Parallelism (TP):**  
-Expert FFN layers use `ColumnParallelLinear` (splits output features, all-gathers
-to full width) and `RowParallelLinear` (splits input features, all-reduces partial
-outputs). Both `w_gate` and `w_up` in the SwiGLU expert are `ColumnParallelLinear`
-so that their element-wise product occurs in shard space `[F // tp_size]` before
-`w_down` (RowParallel) all-reduces to the full hidden dimension. Sequence
-Parallelism (SP) activates automatically at `tp_size > 1`.
-
-**Pipeline Parallelism (PP):**  
-`PipelineStage` encapsulates a single pipeline stage. `run_1f1b(micro_batches)`
-implements the three-phase 1F1B schedule in single-process mode (test fast-path).
-`run_1f1b_distributed(micro_batches)` — **v0.3** — implements the full multi-process
-1F1B schedule with real `dist.send` / `dist.recv` on the PP group axis, activation
-tagging (stage_id + mb_index header), and three-phase execution (warmup → steady → drain).
-
-**Expert Parallelism (EP):**  
-Each EP rank owns `E // ep_size` experts (remainder experts are assigned
-round-robin). Token dispatch uses `all_to_all_single` on a dedicated high-priority
-CUDA stream (`_CommStream`), overlapping with expert FFN compute on the default
-stream. A CUDA event records the dispatch boundary so combine waits only as long
-as necessary.
+Each axis is implemented in its own module and is independently testable
+at `tp_size=1` / `pp_size=1` / `ep_size=1` without requiring a distributed
+environment.
 
 ---
 
-## Token Life-Cycle in One MoE Layer
+## Token Lifecycle (per forward pass)
 
 ```
-tokens [N_local, H]
-        │
-        ▼
- MoERouter (Triton kernel or CPU reference)
-        │
-        ├── topk_idx  [N_local, K]
-        ├── topk_w    [N_local, K]   (renormalised combine weights)
-        └── dispatch_cnt [E]          (load imbalance + z-loss computed here)
-        │
-        ▼
- sort tokens by expert id → tokens_sorted [N_local × K, H]
-        │
-        ▼  all_to_all_dispatch (EP dedicated stream)
-        │
- expert FFN on this rank [n_recv, H] → SwiGLU: silu(gate(x)) × up(x) → down(·)
-        │
-        ▼  all_to_all_combine (EP dedicated stream)
-        │
- scatter → weighted sum over K slots
-        │
-        ▼
- combined output [N_local, H]   (NaN check enforced)
+input tokens [B, S, H]
+    │
+    ▼
+MoERouter (Triton kernel / fp64 ref)
+    → expert indices idx [N, K]
+    → routing weights  w  [N, K]
+    → dispatch_cnt [ep_size]
+    │
+    ▼ sort by expert (contiguous dispatch)
+tokens_sorted [N*K, H]
+    │
+    ▼ all_to_all_dispatch (EP collective, dedicated stream)
+received [total_recv, H]  ← overlaps with ▼
+    │
+    ▼ local expert FFN (_SwiGLUExpert, default stream)
+expert_out [total_recv, H]
+    │
+    ▼ all_to_all_combine (EP collective, stream sync)
+combined_sorted [total_send, H]
+    │
+    ▼ weighted scatter to original positions
+output [B, S, H]  ← NaN guard asserted
 ```
 
 ---
 
-## Kernel Architecture: Triton Router
-
-The router kernel (`_router_fwd_kernel`) is a single Triton JIT kernel that fuses:
-
-1. `tokens [N, H] @ gate_w [H, E]` → `logits [N, E]`
-2. `softmax(logits, dim=-1)` → `probs [N, E]`
-3. `top_k(probs, K)` → `idx [N, K]`, `vals [N, K]`
-4. `renormalize(vals)` → `combine_weights [N, K]`
-
-All four operations execute in a single pass over the gating dimension, with
-`(BLOCK_N=64, BLOCK_E=64)` tiles held in L1/SRAM (~16 KiB). Global loads are
-coalesced on the contiguous H dimension. Top-K uses in-SRAM selection sort (K
-iterations, O(K×E)), which outperforms bitonic sort for K ∈ {1,2,4}.
-
-The backward kernel (`_router_bwd_kernel`) propagates `grad_w → grad_p → grad_l`
-using the analytic softmax Jacobian: `grad_l_i = p_i × (grad_p_i − Σ(grad_p · p))`.
-Validated against the fp64 PyTorch reference at `atol=rtol=1e-5`.
-
-On CPU or without Triton, `_reference_route_fp64` provides the identical
-computation in fp64 PyTorch — used as the ground truth for all numerics tests.
-
----
-
-## Checkpoint Architecture: Two-Tier Async
+## Fault Recovery Sequence
 
 ```
-Training thread
-     │
-     │  D2H copy (NVLink, ~tens of ms for sharded param)
-     ▼
- Background I/O thread (AsyncCheckpointer)
-     │
-     ├── LocalNVMeAdapter
-     │    └── 256 MB chunk writes, O_DIRECT (fallback to buffered)
-     │         atomic: tmp → final (rename)
-     │
-     └── S3Adapter / LocalNVMeAdapter (remote tier)
-          └── boto3 multipart upload or file copy
+Node death detected (health_check or SIGTERM)
+    │
+    ▼
+ClusterStateMachine: RUNNING → DRAINING
+    │ (drain current micro-batches from 1F1B pipeline)
+    ▼
+AsyncCheckpointer: flush in-flight NVMe write, wait for S3 upload
+    │
+    ▼
+TorchElastic: restart dead rank, re-init process group
+    │
+    ▼
+ClusterStateMachine: DRAINING → RECOVERING
+    │ (_largest_divisor_le selects new ep_size)
+    │ (expert resharding: round-robin to surviving ranks)
+    ▼
+AsyncCheckpointer: load latest checkpoint from NVMe tier (fast)
+    │
+    ▼
+ClusterStateMachine: RECOVERING → RESUMED
+    │ training continues with reduced world size
+    ▼
+Background: S3 upload of post-recovery checkpoint
 ```
 
-The training thread pays only the D2H copy cost (~tens of ms). All disk and
-network I/O runs in a background thread pool. Atomic rename ensures every
-checkpoint is either fully present or absent — no partial reads possible.
+---
 
-Checkpoint metadata (`.meta.json`) records step, rank, timestamp, and hostname
-alongside every `.pt` shard. Retention pruning deletes old checkpoints after
-committing, bounding total disk usage to `retention × shard_size`.
+## Async Two-Tier Checkpointing
+
+```
+Training loop (foreground)
+    │ optimizer.step()
+    │ harness.checkpoint(model, optimizer, step)
+    │
+    ▼
+AsyncCheckpointer.save() — non-blocking
+    │ ├─ Tier 1: LocalNVMeAdapter
+    │ │    serialize → RAM buffer
+    │ │    write to NVMe (O_DIRECT attempt, fallback buffered)
+    │ │    atomic rename: .tmp → final path
+    │ │    prune oldest (retain last N)
+    │ │
+    │ └─ Tier 2: S3Adapter (background thread)
+    │       read from NVMe → chunked upload
+    │       write .meta.json (step, rank, ts, hostname)
+    │
+    ▼ (background workers; training continues immediately)
+```
 
 ---
 
-## Telemetry Architecture
+## Key Design Invariants
 
-Every training step emits one `StepRecord` to three sinks simultaneously:
+Every invariant is asserted at runtime AND tested independently:
 
-| Sink | Format | Notes |
-|---|---|---|
-| JSONL file | newline-delimited JSON | all fields; thread-safe via `RLock` |
-| TensorBoard | scalar summaries | rank 0 only |
-| Prometheus | gauges on `/metrics` | optional; port configurable |
-
-v0.2 routing quality fields: `routing.expert_load_imbalance`, `routing.router_z_loss`.
-
-v0.3 collective fields (new):
-- `collective.expert_compute_ms` — wall-clock time of expert FFN compute per step
-- `collective.comm_compute_overlap_ratio` — `dispatch_ms / expert_compute_ms` (overlap fraction)
-
-WandB sink (v0.3): active when `WANDB_API_KEY` is set; all numeric fields logged
-under section prefixes (`collective/dispatch_ms`, `routing/z_loss`, etc.).
+| Invariant | Where enforced | Test |
+|-----------|---------------|------|
+| Token conservation: `sum(dispatch_cnt) == N×K` | `MoERouter.forward()` | `test_kernels.py::test_token_conservation` |
+| No NaN in router output | `MoERouterFunction.forward()` | `test_kernels.py::test_no_nan_in_indices` |
+| Index validity: `idx ∈ [0, E)` | `MoERouterFunction.forward()` | `test_kernels.py::test_index_validity` |
+| Weight normalisation: `w.sum(-1) ≈ 1` | `MoERouterFunction.forward()` | `test_kernels_numerics.py` |
+| No NaN in layer output | `DistributedMoELayer.forward()` | `test_distributed_invariants.py` |
+| Expert coverage: all experts assigned | `ClusterStateMachine._reshard()` | `test_elastic_v02.py` |
+| Retention: latest checkpoint always survives | `AsyncCheckpointer._prune()` | `test_elastic.py` |
+| Config validation at load time | `MoEConfig.from_yaml()` | `test_config.py` |
 
 ---
 
-## Design Principles
+## Module Size Targets (post v0.3.2)
 
-**Measure, don't estimate.**  
-All telemetry values come from real measurements: CUDA events for collective
-latency, `torch.cuda.memory_stats()` for peak memory, actual elapsed time for
-step duration. There are no placeholder or fabricated numbers in the runtime.
+Per MOE_instructions v2.1: no file in `pkg/distributed/` should exceed ~450 lines.
 
-**Fail-fast on invariants.**  
-Token conservation (`sum(dispatch_cnt) == N × K`), index bounds (`idx ∈ [0, E)`),
-combine weight normalisation, and post-combine NaN checks are all asserted in the
-forward path. The invariant fires immediately at the offending layer, not
-silently further downstream.
+| Module | Lines | Status |
+|--------|------:|--------|
+| `mesh.py` | 316 | ✅ |
+| `tensor_parallel.py` | 308 | ✅ |
+| `expert_parallel.py` | 231 | ✅ |
+| `pipeline_parallel.py` | 378 | ✅ |
+| `data_parallel.py` | 101 | ✅ |
+| `moe_layer.py` | 272 | ✅ |
+| `parallel_mesh.py` (shim) | 68 | ✅ |
+| **Total** | **1,674** | **vs 1,165 monolith** |
 
-**Single correct collective per pattern.**  
-RowParallel uses `all_reduce(SUM)` — the correct primitive for summing partial
-matrix products. ColumnParallel uses `all_gather_into_tensor`. Sequence parallel
-uses `scatter` (forward) and `all_gather` (backward). Each pattern uses exactly
-one collective, not a composed sequence of two.
-
-**Link, don't duplicate.**  
-Documentation references source files and test functions rather than
-re-describing behaviour inline. When behaviour changes, update both.
-
----
-
-## Implementation Status
-
-| Component | Status | Notes |
-|---|---|---|
-| Triton forward kernel | ✅ | Fused matmul+softmax+topK+renorm; SRAM-tiled |
-| Triton backward kernel | ✅ | Analytic Jacobian; `atol=rtol=1e-5` vs fp64 ref |
-| Token conservation invariant | ✅ | 100-seed sweep clean |
-| DP via FSDP2 + DTensor | ✅ | Per-param sharding; expert layers excluded |
-| EP all-to-all (dispatch + combine) | ✅ | Dedicated CUDA stream; event sync; ep=1 no-op |
-| Compute-comm overlap | ✅ | Expert FFN default stream, a2a dedicated stream |
-| ColumnParallelLinear | ✅ | all-gathers to full width; tp=1 identity |
-| RowParallelLinear | ✅ | all_reduce(SUM); tp=1 identity |
-| SwiGLU w_gate + w_up both ColumnParallel | ✅ | Consistent shard space through SwiGLU |
-| Sequence Parallelism (scatter/gather) | ✅ | no-op at tp_size=1 |
-| SP all-gather fusion | ✅ v0.3 | `next_weight` param fuses backward all-gather with next projection; halves SP collectives |
-| PipelineStage 1F1B (single-process) | ✅ | 3-phase schedule; 13 unit tests; fast-path |
-| PipelineStage multi-process PP | ✅ v0.3 | `run_1f1b_distributed`; dist.send/recv; 2-rank mp.spawn verified |
-| Async two-tier checkpointing | ✅ | NVMe (O_DIRECT) + S3; atomic rename |
-| TorchElastic state machine | ✅ | evict → reshard → reload → resume |
-| Etcd rendezvous (>100 nodes) | ✅ | Backend selector; c10d fallback |
-| MFU accounting (sparse-aware) | ✅ | `(K/E) × P_expert`; streaming tracker |
-| Routing quality metrics | ✅ | load imbalance + z-loss per step |
-| Structured JSONL + TensorBoard | ✅ | Thread-safe; RLock |
-| Prometheus `/metrics` endpoint | ✅ | Optional; 10 gauges (v0.3: +expert_compute_ms, +overlap_ratio) |
-| WandB integration | ✅ v0.3 | `WandBSink`; `WANDB_API_KEY` env; `--wandb-project` flag; `log_config` |
-| Docker + docker-compose | ✅ | Multi-stage; smoke/4-GPU/8-GPU targets |
-| Kubernetes manifests | ✅ | Single-node Job + 16-node Indexed Job |
-| Benchmark suite | ✅ | `benchmarks/run_benchmark.py`; CPU+GPU; JSON/CSV |
-| Chaos Scenario A fix (NCCL) | ❌ | v0.4 — Gloo race mitigated ~85%; needs GPU |
-| Nsight/CUPTI roofline | ❌ | v0.4 |
-| Real multi-node benchmark data | ❌ | v0.4 — needs cluster |
+Each module now has a single, reviewable responsibility.
