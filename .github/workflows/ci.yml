@@ -52,7 +52,7 @@ jobs:
         run: pip install ruff mypy types-PyYAML
 
       - name: ruff check
-        run: ruff check pkg/ train.py benchmarks/ --select E,W,F,I --ignore E501,W503
+        run: ruff check pkg/ train.py benchmarks/ --select E,W,F,I --ignore E501
 
       - name: mypy (pkg only, strict-ish)
         run: |
