@@ -40,6 +40,11 @@ __all__ = [
     "ToyMoEModel",
 ]
 
+# Registry import (lazy - avoids circular import at module level)
+def _get_register_model():
+    from pkg.models.registry import register_model
+    return register_model
+
 _DTYPE_MAP: Dict[str, torch.dtype] = {
     "float32": torch.float32,
     "bfloat16": torch.bfloat16,
@@ -117,6 +122,7 @@ class ToyMoEBlock(nn.Module):
         return x + self.moe(self.norm(x))
 
 
+@_get_register_model()("toy_moe")
 class ToyMoEModel(nn.Module):
     """Complete toy MoE language model.
 
