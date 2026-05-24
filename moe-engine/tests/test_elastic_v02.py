@@ -26,6 +26,7 @@ import torch.nn as nn
 
 from pkg.distributed.parallel_mesh import build_topology
 from pkg.elastic.fault_monitor import (
+
     AsyncCheckpointer,
     ClusterStateMachine,
     ElasticConfig,
@@ -34,6 +35,7 @@ from pkg.elastic.fault_monitor import (
     _largest_divisor_le,
 )
 
+pytestmark = pytest.mark.cpu
 
 # ---------------------------------------------------------------------------
 # ElasticConfig construction
@@ -53,7 +55,6 @@ def test_elastic_config_fields():
     assert cfg.local_ckpt_dir == "/tmp/ckpts"
     assert cfg.retention == 4
     assert cfg.min_nodes == 2
-
 
 # ---------------------------------------------------------------------------
 # Reshard plan completeness
@@ -86,7 +87,6 @@ def test_reshard_covers_all_experts(num_experts, ep_size, tmp_path):
         f"{{0..{num_experts-1}}}"
     )
 
-
 def test_reshard_marks_recovering_phase(tmp_path):
     topo = build_topology(dp_size=1, ep_size=1, device_type="cpu")
     csm = ClusterStateMachine(topology=topo, min_nodes=1)
@@ -98,7 +98,6 @@ def test_reshard_marks_recovering_phase(tmp_path):
     assert csm.phase == ClusterStateMachine.PHASE_RECOVERING
     csm.mark_resumed()
     assert csm.phase == ClusterStateMachine.PHASE_RESUMED
-
 
 # ---------------------------------------------------------------------------
 # Largest-divisor helper — exhaustive edge cases
@@ -122,7 +121,6 @@ def test_largest_divisor_le(n, k, expected):
     assert _largest_divisor_le(n, k) == expected, (
         f"_largest_divisor_le({n}, {k}) = {_largest_divisor_le(n, k)} != {expected}"
     )
-
 
 # ---------------------------------------------------------------------------
 # File-URI two-tier round-trip
@@ -154,7 +152,6 @@ def test_file_uri_remote_tier(tmp_path: Path):
     assert "ts" in meta_local
     assert "hostname" in meta_local
 
-
 # ---------------------------------------------------------------------------
 # Health check no-op (single-rank, no dist)
 # ---------------------------------------------------------------------------
@@ -165,12 +162,10 @@ def test_health_check_single_rank_no_op():
     dead = csm.heartbeat()
     assert dead == []   # no dist → always empty
 
-
 def test_alive_ranks_all_present():
     topo = build_topology(dp_size=1, ep_size=1, device_type="cpu")
     csm = ClusterStateMachine(topology=topo, min_nodes=1)
     assert csm.alive_ranks() == [0]
-
 
 # ---------------------------------------------------------------------------
 # Checkpoint retention — only latest N survive
@@ -205,7 +200,6 @@ def test_checkpoint_retention(tmp_path: Path, retention: int):
     # Latest step must always survive
     assert 6 in surviving, "Latest step must survive pruning"
 
-
 # ---------------------------------------------------------------------------
 # Harness: checkpoint and resume via ElasticTrainerHarness
 # ---------------------------------------------------------------------------
@@ -234,7 +228,6 @@ def test_harness_checkpoint_and_resume(tmp_path: Path):
     latest = harness.async_ckpt.latest_step()
     assert latest == 10
 
-
 def test_harness_no_signal_handler_in_thread(tmp_path: Path):
     """install_signal_handlers must not raise when called from a non-main thread."""
     cfg = ElasticConfig(
@@ -253,11 +246,11 @@ def test_harness_no_signal_handler_in_thread(tmp_path: Path):
             errors.append(exc)
 
     import threading
+
     t = threading.Thread(target=_install)
     t.start()
     t.join()
     assert not errors, f"install_signal_handlers raised in thread: {errors}"
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
