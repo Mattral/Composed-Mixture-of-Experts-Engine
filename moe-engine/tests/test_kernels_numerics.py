@@ -19,6 +19,8 @@ import numpy as np
 
 from pkg.kernels.moe_router import moe_topk_route, TRITON_AVAILABLE
 
+pytestmark = pytest.mark.cpu
+
 
 def assert_close(a, b, atol=1e-5, rtol=1e-5, name=""):
     """Assert tensors are close with detailed error message.
@@ -53,7 +55,6 @@ def assert_close(a, b, atol=1e-5, rtol=1e-5, name=""):
         f"max_rel_diff={max_rel_diff:.3e} (tol={rtol:.3e})"
     )
     assert passed_abs or passed_rel, msg
-
 
 class TestMoERouterNumerics:
     """Validate Triton kernel vs FP64 reference on multiple dimensions."""
@@ -209,6 +210,7 @@ class TestMoERouterNumerics:
             pytest.skip("Triton GPU path not available for this test")
 
         import random
+
         dims = [64, 128, 256, 512]
         experts = [8, 16, 32]
         ks = [1, 2, 4]
@@ -429,7 +431,6 @@ class TestMoERouterNumerics:
         for i in range(N):
             unique_count = len(set(idx[i].tolist()))
             assert unique_count == K, f"Row {i}: only {unique_count} unique experts"
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

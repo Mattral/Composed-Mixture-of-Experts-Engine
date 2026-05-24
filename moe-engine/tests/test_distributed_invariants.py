@@ -41,11 +41,15 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from pkg.distributed.parallel_mesh import (
+
+
     DistributedMoELayer,
     ParallelTopology,
     build_topology,
 )
 
+
+pytestmark = pytest.mark.cpu
 
 # ---------------------------------------------------------------------------
 # Free-port helper (also in conftest.py, duplicated here for standalone use)
@@ -55,7 +59,6 @@ def _free_port() -> int:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
 
 # ---------------------------------------------------------------------------
 # Shared worker
@@ -151,7 +154,6 @@ def _run_worker(
         "error": error,
     })
 
-
 # ---------------------------------------------------------------------------
 # Test helpers
 # ---------------------------------------------------------------------------
@@ -176,7 +178,6 @@ def _spawn_and_collect(port: int) -> list[dict]:
         results.append(q.get_nowait())
     return results
 
-
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -194,7 +195,6 @@ def test_token_conservation_distributed() -> None:
             f"rank {r['rank']}: token conservation failed. error={r['error']}"
         )
 
-
 def test_distributed_backward_no_nan() -> None:
     """No parameter gradient may be NaN or Inf after a forward+backward pass."""
     port = _free_port()
@@ -207,7 +207,6 @@ def test_distributed_backward_no_nan() -> None:
         assert r["no_nan_grads"], (
             f"rank {r['rank']}: non-finite gradient detected. error={r['error']}"
         )
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -9,6 +9,10 @@ import pytest
 from pkg.utils.mfu import compute_mfu, compute_moe_flops
 
 
+
+
+pytestmark = pytest.mark.cpu
+
 def test_compute_mfu_basic():
     """Verify compute_mfu returns valid MFU in range [0.0, 1.0]."""
     batch_tokens = 1024
@@ -34,7 +38,6 @@ def test_compute_mfu_basic():
     assert 0.0 <= mfu <= 1.0
     # With reasonable defaults, expect MFU in ballpark of [0.3, 0.8]
     assert mfu > 0.0
-
 
 def test_compute_mfu_sparse_activation():
     """Verify sparse activation (K/E) reduces FLOPs from full model."""
@@ -72,7 +75,6 @@ def test_compute_mfu_sparse_activation():
     
     # Sparse should have lower MFU than dense (fewer FLOPs)
     assert mfu_sparse < mfu_dense
-
 
 def test_compute_mfu_scaling():
     """Verify MFU scales with batch size and step time."""
@@ -113,7 +115,6 @@ def test_compute_mfu_scaling():
     # Should roughly double (2x FLOPs, same time)
     assert abs(mfu_double_batch / mfu_base - 2.0) < 0.01
 
-
 def test_compute_mfu_world_size_scaling():
     """Verify MFU scales with world size."""
     batch_tokens = 1024
@@ -153,7 +154,6 @@ def test_compute_mfu_world_size_scaling():
     # Should roughly halve
     assert abs(mfu_16 / mfu_8 - 0.5) < 0.01
 
-
 def test_compute_mfu_edge_cases():
     """Verify compute_mfu handles edge cases gracefully."""
     batch_tokens = 1024
@@ -192,7 +192,6 @@ def test_compute_mfu_edge_cases():
     # Slow execution should have lower MFU
     assert mfu_slow < mfu_fast
 
-
 def test_compute_moe_flops_backward_compat():
     """Verify deprecated compute_moe_flops still works."""
     flops = compute_moe_flops(
@@ -211,7 +210,6 @@ def test_compute_moe_flops_backward_compat():
     # Sanity check: should be roughly O(batch * seq * layers * hidden^2)
     expected_order_of_magnitude = 1e9  # billions of FLOPs
     assert flops > expected_order_of_magnitude
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
