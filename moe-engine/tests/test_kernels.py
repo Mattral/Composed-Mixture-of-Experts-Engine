@@ -21,12 +21,14 @@ import pytest
 import torch
 
 from pkg.kernels.moe_router import (
+
     MoERouter,
     moe_topk_route,
     MoERouterFunction,
     _reference_route_fp64,
 )
 
+pytestmark = pytest.mark.cpu
 
 @pytest.mark.parametrize("B,S,H,E,K", [
     (2, 16, 64, 8, 2),
@@ -49,7 +51,6 @@ def test_forward_tolerance(B, S, H, E, K):
     assert torch.allclose(
         w.double().cpu(), ref_w.double().cpu(), atol=1e-5, rtol=1e-5,
     ), f"forward weight tolerance violated, max_diff={(w.double()-ref_w.double()).abs().max()}"
-
 
 @pytest.mark.parametrize("B,S,H,E,K", [
     (2, 8, 32, 8, 2),
@@ -89,7 +90,6 @@ def test_backward_tolerance(B, S, H, E, K):
         gate2.grad.double(), ref_grad_gate, atol=1e-5, rtol=1e-5,
     ), f"grad_gate diff {(gate2.grad.double()-ref_grad_gate).abs().max()}"
 
-
 @pytest.mark.parametrize("B,S,H,E,K", [
     (2, 32, 64, 8, 2),
     (3, 16, 64, 32, 4),
@@ -112,7 +112,6 @@ def test_token_conservation(B, S, H, E, K):
     diffs = sorted_idx[:, 1:] - sorted_idx[:, :-1]
     assert (diffs > 0).all() if K > 1 else True, "duplicate expert assignment within a token"
 
-
 def test_combine_weights_sum_to_one():
     torch.manual_seed(2)
     tokens = torch.randn(64, 32)
@@ -120,7 +119,6 @@ def test_combine_weights_sum_to_one():
     _, w, _ = router(tokens)
     sums = w.sum(dim=-1)
     assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
-
 
 def test_router_profile_populated():
     torch.manual_seed(3)
@@ -131,7 +129,6 @@ def test_router_profile_populated():
     assert prof is not None
     assert prof.sram_bytes_per_block > 0
     assert prof.tokens_per_expert_mean > 0
-
 
 def test_triton_kernels_declare_k_as_constexpr():
     """Regression test (v0.3.2): both Triton kernels must declare ``K`` as
@@ -170,7 +167,6 @@ def test_triton_kernels_declare_k_as_constexpr():
             f"on every real GPU invocation (v0.3.2 regression)"
         )
 
-
 def test_triton_kernel_source_declares_k_as_constexpr():
     """Regression test (v0.3.2), Triton-independent variant.
 
@@ -181,6 +177,7 @@ def test_triton_kernel_source_declares_k_as_constexpr():
     v0.3. See that test's docstring for the full root-cause explanation.
     """
     import pkg.kernels.moe_router as mod
+
     src_path = mod.__file__
     with open(src_path, encoding="utf-8") as f:
         src = f.read()

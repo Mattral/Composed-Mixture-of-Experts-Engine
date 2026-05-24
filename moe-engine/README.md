@@ -58,23 +58,23 @@ checkpoint-stall bug can be isolated to a single line, not a six-team incident.
             ┌───────────────────────────────────┼────────────────────────────────────┐
             │                                   │                                    │
             ▼                                   ▼                                    ▼
-┌───────────────────────────┐   ┌──────────────────────────────┐   ┌──────────────────────────────┐
-│ pkg/distributed/          │   │ pkg/elastic/                 │   │ pkg/kernels/                 │
-│   parallel_mesh.py        │   │   fault_monitor.py           │   │   moe_router.py              │
-│                           │   │                              │   │                              │
-│ • ParallelTopology        │   │ • ElasticTrainerHarness      │   │ • MoERouter (nn.Module)      │
-│ • init_device_mesh((dp,ep)) │   │ • AsyncCheckpointer          │   │   ├─ forward: Triton @jit    │
-│   with TP axis reserved      │   │ • _PinnedHostStager          │   │   │   - dynamic-bound mask  │
-│ • DistributedMoELayer     │   │ • ClusterStateMachine        │   │   │   - 128B aligned loads  │
-│ • apply_fsdp2(...)        │   │ • LocalNVMeAdapter           │   │   └─ backward: Triton JIT    │
-│ • all_to_all_dispatch     │   │ • S3Adapter (boto3)          │   │ • CPU autograd fallback     │
-│   on a dedicated comm stream │   │                              │   │                              │
-└───────────┬───────────────┘   └─────────────┬────────────────┘   └──────────────┬───────────────┘
-            │                                 │                                   │
-            │   DeviceMesh sub-meshes         │   pinned-host snapshot queue      │  routing tokens
-            │   ("pp","dp","ep","tp")         │                                   │  + gating weights
-            │                                 │                                   │
-            ▼                                 ▼                                   ▼
+┌────────────────────────────┐   ┌──────────────────────────────┐   ┌──────────────────────────────┐
+│ pkg/distributed/           │   │ pkg/elastic/                 │   │ pkg/kernels/                 │
+│   parallel_mesh.py         │   │   fault_monitor.py           │   │   moe_router.py              │
+│                            │   │                              │   │                              │
+│ • ParallelTopology         │   │ • ElasticTrainerHarness      │   │ • MoERouter (nn.Module)      │
+│ • init_device_mesh((dp,ep))│   │ • AsyncCheckpointer          │   │   ├─ forward: Triton @jit    │
+│   with TP axis reserved    │   │ • _PinnedHostStager          │   │   │   - dynamic-bound mask   │
+│ • DistributedMoELayer      │   │ • ClusterStateMachine        │   │   │   - 128B aligned loads   │
+│ • apply_fsdp2(...)         │   │ • LocalNVMeAdapter           │   │   └─ backward: Triton JIT    │
+│ • all_to_all_dispatch      │   │ • S3Adapter (boto3)          │   │ • CPU autograd fallback      │
+│   on dedicated comm stream │   │                              │   │                              │
+└───────────┬────────────────┘   └─────────────┬────────────────┘   └──────────────┬───────────────┘
+            │                                  │                                   │
+            │   DeviceMesh sub-meshes          │   pinned-host snapshot queue      │  routing tokens
+            │   ("pp","dp","ep","tp")          │                                   │  + gating weights
+            │                                  │                                   │
+            ▼                                  ▼                                   ▼
    ┌────────────────────┐         ┌───────────────────────────┐         ┌──────────────────────┐
    │ NCCL / Gloo        │         │ tier-1 NVMe (staging)     │         │ Triton runtime       │
    │ process groups     │         │ tier-2 S3 / MinIO mirror  │         │ (CUDA / ROCm)        │
@@ -94,17 +94,17 @@ checkpoint-stall bug can be isolated to a single line, not a six-team incident.
                                   │
                                   ▼
                     DistributedMoELayer.forward
-                    ┌──────────────────────────┐
-                    │ 1. router (Triton fwd)   │
-                    │ 2. sort by target EP rank│
-                    │ 3. all_to_all_single     │
-                    │    on a dedicated comm stream ──► launch  ────────┐
+                    ┌────────────────────────────┐
+                    │ 1. router (Triton fwd)     │
+                    │ 2. sort by target EP rank  │
+                    │ 3. all_to_all_single       │
+                    │    on a dedicated comm stream ──► launch  ─────────┐
                     │ 4. independent compute  ─── overlap ───►│  GPU compute
                     │ 5. work.wait() on dispatch              │  in flight
-                    │ 6. local SwiGLU experts                 │
+                    │ 6. local SwiGLU experts                            │
                     │ 7. all_to_all_combine on a dedicated comm stream ──┘
-                    │ 8. weight ⊗ combine → reduce-K          │
-                    └──────────────────────────┘
+                    │ 8. weight ⊗ combine → reduce-K  │
+                    └──────────────────────────────────┘
 ```
 
 Per-rank a coordinate identifies its mesh slice. Sub-meshes are obtained by name:
@@ -381,4 +381,4 @@ moe-engine/
 
 ## 12. License
 
-Apache-2.0. See `LICENSE` (TODO).
+Apache-2.0. See `LICENSE`.

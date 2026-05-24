@@ -1,22 +1,76 @@
-"""Distributed primitives: DeviceMesh, FSDP2, Expert Parallelism."""
-from pkg.distributed.parallel_mesh import (
-    ColumnParallelLinear,
-    DistributedMoELayer,
+"""
+pkg/distributed
+===============
+
+Distributed primitives for 4D parallelism: DP + EP + TP + PP.
+
+Submodule responsibilities
+--------------------------
+mesh.py              — ParallelTopology, build_topology, process group management
+tensor_parallel.py   — ColumnParallelLinear, RowParallelLinear, scatter/gather SP
+expert_parallel.py   — all_to_all_dispatch, all_to_all_combine (EP collectives)
+pipeline_parallel.py — PipelineStage, 1F1B schedule, inter-stage send/recv
+data_parallel.py     — apply_fsdp2 (FSDP2 wrapping along DP axis)
+moe_layer.py         — DistributedMoELayer (thin orchestrator)
+
+Public surface
+--------------
+Import from this package for the most stable interface.
+Internal implementation helpers should be imported from their submodules
+directly only when necessary.
+"""
+
+from __future__ import annotations
+
+# -- Topology --
+from pkg.distributed.mesh import (
     ParallelTopology,
-    RowParallelLinear,
     build_topology,
-    all_to_all_dispatch,
-    all_to_all_combine,
+    tp_process_group,
+    pp_process_group,
+)
+
+# -- Tensor Parallelism --
+from pkg.distributed.tensor_parallel import (
+    ColumnParallelLinear,
+    RowParallelLinear,
     scatter_to_sequence_parallel,
     gather_from_sequence_parallel,
 )
 
+# -- Expert Parallelism --
+from pkg.distributed.expert_parallel import (
+    all_to_all_dispatch,
+    all_to_all_combine,
+)
+
+# -- Pipeline Parallelism --
+from pkg.distributed.pipeline_parallel import PipelineStage
+
+# -- Data Parallelism --
+from pkg.distributed.data_parallel import apply_fsdp2
+
+# -- MoE Layer --
+from pkg.distributed.moe_layer import DistributedMoELayer
+
 __all__ = [
-    "DistributedMoELayer",
+    # Topology
     "ParallelTopology",
     "build_topology",
-    "all_to_all_dispatch",
-    "all_to_all_combine",
+    "tp_process_group",
+    "pp_process_group",
+    # Tensor Parallelism
+    "ColumnParallelLinear",
+    "RowParallelLinear",
     "scatter_to_sequence_parallel",
     "gather_from_sequence_parallel",
+    # Expert Parallelism
+    "all_to_all_dispatch",
+    "all_to_all_combine",
+    # Pipeline Parallelism
+    "PipelineStage",
+    # Data Parallelism
+    "apply_fsdp2",
+    # MoE Layer
+    "DistributedMoELayer",
 ]

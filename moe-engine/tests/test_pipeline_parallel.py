@@ -33,6 +33,10 @@ sys.path.insert(0, str(ROOT))
 from pkg.distributed.parallel_mesh import PipelineStage, build_topology
 
 
+
+
+pytestmark = pytest.mark.cpu
+
 # ---------------------------------------------------------------------------
 # Single-process tests (unchanged from v0.2)
 # ---------------------------------------------------------------------------
@@ -40,26 +44,22 @@ from pkg.distributed.parallel_mesh import PipelineStage, build_topology
 def _micro_batches(m: int, dim: int = 4, device: str = "cpu") -> list:
     return [torch.randn(2, dim, device=device) for _ in range(m)]
 
-
 def test_pipeline_stage_init():
     stage = PipelineStage(stage_id=0, num_stages=4)
     assert stage.stage_id == 0
     assert stage.num_stages == 4
     assert stage.module is None
 
-
 def test_pipeline_stage_with_module():
     linear = nn.Linear(4, 4)
     stage = PipelineStage(stage_id=1, num_stages=4, module=linear)
     assert stage.module is linear
-
 
 def test_forward_step_passthrough():
     stage = PipelineStage(stage_id=0, num_stages=1)
     x = torch.randn(2, 8)
     y = stage.forward_step(x)
     assert torch.equal(x, y)
-
 
 def test_forward_step_with_module():
     lin = nn.Linear(8, 8)
@@ -70,17 +70,14 @@ def test_forward_step_with_module():
     y = stage.forward_step(x)
     assert torch.allclose(y, x, atol=1e-6)
 
-
 def test_backward_step_passthrough():
     stage = PipelineStage(stage_id=0, num_stages=1)
     g = torch.ones(2, 8)
     assert torch.equal(stage.backward_step(g), g)
 
-
 def test_backward_step_none_gradient():
     stage = PipelineStage(stage_id=0, num_stages=2)
     assert stage.backward_step(None) is None
-
 
 @pytest.mark.parametrize("num_stages,num_micro_batches", [
     (1, 4), (2, 4), (4, 4), (4, 8), (4, 2), (1, 1), (8, 8),
@@ -93,7 +90,6 @@ def test_1f1b_all_microbatches_get_gradients(num_stages, num_micro_batches):
     for i, g in enumerate(grads):
         assert g is not None, f"micro-batch {i} gradient is None"
 
-
 @pytest.mark.parametrize("num_stages,num_micro_batches", [
     (4, 4), (4, 8), (2, 6),
 ])
@@ -105,12 +101,10 @@ def test_1f1b_gradient_shapes_match_input(num_stages, num_micro_batches):
     for i, (x, g) in enumerate(zip(mb, grads)):
         assert g.shape == x.shape, f"mb {i}: input {x.shape} != grad {g.shape}"
 
-
 def test_1f1b_single_stage_single_microbatch():
     stage = PipelineStage(stage_id=0, num_stages=1)
     grads = stage.run_1f1b(_micro_batches(1))
     assert len(grads) == 1 and grads[0] is not None
-
 
 def test_1f1b_with_linear_module():
     torch.manual_seed(42)
@@ -120,7 +114,6 @@ def test_1f1b_with_linear_module():
     out = stage.forward_step(torch.ones(2, 4))
     assert torch.allclose(out, torch.full_like(out, 8.0), atol=1e-5)
 
-
 @pytest.mark.parametrize("num_stages", [1, 2, 4, 8])
 def test_1f1b_returns_list_length_equals_m(num_stages):
     for m in [1, 2, 4, 8, 16]:
@@ -128,24 +121,20 @@ def test_1f1b_returns_list_length_equals_m(num_stages):
         grads = stage.run_1f1b(_micro_batches(m))
         assert len(grads) == m
 
-
 def test_pipeline_stage_id_types():
     stage = PipelineStage(stage_id=2, num_stages=8)
     assert isinstance(stage.stage_id, int)
     assert isinstance(stage.num_stages, int)
 
-
 def test_1f1b_empty_micro_batches():
     stage = PipelineStage(stage_id=0, num_stages=4)
     assert stage.run_1f1b([]) == []
-
 
 def test_run_1f1b_distributed_raises_single_process():
     """run_1f1b_distributed must raise RuntimeError without dist + pp>1."""
     stage = PipelineStage(stage_id=0, num_stages=2)
     with pytest.raises(RuntimeError, match="run_1f1b_distributed requires pp_size"):
         stage.run_1f1b_distributed([torch.randn(2, 4)])
-
 
 # ---------------------------------------------------------------------------
 # Multi-process PP tests (v0.3) — real dist.send/recv
@@ -156,7 +145,6 @@ def _free_port() -> int:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
-
 
 def _pp2_worker(rank: int, world_size: int, port: int, result_queue, H: int, m: int):
     """Two-stage pipeline: stage 0 (rank 0) → stage 1 (rank 1)."""
@@ -198,7 +186,6 @@ def _pp2_worker(rank: int, world_size: int, port: int, result_queue, H: int, m: 
     result_queue.put({"rank": rank, "error": error, "outputs": outputs})
     dist.destroy_process_group()
 
-
 @pytest.mark.skipif(sys.platform == "darwin", reason="mp.spawn fork-safety on macOS CI")
 def test_pp_multiprocess_2stage_activation_flow():
     """2-rank PP: verify activations flow from stage 0 → stage 1 correctly."""
@@ -228,7 +215,6 @@ def test_pp_multiprocess_2stage_activation_flow():
     for v in last["outputs"]:
         assert abs(v - 2.0) < 1e-4, f"Expected 2.0, got {v}"
 
-
 @pytest.mark.skipif(sys.platform == "darwin", reason="mp.spawn fork-safety on macOS CI")
 def test_pp_multiprocess_correct_micro_batch_count():
     """2-rank PP: last stage must produce exactly m outputs."""
@@ -249,7 +235,6 @@ def test_pp_multiprocess_correct_micro_batch_count():
         results[r["rank"]] = r
 
     assert len(results[1]["outputs"]) == m
-
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
