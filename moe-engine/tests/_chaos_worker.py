@@ -44,8 +44,10 @@ import signal
 import sys
 import time
 import traceback
+from datetime import timedelta
 from pathlib import Path
 from typing import Dict
+import random
 
 import torch
 import torch.distributed as dist
@@ -137,7 +139,15 @@ def main() -> int:
             "generation": generation,
             "ts": time.time(),
         })
-        tele.write(json.dumps(rec, default=str) + "\n")
+        # Emit a JSON line so the test harness can parse it. Convert non-
+        # serializable types to strings for robustness.
+        safe_rec = {}
+        for k, v in rec.items():
+            if isinstance(v, (str, int, float, bool, type(None))):
+                safe_rec[k] = v
+            else:
+                safe_rec[k] = str(v)
+        tele.write(json.dumps(safe_rec) + "\n")
         tele.flush()
         try:
             os.fsync(tele.fileno())
@@ -145,24 +155,61 @@ def main() -> int:
             pass
 
     emit(event="boot", local_rank=local_rank, scenario=scenario,
-         pid=os.getpid(), torch_version=torch.__version__)
+         pid=os.getpid(), torch_version=torch.__version__,
+         master_addr=os.environ.get("MASTER_ADDR"),
+         master_port=os.environ.get("MASTER_PORT"),
+         gloo_ifname=os.environ.get("GLOO_SOCKET_IFNAME"),
+         elastic_restart_count=os.environ.get("TORCHELASTIC_RESTART_COUNT"),
+         rank=rank,
+         world=world,
+    )
 
     # ----- process group ------------------------------------------------
     # Gloo can sometimes fail to connect transiently in containerized
-    # or heavily-loaded CI environments. Retry a few times before
-    # giving up so the chaos test exercises the recovery logic instead
-    # of flaky infra failures.
-    max_init_attempts = 6
+    # or heavily-loaded CI environments. Retry more aggressively so the
+    # chaos scenario is not masked by infrastructure flakiness.
+    master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
+    master_port = os.environ.get("MASTER_PORT", "29500")
+    # Use env:// by default so torchrun/elastic provides rank/world via env vars.
+    init_method = os.environ.get("INIT_METHOD", "env://")
+    
+    # On restart (non-zero elastic restart count), increase timeout and add
+    # substantial synchronization delay to allow all ranks to be re-launched
+    # and ready to bind sockets before attempting PG formation.
+    restart_count = int(os.environ.get("TORCHELASTIC_RESTART_COUNT", "0"))
+    if restart_count > 0:
+        # Longer timeout + delay for restart to ensure robust re-rendezvous
+        timeout = timedelta(seconds=120)
+        time.sleep(5.0 + random.uniform(0.0, 2.0))
+    else:
+        # Normal timeout for cold start
+        timeout = timedelta(seconds=60)
+        # Small initial jitter to avoid simultaneous connect storms across ranks
+        time.sleep(random.uniform(0.0, 0.2))
+    
+    max_init_attempts = 24
     for attempt in range(1, max_init_attempts + 1):
         try:
-            dist.init_process_group(backend="gloo", init_method="env://")
-            emit(event="pg_ready")
+            emit(event="pg_init_attempt", attempt=attempt,
+                 init_method=init_method, timeout_s=timeout.total_seconds())
+            # Use env:// for compatibility with torchrun/elastic which
+            # supplies rank/WORLD_SIZE via environment variables.
+            dist.init_process_group(
+                backend="gloo",
+                init_method="env://",
+                timeout=timeout,
+            )
+            emit(event="pg_ready", attempt=attempt)
             break
         except Exception as e:
-            emit(event="pg_init_retry", attempt=attempt, error=str(e))
+            base = min(10.0, 0.5 * attempt)
+            jitter = random.uniform(0.0, 0.5)
+            wait_s = base + jitter
+            emit(event="pg_init_retry", attempt=attempt,
+                 error=str(e), wait_s=wait_s, base=base, jitter=jitter)
             if attempt == max_init_attempts:
                 raise
-            time.sleep(0.5 * attempt)
+            time.sleep(wait_s)
 
     # ----- model + optimizer + checkpointer ----------------------------
     model = _build_model()

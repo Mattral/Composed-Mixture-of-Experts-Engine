@@ -487,6 +487,112 @@ class DistributedMoELayer(nn.Module):
 
 
 # ==========================================================================
+# Tensor Parallelism – Column-Parallel and Row-Parallel Linear Layers
+# ==========================================================================
+class ColumnParallelLinear(nn.Module):
+    """Column-parallel linear layer that splits output features across TP group.
+
+    Weight shape: [out_features // tp_size, in_features] per rank.
+    - Input:  [batch, in_features]          (replicated across TP group)
+    - Compute: local_out = input @ weight.T where weight is sharded on dim 0
+    - Output: Run all-gather on TP group to collect outputs from all ranks
+    - Final:  [batch, out_features]         (replicated across TP group)
+
+    This is equivalent to computing a full linear layer and then gathering
+    the sliced outputs across all TP ranks, without actually materializing
+    the full output on any single rank.
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        
+        # For now, TP is scalar (no mesh passed). In the full integrated version,
+        # this would receive the TP mesh and shard the weight appropriately.
+        # For CPU/single-GPU tests, fall back to unreplicated weight.
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.weight = nn.Parameter(
+            torch.empty((out_features, in_features), **factory_kwargs)
+        )
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
+        else:
+            self.register_parameter("bias", None)
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward: local gemm then optional all-gather on TP group."""
+        # For now: no actual TP (no group passed), just a standard linear layer.
+        # In the production version with TP enabled, we would:
+        # 1. Shard weight on output dimension
+        # 2. Compute local_out = x @ weight.T (each rank computes its slice)
+        # 3. all-gather outputs across TP group to form full output
+        return torch.nn.functional.linear(x, self.weight, self.bias)
+
+
+class RowParallelLinear(nn.Module):
+    """Row-parallel linear layer that splits input features across TP group.
+
+    Weight shape: [out_features, in_features // tp_size] per rank.
+    - Input:  [batch, in_features]        (sliced across TP group by input dim)
+    - Compute: local_out = input_local @ weight.T (each rank sees its input slice)
+    - Reduce:  reduce-scatter outputs across TP group (sum contributions)
+    - Final:  [batch, out_features]        (replicated across TP group)
+
+    This requires a reduce-scatter collective to sum the partial contributions
+    from each rank's weight shard. Typically used after an attention layer that
+    already sharded the sequence.
+    """
+
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        bias: bool = True,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        
+        factory_kwargs = {"device": device, "dtype": dtype}
+        self.weight = nn.Parameter(
+            torch.empty((out_features, in_features), **factory_kwargs)
+        )
+        if bias:
+            self.bias = nn.Parameter(torch.empty(out_features, **factory_kwargs))
+        else:
+            self.register_parameter("bias", None)
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward: local gemm then optional reduce-scatter on TP group."""
+        # For now: no actual TP (no group passed), just a standard linear layer.
+        # In the production version with TP enabled, we would:
+        # 1. Shard weight on input dimension
+        # 2. Compute local_out = x @ weight_local.T (each rank computes its contribution)
+        # 3. reduce-scatter outputs across TP group to sum contributions
+        return torch.nn.functional.linear(x, self.weight, self.bias)
+
+
+# ==========================================================================
 # FSDP2 helper – applies `fully_shard` to every replicated submodule along
 # the `dp` axis of the mesh. MoE expert weights are *intentionally* skipped:
 # they are already partitioned across the `ep` axis.
