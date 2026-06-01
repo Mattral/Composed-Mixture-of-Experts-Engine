@@ -42,6 +42,17 @@ def test_local_nvme_round_trip(tmp_path):
         store.get("a/b/c.bin")
 
 
+def test_local_nvme_chunked_write(tmp_path):
+    """Verify that large payloads are written in chunks without OOM."""
+    store = LocalNVMeAdapter(str(tmp_path))
+    # Create a large payload (512 MB) to exercise chunking (256 MB chunks).
+    large_payload = b"x" * (512 * 1024 * 1024)
+    store.put("large/data.bin", large_payload)
+    retrieved = store.get("large/data.bin")
+    assert len(retrieved) == len(large_payload), "size mismatch after chunked write"
+    assert retrieved == large_payload, "content mismatch after chunked write"
+
+
 def test_async_checkpointer_save_load(tmp_path):
     local = LocalNVMeAdapter(str(tmp_path))
     ckpt = AsyncCheckpointer(local_adapter=local, remote_adapter=None, retention=4, workers=2)

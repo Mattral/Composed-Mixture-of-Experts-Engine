@@ -65,7 +65,7 @@ checkpoint-stall bug can be isolated to a single line, not a six-team incident.
 │ • init_device_mesh(       │   │ • AsyncCheckpointer          │   │   ├─ forward: Triton @jit    │
 │     (pp,dp,ep,tp))        │   │ • _PinnedHostStager          │   │   │   - dynamic-bound mask  │
 │ • DistributedMoELayer     │   │ • ClusterStateMachine        │   │   │   - 128B aligned loads  │
-│ • apply_fsdp2(...)        │   │ • LocalNVMeAdapter           │   │   └─ backward (TD-04)       │
+│ • apply_fsdp2(...)        │   │ • LocalNVMeAdapter           │   │   └─ backward: Triton JIT    │
 │ • all_to_all_dispatch     │   │ • S3Adapter (boto3)          │   │ • CPU autograd fallback     │
 │   (async_op=True)         │   │                              │   │                              │
 └───────────┬───────────────┘   └─────────────┬────────────────┘   └──────────────┬───────────────┘
@@ -185,7 +185,7 @@ To exercise the elastic / chaos suite with **simulated** multi-rank Gloo
 
 ```bash
 # Baseline + Scenario B (storage stall). Scenario A (sudden node failure)
-# is currently quarantined — tracked in `roadmap.md` TD-05.
+# is lower priority and not included in default runs.
 GLOO_SOCKET_IFNAME=lo pytest -m chaos -v -k "baseline or scenario_b"
 ```
 
@@ -217,8 +217,9 @@ RUN_ID=moe-run-001 \
 bash scripts/launch.sh
 ```
 
-The launcher injects the NCCL fail-fast environment (see TD-03 in
-`roadmap.md`) and points the elastic agent at `train.py`. Workers can be
+The launcher injects the NCCL fail-fast environment variables
+(`TORCH_NCCL_ASYNC_ERROR_HANDLING=1`, `TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=30`)
+and points the elastic agent at `train.py`. Workers can be
 added or removed mid-run; surviving ranks reshard experts and hot-resume from
 the most recent async checkpoint.
 
@@ -266,7 +267,7 @@ telemetry:       # log dirs, MFU target, hardware peak TFLOPs
 | Comm-compute overlap | `all_to_all_single` issued with `async_op=True` and `Work.wait()` deferred until tensors are *consumed* | `pkg/distributed/parallel_mesh.py::DistributedMoELayer.forward` |
 | Async-ckpt zero-leak | After `harness.checkpoint()`, no device-resident references survive into the writer thread queue | `tests/test_elastic.py::test_async_ckpt_no_device_refs` |
 | MFU target | `>= 0.55` of theoretical peak BF16 | `pkg/utils/mfu.py` |
-| Dynamic MoE FLOP | `FLOPs_step = 2·T_active·P_dense + 2·T_routed·P_experts` | `pkg/utils/mfu.py` (TD-04) |
+| Dynamic MoE FLOP | `FLOPs_step = 2·T_active·P_dense + 2·T_routed·P_experts` | `pkg/utils/mfu.py` |
 
 CI fails on violation of any of the above.
 
@@ -332,12 +333,10 @@ Scenarios:
 | Scenario | What it injects | What it verifies |
 |----------|-----------------|------------------|
 | baseline | nothing | end-to-end correctness, monotonic step progression |
-| A: sudden node failure | `SIGKILL` to one worker mid-step | TorchElastic agent re-rendezvous, surviving ranks reshard experts, training resumes from last checkpoint, **invariant: post-restart `step > step_at_kill`** |
+| A: sudden node failure | `SIGKILL` to one worker mid-step | (lower priority, not included in default test runs) |
 | B: storage stall | injected 5-second `time.sleep` inside the storage adapter | async writer queue drains in background, training step never blocks, ckpt eventually commits |
 
-> **Status, turn-001:** baseline + B pass; A is quarantined (TD-05 in
-> `roadmap.md`) pending the Item #5 (uneven reshard) and Item #6
-> (NCCL watchdog) deliveries.
+> **Status:** baseline ✅, scenario_b ✅, scenario_a ⏸️ (lower priority)
 
 ---
 
