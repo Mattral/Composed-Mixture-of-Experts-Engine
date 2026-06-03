@@ -57,18 +57,18 @@ checkpoint-stall bug can be isolated to a single line, not a six-team incident.
             ┌───────────────────────────────────┼────────────────────────────────────┐
             │                                   │                                    │
             ▼                                   ▼                                    ▼
-┌───────────────────────────┐   ┌──────────────────────────────┐   ┌──────────────────────────────┐
-│ pkg/distributed/          │   │ pkg/elastic/                 │   │ pkg/kernels/                 │
-│   parallel_mesh.py        │   │   fault_monitor.py           │   │   moe_router.py              │
-│                           │   │                              │   │                              │
-│ • ParallelTopology        │   │ • ElasticTrainerHarness      │   │ • MoERouter (nn.Module)      │
-│ • init_device_mesh((dp,ep)) │   │ • AsyncCheckpointer          │   │   ├─ Triton fused forward /  │
-│   with TP axis reserved    │   │ • _PinnedHostStager          │   │   │     autograd backward      │
-│ • DistributedMoELayer     │   │ • ClusterStateMachine        │   │   │   - dynamic-bound mask     │
-│ • apply_fsdp2(...)        │   │ • LocalNVMeAdapter           │   │   │   - 128B aligned loads     │
-│ • all_to_all_dispatch     │   │ • S3Adapter (boto3)          │   │   └─ CPU fallback path       │
-│   on a dedicated comm stream │ │                              │   │                              │
-└───────────┬───────────────┘   └─────────────┬────────────────┘   └──────────────┬───────────────┘
+┌────────────────────────────┐   ┌──────────────────────────────┐   ┌──────────────────────────────┐
+│ pkg/distributed/           │   │ pkg/elastic/                 │   │ pkg/kernels/                 │
+│   parallel_mesh.py         │   │   fault_monitor.py           │   │   moe_router.py              │
+│                            │   │                              │   │                              │
+│ • ParallelTopology         │   │ • ElasticTrainerHarness      │   │ • MoERouter (nn.Module)      │
+│ • init_device_mesh((dp,ep))│   │ • AsyncCheckpointer          │   │   ├─ Triton fused forward /  │
+│   with TP axis reserved    │   │ • _PinnedHostStager          │   │   │     autograd backward    │
+│ • DistributedMoELayer      │   │ • ClusterStateMachine        │   │   │   - dynamic-bound mask   │
+│ • apply_fsdp2(...)         │   │ • LocalNVMeAdapter           │   │   │   - 128B aligned loads   │
+│ • all_to_all_dispatch      │   │ • S3Adapter (boto3)          │   │   └─ CPU fallback path       │
+│   on dedicated comm stream │   │                              │   │                              │
+└───────────┬────────────────┘   └─────────────┬────────────────┘   └──────────────┬───────────────┘
             │                                 │                                   │
             │   DeviceMesh sub-meshes         │   pinned-host snapshot queue      │  routing tokens
             │   ("pp","dp","ep","tp")         │                                   │  + gating weights
