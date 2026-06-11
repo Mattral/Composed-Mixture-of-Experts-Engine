@@ -1,0 +1,127 @@
+# ============================================================
+# moe-engine docker-compose — single-node multi-GPU training
+# ============================================================
+# Requires: Docker 24+ with nvidia-container-toolkit
+#
+# Usage:
+#   # Smoke test (CPU-only):
+#   docker compose run --rm smoke
+#
+#   # 4-GPU training run (requires 4 GPUs on the host):
+#   docker compose run --rm train-4gpu
+#
+#   # With Prometheus + Grafana monitoring stack:
+#   docker compose --profile monitoring up -d
+#
+# ============================================================
+
+version: "3.9"
+
+x-moe-base: &moe-base
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+  image: moe-engine:v0.2
+  ipc: host          # required for NCCL shared memory
+  ulimits:
+    memlock: -1
+    stack: 67108864
+  environment:
+    - TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+    - TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC=30
+    - NCCL_DEBUG=WARN
+    - PYTHONUNBUFFERED=1
+  volumes:
+    - ./../../:/workspace/moe-engine:ro
+    - moe_checkpoints:/mnt/ckpts
+    - moe_logs:/var/log/moe-engine
+
+services:
+  # ---- CPU-only smoke test (no GPU required) --------------------
+  smoke:
+    <<: *moe-base
+    command: >
+      python train.py
+        --config configs/smoke.yaml
+        --smoke
+
+  # ---- 4-GPU torchrun training run ------------------------------
+  train-4gpu:
+    <<: *moe-base
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 4
+              capabilities: [gpu]
+    command: >
+      torchrun
+        --standalone
+        --nnodes=1
+        --nproc_per_node=4
+        train.py
+          --config configs/default.yaml
+          --max-steps 1000
+          --profile
+    ports:
+      - "9102:9102"   # Prometheus metrics
+
+  # ---- 8-GPU torchrun training run ------------------------------
+  train-8gpu:
+    <<: *moe-base
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 8
+              capabilities: [gpu]
+    command: >
+      torchrun
+        --standalone
+        --nnodes=1
+        --nproc_per_node=8
+        train.py
+          --config configs/default.yaml
+          --profile
+    ports:
+      - "9102:9102"   # Prometheus metrics
+
+  # ---- Pytest CPU test suite ------------------------------------
+  test:
+    <<: *moe-base
+    command: >
+      pytest tests/ -v -x
+        --ignore=tests/test_chaos.py
+        -k "not cuda"
+    environment:
+      - PYTHONUNBUFFERED=1
+
+  # ---- Chaos test suite (requires torchrun) ---------------------
+  test-chaos:
+    <<: *moe-base
+    command: pytest tests/test_chaos.py -v -m chaos
+
+  # ---- Monitoring stack (optional) ------------------------------
+  prometheus:
+    profiles: [monitoring]
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    profiles: [monitoring]
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  moe_checkpoints:
+  moe_logs:

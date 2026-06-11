@@ -1,0 +1,73 @@
+# ============================================================
+# moe-engine Multi-Node Kubernetes Training Job
+# Uses TorchElastic (torchrun) with etcd rendezvous.
+# ============================================================
+# Requirements:
+#   - etcd deployed in the cluster (see etcd-service.yaml)
+#   - PVC moe-checkpoints-pvc accessible from all nodes
+#   - Secret moe-engine-s3 for checkpoint remote tier
+#
+# Scale:
+#   kubectl scale job moe-training-multinode --replicas=16
+# ============================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: moe-training-multinode
+  namespace: moe-engine
+  labels:
+    app.kubernetes.io/name: moe-engine
+    app.kubernetes.io/version: v0.2
+spec:
+  completions: 16        # number of worker pods
+  parallelism: 16
+  completionMode: Indexed
+  backoffLimit: 5
+  template:
+    metadata:
+      labels:
+        app: moe-training-multinode
+    spec:
+      restartPolicy: OnFailure
+      subdomain: moe-training-multinode
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: checkpoint-storage
+          persistentVolumeClaim:
+            claimName: moe-checkpoints-pvc
+      containers:
+        - name: trainer
+          image: moe-engine:v0.2
+          imagePullPolicy: Always
+          command:
+            - torchrun
+            - --nnodes=16
+            - --nproc_per_node=8
+            - --rdzv_id=moe-multinode-run
+            - --rdzv_backend=etcd-v2
+            - --rdzv_endpoint=etcd-headless.moe-engine:2379
+            - --max_restarts=10
+            - train.py
+            - --config
+            - configs/default.yaml
+          envFrom:
+            - configMapRef:
+                name: moe-engine-config
+          env:
+            - name: RDZV_BACKEND
+              value: "etcd"
+            - name: RDZV_ENDPOINT
+              value: "etcd-headless.moe-engine:2379"
+          resources:
+            requests:
+              nvidia.com/gpu: "8"
+            limits:
+              nvidia.com/gpu: "8"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: checkpoint-storage
+              mountPath: /mnt/ckpts
