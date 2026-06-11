@@ -105,6 +105,17 @@ def _assert_telemetry_envelope(jsonl_path: Path) -> None:
         # Infra block must surface async ckpt commit time + cluster size.
         assert "async_ckpt_commit_ms" in rec["infra"]
         assert "active_nodes" in rec["infra"]
+        # v0.2: routing quality block must be present in every record.
+        assert "routing" in rec, "v0.2 routing section missing from telemetry envelope"
+        # routing fields are populated after the first router forward; at step>=0
+        # they may be empty dicts (before router runs) or populated. Accept both.
+        if rec["routing"]:
+            assert "expert_load_imbalance" in rec["routing"], (
+                "expert_load_imbalance missing from routing section"
+            )
+            assert "router_z_loss" in rec["routing"], (
+                "router_z_loss missing from routing section"
+            )
 
 
 def test_smoke_local_file_tier(tmp_path: Path) -> None:
