@@ -4,17 +4,28 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "moe-engine"
-version = "0.1.0"
-description = "A Composed Mixture-of-Experts Engine: Triton kernels, FSDP2 + EP, elastic infra."
+version = "0.2.0"
+description = "Composed Mixture-of-Experts Engine: Triton kernels, 4D parallelism (DP+EP+TP+PP), elastic fault tolerance."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
 authors = [{name = "moe-engine contributors"}]
+keywords = ["mixture-of-experts", "distributed-training", "triton", "pytorch", "moe"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "torch>=2.5.0",
     "triton>=3.0.0",
     "numpy>=1.26.0",
     "boto3>=1.34.0",
+    "botocore>=1.34.0",
     "pyyaml>=6.0.1",
     "tensorboard>=2.16.0",
     "psutil>=5.9.0",
@@ -26,8 +37,19 @@ dev = [
     "pytest-mock>=3.12.0",
     "pytest-timeout>=2.3.0",
     "moto>=5.0.0",
-    "psutil>=5.9.0",
 ]
+monitoring = [
+    "prometheus-client>=0.20.0",
+]
+all = [
+    "moe-engine[dev,monitoring]",
+]
+
+[project.urls]
+Homepage = "https://github.com/your-org/moe-engine"
+Repository = "https://github.com/your-org/moe-engine"
+Documentation = "https://github.com/your-org/moe-engine/tree/main/docs"
+"Bug Tracker" = "https://github.com/your-org/moe-engine/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -38,4 +60,22 @@ testpaths = ["tests"]
 addopts = "-ra -q --strict-markers"
 markers = [
     "chaos: heavy fault-injection / TorchElastic recovery scenarios; opt-in via `pytest -m chaos`",
+    "gpu: tests that require a CUDA-capable GPU; skipped automatically on CPU-only machines",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning:pkg.*",
+    "ignore::UserWarning:torch.*",
+]
+
+[tool.coverage.run]
+source = ["pkg"]
+omit = ["tests/*", "benchmarks/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "except ImportError:",
+    "except Exception:.*# pragma: no cover",
 ]
