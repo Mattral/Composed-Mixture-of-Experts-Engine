@@ -2,27 +2,33 @@
 train.py
 ========
 
-Unified training entrypoint for the moe-engine. Designed to be launched
-via TorchElastic:
+Unified training entrypoint for moe-engine v0.2.
 
-    torchrun \
-      --nnodes=$NUM_NODES \
-      --nproc_per_node=$GPUS_PER_NODE \
-      --rdzv_id=moe-run-001 \
-      --rdzv_backend=c10d \
-      --rdzv_endpoint=$RDZV_ENDPOINT \
-      --max_restarts=10 \
+Launch via TorchElastic:
+
+    torchrun \\
+      --nnodes=$NUM_NODES \\
+      --nproc_per_node=$GPUS_PER_NODE \\
+      --rdzv_id=moe-run-001 \\
+      --rdzv_backend=c10d \\
+      --rdzv_endpoint=$RDZV_ENDPOINT \\
+      --max_restarts=10 \\
       train.py --config configs/default.yaml
 
-The script bootstraps a tiny MoE transformer (real architecture, just sized
-down by the config) for end-to-end testing of the full stack. For
-production runs swap the toy `MoEBlock` below for your real model code –
-the surrounding distributed / elastic / telemetry harness is unchanged.
+v0.2 additions
+--------------
+* Routing quality telemetry: expert_load_imbalance, router_z_loss per step.
+* ``--profile`` flag: emits a structured benchmark summary to benchmarks/
+* ``compute_mfu_detailed`` for accurate dense + sparse FLOP accounting.
+* Warm-up LR schedule with cosine decay.
+* Gradient accumulation support (``gradient_accumulation_steps`` config key).
+* Rank-0 console summary with smoothed MFU.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import time
@@ -44,11 +50,11 @@ from pkg.elastic.fault_monitor import (
 )
 from pkg.telemetry.logger import StructuredLogger, StepRecord
 from pkg.utils.config import load_config
-from pkg.utils.mfu import MFUAccountant, compute_moe_flops
+from pkg.utils.mfu import MFUAccountant, compute_moe_flops, compute_mfu_detailed
 
 
 # ----------------------------------------------------------------------
-# Tiny test model: stack of (RMSNorm + MoEBlock).
+# Toy test model: stack of (RMSNorm + MoEBlock).
 # ----------------------------------------------------------------------
 class _RMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-5):
@@ -84,13 +90,17 @@ class _ToyMoEBlock(nn.Module):
 class _ToyMoEModel(nn.Module):
     def __init__(self, cfg, topo: ParallelTopology):
         super().__init__()
-        dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16, "float16": torch.float16}[
-            cfg["model"]["dtype"]
-        ]
+        dtype_map = {
+            "float32": torch.float32,
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+        }
+        dtype = dtype_map[cfg["model"]["dtype"]]
         H = cfg["model"]["hidden_dim"]
         self.embed = nn.Embedding(cfg["model"]["vocab_size"], H, dtype=dtype)
         self.blocks = nn.ModuleList([
-            _ToyMoEBlock(cfg["model"], topo, dtype) for _ in range(cfg["model"]["num_layers"])
+            _ToyMoEBlock(cfg["model"], topo, dtype)
+            for _ in range(cfg["model"]["num_layers"])
         ])
         self.norm = _RMSNorm(H)
         self.lm_head = nn.Linear(H, cfg["model"]["vocab_size"], bias=False, dtype=dtype)
@@ -106,11 +116,22 @@ class _ToyMoEModel(nn.Module):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True)
-    p.add_argument("--max-steps", type=int, default=None,
-                   help="override training.max_steps for smoke tests")
-    p.add_argument("--smoke", action="store_true",
-                   help="run a tiny end-to-end smoke pass and exit")
+    p.add_argument("--max-steps", type=int, default=None)
+    p.add_argument("--smoke", action="store_true")
+    p.add_argument("--profile", action="store_true",
+                   help="Write a benchmark JSON to benchmarks/ on exit")
+    p.add_argument("--prometheus-port", type=int, default=0,
+                   help="Port for Prometheus /metrics endpoint (0=disabled)")
     return p.parse_args()
+
+
+def _get_lr(step: int, warmup_steps: int, max_steps: int, lr: float) -> float:
+    """Linear warm-up + cosine decay."""
+    import math
+    if step < warmup_steps:
+        return lr * (step + 1) / max(warmup_steps, 1)
+    progress = (step - warmup_steps) / max(max_steps - warmup_steps, 1)
+    return lr * 0.5 * (1.0 + math.cos(math.pi * progress))
 
 
 def main() -> None:
@@ -122,8 +143,7 @@ def main() -> None:
     cfg = load_config(args.config).raw
 
     # ----------------------------------------------------------------
-    # Process group bootstrap. When running under torchrun, the env vars
-    # are set automatically.
+    # Process group bootstrap.
     # ----------------------------------------------------------------
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
@@ -137,8 +157,7 @@ def main() -> None:
     ep = cfg["parallelism"]["expert_parallel"]
     tp = cfg["parallelism"]["tensor_parallel"]
     pp = cfg["parallelism"]["pipeline_parallel"]
-    # Sanity: if launched with a smaller world than the config expects,
-    # collapse dp first while preserving reserved TP/PP axes.
+
     if world_size < dp * tp * pp * ep:
         dp = max(1, world_size // (tp * pp * ep))
         if dp * tp * pp * ep > world_size:
@@ -146,16 +165,12 @@ def main() -> None:
             dp = max(1, world_size // (tp * pp * ep))
 
     topology = build_topology(
-        dp_size=dp,
-        ep_size=ep,
-        tp_size=tp,
-        pp_size=pp,
+        dp_size=dp, ep_size=ep, tp_size=tp, pp_size=pp,
         device_type="cuda" if torch.cuda.is_available() else "cpu",
     )
 
     # ----------------------------------------------------------------
-    # Toy/test-scale model. For real runs, bring your own model and
-    # leave the rest of this scaffold untouched.
+    # Model.
     # ----------------------------------------------------------------
     if args.smoke:
         cfg["model"]["hidden_dim"] = 64
@@ -167,28 +182,31 @@ def main() -> None:
         cfg["training"]["micro_batch_size"] = 2
 
     model = _ToyMoEModel(cfg, topology)
-    model = apply_fsdp2(model, topology, mixed_precision_dtype=torch.bfloat16
-                       if cfg["model"]["dtype"] == "bfloat16" else None)
+    model = apply_fsdp2(model, topology,
+                        mixed_precision_dtype=torch.bfloat16
+                        if cfg["model"]["dtype"] == "bfloat16" else None)
     model = model.to(topology.device)
 
+    lr = cfg["training"]["learning_rate"]
     optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=cfg["training"]["learning_rate"],
+        model.parameters(), lr=lr,
         weight_decay=cfg["training"]["weight_decay"],
         betas=(0.9, 0.95),
     )
 
     # ----------------------------------------------------------------
-    # Telemetry + MFU accountant.
+    # Telemetry + MFU.
     # ----------------------------------------------------------------
     logger = StructuredLogger(
         json_path=cfg["telemetry"]["json_path"],
         tensorboard_dir=cfg["telemetry"]["tensorboard_dir"],
         rank=topology.rank,
+        prometheus_port=args.prometheus_port,
     )
     mfu_acct = MFUAccountant(
         peak_tflops=cfg["telemetry"]["hardware_peak_tflops"],
         mfu_target=cfg["telemetry"]["mfu_target"],
+        smoothing_window=50,
     )
     mfu_acct.configure(
         flops_per_token=compute_moe_flops(
@@ -219,13 +237,12 @@ def main() -> None:
     harness = ElasticTrainerHarness(el_cfg, topology)
     harness.install_signal_handlers()
 
-    # Resume from latest checkpoint, if any.
     latest = harness.async_ckpt.latest_step()
     start_step = 0
     if latest is not None:
         harness.async_ckpt.load(model, optimizer, latest, rank=topology.rank)
         start_step = latest + 1
-        logging.info("resumed at step %d", start_step)
+        logging.info("Resumed at step %d", start_step)
 
     # ----------------------------------------------------------------
     # Training loop.
@@ -234,35 +251,46 @@ def main() -> None:
     if args.smoke:
         max_steps = min(max_steps, 5)
 
+    warmup_steps = cfg["training"].get("warmup_steps", 0)
+    grad_accum = cfg["training"].get("gradient_accumulation_steps", 1)
+
     B = cfg["training"]["micro_batch_size"]
     S = cfg["model"]["sequence_length"]
     V = cfg["model"]["vocab_size"]
-    H = cfg["model"]["hidden_dim"]
+
+    # Profiling: capture per-step stats for --profile flag
+    profile_records: list[dict] = []
 
     for step in range(start_step, max_steps):
+        # LR schedule
+        step_lr = _get_lr(step, warmup_steps, max_steps, lr)
+        for pg in optimizer.param_groups:
+            pg["lr"] = step_lr
+
         mfu_acct.start_step()
-
-        ids = torch.randint(0, V, (B, S), device=topology.device)
-        targets = torch.randint(0, V, (B, S), device=topology.device)
-
-        # Forward
-        logits = model(ids)                             # [B, S, V]
-        loss = torch.nn.functional.cross_entropy(
-            logits.view(-1, V).float(), targets.view(-1),
-        )
-
-        # Backward + optimizer
         optimizer.zero_grad(set_to_none=True)
-        loss.backward()
+
+        # Gradient accumulation
+        total_loss = 0.0
+        for _acc_step in range(grad_accum):
+            ids = torch.randint(0, V, (B, S), device=topology.device)
+            targets = torch.randint(0, V, (B, S), device=topology.device)
+            logits = model(ids)
+            loss = torch.nn.functional.cross_entropy(
+                logits.view(-1, V).float(), targets.view(-1),
+            ) / grad_accum
+            loss.backward()
+            total_loss += float(loss.detach().item())
+
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["training"]["grad_clip"])
         optimizer.step()
 
-        mfu_res = mfu_acct.end_step(tokens=B * S)
+        mfu_res = mfu_acct.end_step(tokens=B * S * grad_accum)
 
-        # Telemetry envelope.
+        # Telemetry envelope
         rec = StepRecord(
             step=step,
-            loss=float(loss.detach().item()),
+            loss=total_loss,
             mfu=mfu_res.mfu,
             tokens_per_sec=mfu_res.tokens_per_sec,
             wall_clock_ms=mfu_res.step_ms,
@@ -273,21 +301,29 @@ def main() -> None:
                 "async_ckpt_commit_ms": harness.async_ckpt.last_commit_ms,
                 "active_nodes": topology.world_size,
                 "ep_world_size": topology.ep_size,
+                "lr": step_lr,
+                "grad_accum": grad_accum,
             },
+            routing={},
         )
-        # Pull last router profile from the first MoE block (best-effort).
+
+        # Pull router + MoE telemetry from first block
         try:
             first_router = model.blocks[0].moe.router
             first_moe = model.blocks[0].moe
             if first_router.last_profile is not None:
+                p = first_router.last_profile
                 rec.kernel = {
-                    "sram_bytes_per_block": first_router.last_profile.sram_bytes_per_block,
-                    "achieved_bw_gbps": first_router.last_profile.achieved_bandwidth_gbps,
-                    "tokens_per_expert_mean": first_router.last_profile.tokens_per_expert_mean,
-                    "tokens_per_expert_std": first_router.last_profile.tokens_per_expert_std,
-                    "used_triton": first_router.last_profile.used_triton,
+                    "sram_bytes_per_block": p.sram_bytes_per_block,
+                    "achieved_bw_gbps": p.achieved_bandwidth_gbps,
+                    "tokens_per_expert_mean": p.tokens_per_expert_mean,
+                    "tokens_per_expert_std": p.tokens_per_expert_std,
+                    "used_triton": p.used_triton,
                 }
-            # Capture collective timings
+                rec.routing = {
+                    "expert_load_imbalance": p.expert_load_imbalance,
+                    "router_z_loss": p.router_z_loss,
+                }
             rec.collective = {
                 "all_to_all_dispatch_ms": first_moe.last_dispatch_ms,
                 "all_to_all_combine_ms": first_moe.last_combine_ms,
@@ -297,6 +333,11 @@ def main() -> None:
 
         if step % cfg["training"]["log_interval"] == 0:
             logger.emit(rec)
+            if topology.rank == 0:
+                logging.info(
+                    "step=%d loss=%.4f %s",
+                    step, total_loss, mfu_acct.summary_str(),
+                )
 
         if step > 0 and step % cfg["training"]["ckpt_interval"] == 0:
             harness.checkpoint(model, optimizer, step)
@@ -304,9 +345,21 @@ def main() -> None:
         if step > 0 and step % 50 == 0:
             dead = harness.health_check()
             if dead:
-                logging.warning("rank drop detected: %s; entering recovery", dead)
+                logging.warning("Rank drop: %s; entering recovery", dead)
                 topology = harness.recover(model, optimizer,
                                            num_experts=cfg["model"]["num_experts"])
+
+        if args.profile:
+            profile_records.append({
+                "step": step,
+                "step_ms": mfu_res.step_ms,
+                "mfu": mfu_res.mfu,
+                "tokens_per_sec": mfu_res.tokens_per_sec,
+                "loss": total_loss,
+                "dispatch_ms": rec.collective.get("all_to_all_dispatch_ms", 0.0),
+                "combine_ms": rec.collective.get("all_to_all_combine_ms", 0.0),
+                "load_imbalance": rec.routing.get("expert_load_imbalance", 1.0),
+            })
 
     # ----------------------------------------------------------------
     # Shutdown.
@@ -314,6 +367,38 @@ def main() -> None:
     harness.checkpoint(model, optimizer, max_steps)
     harness.shutdown()
     logger.close()
+
+    # --profile: write benchmark JSON
+    if args.profile and topology.rank == 0 and profile_records:
+        bench_dir = Path("benchmarks")
+        bench_dir.mkdir(exist_ok=True)
+        ts = int(time.time())
+        bench_path = bench_dir / f"run_{ts}_rank0.json"
+        # Compute summary statistics
+        step_ms_all = [r["step_ms"] for r in profile_records]
+        mfu_all = [r["mfu"] for r in profile_records]
+        tps_all = [r["tokens_per_sec"] for r in profile_records]
+        n = len(step_ms_all)
+        summary = {
+            "config": {
+                "hidden_dim": cfg["model"]["hidden_dim"],
+                "num_experts": cfg["model"]["num_experts"],
+                "top_k": cfg["model"]["top_k"],
+                "num_layers": cfg["model"]["num_layers"],
+                "dtype": cfg["model"]["dtype"],
+                "world_size": world_size,
+                "dp": dp, "ep": ep, "tp": tp, "pp": pp,
+            },
+            "steps": n,
+            "mfu_mean": sum(mfu_all) / n,
+            "mfu_p50": sorted(mfu_all)[n // 2],
+            "step_ms_mean": sum(step_ms_all) / n,
+            "tokens_per_sec_mean": sum(tps_all) / n,
+            "per_step": profile_records,
+        }
+        bench_path.write_text(json.dumps(summary, indent=2))
+        logging.info("Benchmark written to %s", bench_path)
+
     if dist.is_initialized():
         dist.destroy_process_group()
 
