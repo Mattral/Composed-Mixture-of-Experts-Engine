@@ -418,7 +418,17 @@ class _SwiGLUExpert(nn.Module):
         dtype: torch.dtype = torch.float32,
     ):
         super().__init__()
-        self.w_gate = nn.Linear(hidden_dim, ffn_dim, bias=False, dtype=dtype)
+        # Both w_gate and w_up are ColumnParallel so they stay sharded [F//tp_size]
+        # through the elementwise multiply; w_down is RowParallel and all_reduces.
+        # At tp_size=1 these degenerate to plain nn.Linear (no collectives).
+        self.w_gate = ColumnParallelLinear(
+            in_features=hidden_dim,
+            out_features=ffn_dim,
+            bias=False,
+            topology=topology,
+            device=topology.device,
+            dtype=dtype,
+        )
         self.w_up = ColumnParallelLinear(
             in_features=hidden_dim,
             out_features=ffn_dim,
@@ -891,39 +901,21 @@ class RowParallelLinear(nn.Module):
         if self.tp_size == 1 or self.tp_group is None:
             return local_out if self.bias is None else local_out + self.bias
 
-        local_chunks = torch.stack(local_out.chunk(self.tp_size, dim=-1), dim=0)
-        output_chunk = torch.empty(
-            local_chunks.shape[1:],
-            dtype=local_chunks.dtype,
-            device=local_chunks.device,
-        )
-        req = dist.reduce_scatter_tensor(
-            output_chunk,
-            local_chunks,
+        # RowParallel: each rank computed a partial dot product over its slice of
+        # in_features.  Sum-reduce across the TP group to get the full output.
+        # This is a single all_reduce (latency = one round trip), not two collectives.
+        req = dist.all_reduce(
+            local_out,
+            op=dist.ReduceOp.SUM,
             group=self.tp_group,
             async_op=True,
         )
         if req is not None:
             req.wait()
 
-        gathered = torch.empty(
-            (self.tp_size, *output_chunk.shape),
-            dtype=output_chunk.dtype,
-            device=output_chunk.device,
-        )
-        req2 = dist.all_gather_into_tensor(
-            gathered,
-            output_chunk,
-            group=self.tp_group,
-            async_op=True,
-        )
-        if req2 is not None:
-            req2.wait()
-
-        out = gathered.permute(1, 0, 2).reshape(*output_chunk.shape[:-1], self.out_features)
         if self.bias is not None:
-            out = out + self.bias
-        return out
+            local_out = local_out + self.bias
+        return local_out
 
 
 # ==========================================================================
