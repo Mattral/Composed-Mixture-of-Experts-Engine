@@ -8,7 +8,7 @@ Custom Triton kernels · 4D parallelism (DP+EP+TP+PP) · Async two-tier checkpoi
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.5%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Triton](https://img.shields.io/badge/Triton-3.x-9333ea.svg)](https://triton-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-96%20passed-brightgreen.svg)](#test-suite)
+[![Tests](https://img.shields.io/badge/tests-138%20passed-brightgreen.svg)](#test-suite)
 
 
 </div>
