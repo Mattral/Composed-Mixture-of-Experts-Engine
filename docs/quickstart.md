@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** v0.2  
+**Version:** v0.3  
 **Last updated:** June 2026
 
 Get from zero to a running MoE training step in under 5 minutes — no GPU required.
@@ -62,7 +62,7 @@ Outputs written to `/tmp/moe-engine/` (configurable in `configs/smoke.yaml`):
 pytest tests/ -v --ignore=tests/test_chaos.py
 ```
 
-Expected: **123 passed, 1 skipped** in ~45 seconds on a modern laptop.
+Expected: **148 passed, 1 skipped** in ~60 seconds on a modern laptop.
 The single skip is the GPU-only Triton kernel path.
 
 ---
@@ -108,8 +108,10 @@ You will see a record like:
 }
 ```
 
-Key v0.2 additions: `routing.expert_load_imbalance` (1.0 = perfect balance)
+v0.2 additions: `routing.expert_load_imbalance` (1.0 = perfect balance)
 and `routing.router_z_loss` (auxiliary regularisation signal).
+v0.3 additions: `collective.expert_compute_ms` (expert FFN wall-clock) and
+`collective.comm_compute_overlap_ratio` (dispatch_ms / expert_compute_ms).
 
 ---
 
@@ -167,7 +169,7 @@ print(f\"Tokens/sec: {r['tokens_per_sec_mean']:,.0f}\")
 ## Step 8 — Docker smoke (no GPU required)
 
 ```bash
-docker build -f deploy/docker/Dockerfile -t moe-engine:v0.2 .
+docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3 .
 docker compose -f deploy/docker/docker-compose.yml run --rm smoke
 ```
 
@@ -181,8 +183,9 @@ tensorboard --logdir /tmp/moe-engine/logs/tb
 ```
 
 Scalars available: `loss`, `mfu`, `tokens_per_sec`, `collective/dispatch_ms`,
-`collective/combine_ms`, `memory/peak_allocated_gb`, `routing/expert_load_imbalance`,
-`routing/router_z_loss`.
+`collective/combine_ms`, `collective/expert_compute_ms` (v0.3),
+`collective/comm_compute_overlap_ratio` (v0.3),
+`memory/peak_allocated_gb`, `routing/expert_load_imbalance`, `routing/router_z_loss`.
 
 ---
 
@@ -214,6 +217,18 @@ See `docs/deployment.md` for the full deployment reference.
 | `docs/testing.md` | Test suite guide; how to write new tests |
 | `docs/deployment.md` | Docker, Kubernetes, multi-node operations |
 | `docs/CONTRIBUTING.md` | Contribution workflow and standards |
+
+**v0.3 new commands:**
+```bash
+# WandB logging (requires WANDB_API_KEY)
+python train.py --config configs/smoke.yaml --smoke --wandb-project moe-engine
+
+# PP multi-process test
+pytest tests/test_pipeline_parallel.py::test_pp_multiprocess_2stage_activation_flow -v
+
+# SP fused path test
+pytest tests/test_sequence_parallel_v03.py::test_sp_fused_2rank_numerically_correct -v
+```
 | `benchmarks/BENCHMARKS.md` | Benchmark methodology and results |
 | `RESULTS.md` | Reproducible results and telemetry samples |
 | `roadmap.md` | Honest status, known deficiencies, v0.3 plan |

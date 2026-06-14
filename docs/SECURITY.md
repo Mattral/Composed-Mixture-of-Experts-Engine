@@ -1,6 +1,6 @@
 # Security and Secrets
 
-**Version:** v0.2  
+**Version:** v0.3  
 **Last updated:** June 2026
 
 This document describes the security boundaries of moe-engine and the
@@ -12,6 +12,11 @@ actual runtime and test behaviour.
 ## Credentials and Secrets
 
 ### Rule: environment variables only, never source
+
+v0.3 addition: `WANDB_API_KEY` for Weights & Biases authentication. Like S3
+credentials, this must never appear in config YAML or telemetry output.
+The `WandBSink` reads it via `os.environ.get()` and passes it only to
+`wandb.init()`. It is never written to JSONL, TensorBoard, or Prometheus.
 
 The codebase reads credentials from environment variables at runtime.
 No credentials are ever written to config files, telemetry output, or logs.
@@ -185,7 +190,7 @@ The multi-stage `Dockerfile` (`deploy/docker/Dockerfile`):
 For hardened deployments, extend the Dockerfile:
 
 ```dockerfile
-FROM moe-engine:v0.2
+FROM moe-engine:v0.3
 RUN useradd -m -u 1000 trainer
 USER trainer
 ```

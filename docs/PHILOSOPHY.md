@@ -1,6 +1,6 @@
 # Philosophy
 
-**Version:** v0.2  
+**Version:** v0.3  
 **Last updated:** June 2026
 
 moe-engine is built around a single constraint: **at 10K+ GPUs, nodes die
@@ -95,17 +95,20 @@ is understood and its boundaries are known.
 Specifically:
 - Chaos Scenario A passes at ~85%, not 100%. This is documented with its root
   cause, current mitigation, and the correct fix.
-- Pipeline parallelism is single-process only in v0.2. The multi-process
-  activation-passing layer is explicitly deferred to v0.3, not silently absent.
+- Pipeline parallelism `run_1f1b_distributed` was explicitly deferred from v0.2
+  to v0.3 and delivered in v0.3 with full dist.send/recv and mp.spawn verification.
+  The deferral was documented, not hidden — which is why the delivery was straightforward.
 - GPU benchmark numbers are illustrative until we have sustained cluster access.
   The CPU numbers are real and reproducible.
 
 ### 7. Observability is a first-class feature
 
 Every new runtime path must expose telemetry. The v0.2 routing quality metrics
-(`expert_load_imbalance`, `router_z_loss`) were added alongside the code that
-computes them, not as an afterthought. The Prometheus endpoint was added in the
-same release as the metrics it exposes.
+(`expert_load_imbalance`, `router_z_loss`) and the v0.3 collective metrics
+(`expert_compute_ms`, `comm_compute_overlap_ratio`) were added in the same
+commit as the code that computes them — not as follow-up tickets.
+The WandB sink (v0.3) was added alongside the v0.3 feature release, not separately.
+The Prometheus endpoint was extended with two new gauges in the same v0.3 release.
 
 The principle: if behaviour cannot be observed, it cannot be debugged, and it
 cannot be trusted at scale.
@@ -149,5 +152,5 @@ These principles are instantiated in the codebase today:
 | Consistent TP sharding | Both `w_gate` and `w_up` are `ColumnParallelLinear` in `_SwiGLUExpert` |
 | Real collective tests | `test_column_row_parallel_2rank_numerically_correct` (mp.spawn, Gloo) |
 | Honest documentation | `roadmap.md §Known Deficiencies`; Scenario A documented as ~85% |
-| Observability first | `routing.expert_load_imbalance` and `router_z_loss` in every StepRecord |
+| Observability first | `routing.expert_load_imbalance`, `router_z_loss`, `collective.expert_compute_ms`, `collective.comm_compute_overlap_ratio` in every StepRecord; WandB sink active when `WANDB_API_KEY` set |
 | Link, don't duplicate | Test names cited in `docs/testing.md`; function names in `SYSTEM_DESIGN.md` |

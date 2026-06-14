@@ -1,6 +1,6 @@
 # Contributing to moe-engine
 
-**Version:** v0.2  
+**Version:** v0.3  
 **Last updated:** June 2026
 
 moe-engine is a reference implementation for production-grade distributed
@@ -34,7 +34,7 @@ pip install -e ".[dev]"
 
 ```bash
 pytest tests/ -v --ignore=tests/test_chaos.py
-# Expected: 123 passed, 1 skipped (~45s on CPU)
+# Expected: 148 passed, 1 skipped (~60s on CPU)
 ```
 
 ### 4. Validate Triton numerics
@@ -187,13 +187,14 @@ If you add a new telemetry field, add it to the telemetry table in
 
 | Area | Difficulty | File | Roadmap |
 |---|---|---|---|
-| PP `dist.send`/`dist.recv` inter-stage wiring | Hard | `pkg/distributed/parallel_mesh.py` | v0.3 |
-| Chaos Scenario A NCCL backend | Medium | `tests/test_chaos.py`, `tests/_chaos_worker.py` | v0.3 |
-| SP all-gather fused with next projection | Hard | `pkg/distributed/parallel_mesh.py` | v0.4 |
-| Real 8-GPU benchmark numbers | Medium (needs hardware) | `benchmarks/BENCHMARKS.md` | v0.3 |
-| WandB / Weights & Biases integration | Easy | `pkg/telemetry/logger.py` | v0.3 |
+| Chaos Scenario A NCCL backend | Medium | `tests/test_chaos.py`, `tests/_chaos_worker.py` | v0.4 |
+| Real 8-GPU benchmark numbers | Medium (needs hardware) | `benchmarks/BENCHMARKS.md` | v0.4 |
 | Expert capacity overflow re-routing | Medium | `pkg/distributed/parallel_mesh.py` | v0.4 |
-| Nsight/CUPTI kernel profiling | Hard | new: `pkg/profiling/` | v0.3 |
+| SP non-divisible sequence padding | Medium | `pkg/distributed/parallel_mesh.py` | v0.4 |
+| PP in chaos worker | Hard | `tests/_chaos_worker.py` | v0.4 |
+| WandBSink: real integration test (non-mock) | Medium | `tests/test_telemetry.py` | v0.4 |
+| Expert capacity overflow re-routing | Medium | `pkg/distributed/parallel_mesh.py` | v0.4 |
+| Nsight/CUPTI kernel profiling | Hard | new: `pkg/profiling/` | v0.4 |
 
 ---
 

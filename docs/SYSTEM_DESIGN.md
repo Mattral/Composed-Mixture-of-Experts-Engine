@@ -1,6 +1,6 @@
 # System Design
 
-**Version:** v0.2  
+**Version:** v0.3  
 **Last updated:** June 2026
 
 This document describes the runtime system as it exists in the codebase.
@@ -42,8 +42,8 @@ Responsibilities:
    and infra fields fully populated from real runtime measurements.
 9. If `--profile`: write per-step benchmark JSON to `benchmarks/`.
 
-v0.2 additions: linear-warmup + cosine-decay LR, gradient accumulation,
-routing quality fields in telemetry, `--profile` flag.
+v0.2: LR schedule, gradient accumulation, routing quality fields, `--profile`.
+v0.3: `--wandb-project` flag, `--no-wandb` flag, `logger.log_config(cfg.raw)` after init.
 
 ---
 
@@ -69,7 +69,9 @@ returns the input tensor directly (no collective, zero overhead).
 **`DistributedMoELayer`** — the primary MoE building block:
 - Owns `len(local_expert_ids)` `_SwiGLUExpert` modules.
 - Routes tokens via `MoERouter`, dispatches via `all_to_all`, computes
-  expert FFN, combines, records `last_dispatch_ms` and `last_combine_ms`.
+  expert FFN, combines, records `last_dispatch_ms`, `last_combine_ms`.
+- v0.3: records `last_expert_compute_ms` and `last_overlap_ratio`
+  (`dispatch_ms / expert_compute_ms`) for comm/compute overlap telemetry.
 - Enforces post-combine NaN check.
 
 **`_SwiGLUExpert`** — two-layer SwiGLU FFN:
@@ -95,10 +97,10 @@ No-op at `tp_size=1`.
 
 **`PipelineStage`** — lightweight 1F1B schedule implementation:
 - `forward_step(mb)` — applies `self.module` if set, else passthrough
-- `backward_step(grad)` — passthrough shim (real PP backward in v0.3)
-- `run_1f1b(micro_batches)` — three-phase schedule (warmup/steady/drain);
-  returns `[Optional[Tensor]]` of gradients, one per micro-batch
-- Currently single-process only; multi-process requires `dist.send/recv` wiring
+- `backward_step(grad)` — passthrough (used by `run_1f1b` test shim)
+- `run_1f1b(micro_batches)` — single-process 1F1B scheduling; fast-path for tests
+- `run_1f1b_distributed(micro_batches, loss_fn)` — **v0.3**: full multi-process
+  1F1B with `dist.send`/`dist.recv` on PP group; activation tagging; 3-phase
 
 **`apply_fsdp2`** — wraps every non-`DistributedMoELayer` module with
 `fully_shard` along the `dp` mesh axis. Expert weights are intentionally excluded
@@ -187,14 +189,19 @@ StepRecord(
     memory={...},      # peak_allocated_gb, reserved_gb, leak_delta_gb
     infra={...},       # async_ckpt_commit_ms, active_nodes, ep_world_size, lr
     routing={...},     # expert_load_imbalance, router_z_loss  [v0.2]
+    # collective also includes in v0.3:
+    # expert_compute_ms, comm_compute_overlap_ratio
 )
 ```
 
-**`StructuredLogger`** — thread-safe three-sink emitter:
+**`StructuredLogger`** — thread-safe four-sink emitter:
 - JSONL: RLock-protected file handle; `also_stdout` option for rank 0
-- TensorBoard: `SummaryWriter` (rank 0 only); all numeric sub-fields emitted
-- Prometheus: optional `PrometheusExporter` at configurable port
-- `close()`: idempotent; safe to call multiple times
+- TensorBoard: `SummaryWriter` (rank 0 only)
+- Prometheus: optional `PrometheusExporter` (10 gauges: +expert_compute_ms, +overlap_ratio)
+- **WandB** (v0.3): `WandBSink`; active when `WANDB_API_KEY` set; logs all
+  numeric fields under section prefixes (`collective/dispatch_ms`, etc.)
+- `log_config(cfg)`: forwards hyperparameters to `wandb.config.update`
+- `close()`: idempotent; calls `WandBSink.finish()`
 
 **`PrometheusExporter`** — 8 gauges on `/metrics`:
 `moe_step_loss`, `moe_mfu`, `moe_tokens_per_sec`,
@@ -279,7 +286,8 @@ StepRecord → StructuredLogger (JSONL + TensorBoard + Prometheus)
 | `test_kernels_numerics.py` | 30 configs, Triton vs fp64 `atol=rtol=1e-5` |
 | `test_routing_quality.py` | load_imbalance math, z_loss invariants, RouterProfile |
 | `test_tensor_parallel.py` | Column/Row shape+grad+dtype+numerical; **2-rank mp.spawn** |
-| `test_pipeline_parallel.py` | 1F1B schedule: all grads non-None, shapes match, edge cases |
+| `test_pipeline_parallel.py` | 1F1B schedule; single-process invariants; 2-rank mp.spawn PP (v0.3) |
+| `test_sequence_parallel_v03.py` | SP fused next_weight path; 2-rank mp.spawn SP (v0.3) |
 | `test_distributed.py` | MoE layer fwd/bwd shapes, topology construction |
 | `test_distributed_invariants.py` | 4-process Gloo: token conservation, NaN guard |
 | `test_elastic.py` | NVMe round-trip, chunked write, async save/load, retention |
@@ -287,19 +295,20 @@ StepRecord → StructuredLogger (JSONL + TensorBoard + Prometheus)
 | `test_mfu.py` | MFU formula, sparse fraction, backward compat |
 | `test_mfu_v02.py` | MFUAccountant, MFUResult breakdown, smoothed window |
 | `test_telemetry.py` | JSON completeness, thread safety (100 concurrent), routing fields |
-| `test_smoke_e2e.py` | Full train.py loop, all envelope keys incl. routing, S3 mock |
+| `test_telemetry.py` | JSON completeness, thread safety, WandB mock (v0.3) |
+| `test_smoke_e2e.py` | Full train.py loop, all v0.3 envelope keys incl. overlap, S3 mock |
 | `test_chaos.py` | Scenario B ✅; Scenario A ⚠️ ~85% |
 
-**Total: 123 test functions. 31 Python files. 0 syntax errors.**
+**Total: 148 test functions. 33 Python files. 0 syntax errors.**
 
 ---
 
-## Known Limitations (v0.2)
+## Known Limitations (v0.3)
 
 | Limitation | Root Cause | Planned Fix |
 |---|---|---|
-| PP multi-process activation passing missing | `dist.send/recv` not wired | v0.3 |
-| Chaos Scenario A ~85% pass rate | Gloo `connectFullMesh` socket race after SIGKILL | v0.3 (NCCL backend) |
-| No real multi-node benchmark data | Requires sustained cluster access | v0.3 |
-| SP all-gather not fused with next projection | Separate scatter+compute+gather | v0.4 |
-| No Nsight/CUPTI roofline | Out-of-scope for current cycle | v0.3 |
+| Chaos Scenario A ~85% pass rate | Gloo `connectFullMesh` socket race after SIGKILL | v0.4 (NCCL, needs GPU) |
+| No real multi-node benchmark data | Requires sustained cluster access | v0.4 |
+| SP `sequence_length % tp_size == 0` required | No padding for non-divisible lengths | v0.4 |
+| PP `run_1f1b_distributed` not in chaos tests | `_chaos_worker.py` uses dense model | v0.4 |
+| No Nsight/CUPTI roofline | Out-of-scope for current cycle | v0.4 |

@@ -1,6 +1,6 @@
 # Design Rationale and Trade-offs
 
-**Version:** v0.2  
+**Version:** v0.3  
 **Last updated:** June 2026
 
 This document explains *why* each major design choice was made and what
@@ -100,12 +100,14 @@ at the start and end of each batch. 1F1B reduces the bubble fraction from
 `(p-1)/m` to `(p-1)/(m+p-1)` by interleaving forward and backward in
 steady-state. For `m = p` (common case), bubble = 50% → 33%.
 
-**Current status:** `PipelineStage.run_1f1b` implements the correct three-phase
-schedule (warmup / steady-state / drain) and is exhaustively unit-tested in
-single-process mode (13 tests covering: all micro-batches receive gradients,
-gradient shapes match inputs, edge cases p=1 m=1 and m<p, module invocation
-correctness). The `dist.send` / `dist.recv` activation-passing layer required
-for multi-process execution is the v0.3 priority item.
+**v0.3 status:** `PipelineStage.run_1f1b_distributed` implements the full
+multi-process schedule with real `dist.send` / `dist.recv` on the PP group.
+Activation tagging: every micro-batch is tagged with a `(stage_id, mb_index)`
+header tensor sent immediately before the activation, allowing receivers to
+match micro-batches without shared state. Verified by a 2-rank `mp.spawn` test
+(`test_pp_multiprocess_2stage_activation_flow`).
+
+The single-process `run_1f1b` fast-path is preserved for tests and smoke runs.
 
 ---
 
@@ -202,12 +204,35 @@ Thread-safety is enforced by a reentrant lock (`threading.RLock`) on all emit
 paths. The lock is reentrant so `close()` can be called from within an emit
 context (e.g., from a SIGTERM handler).
 
-**v0.2 routing quality fields** (new):
+**v0.2 routing quality fields:**
 - `expert_load_imbalance = max_load / mean_load` — 1.0 is perfect balance;
-  values above 1.5 indicate pathological routing; reducible with z-loss
-  auxiliary objective (weight ~1e-3).
+  values above 1.5 indicate pathological routing; reducible with z-loss.
 - `router_z_loss = mean(log(Σ exp(logit_e))²)` — Switch-Transformer z-loss;
   encourages small logit magnitudes, preventing routing collapse.
+
+**v0.3 collective telemetry fields:**
+- `expert_compute_ms` — wall-clock time of all local expert FFN compute.
+- `comm_compute_overlap_ratio` — `dispatch_ms / expert_compute_ms`. Values
+  near 1.0 indicate near-complete overlap. Values > 1.0 mean communication
+  is the bottleneck. Target 0.3–0.6 at EP=8 on NVLink-connected H100s.
+
+---
+
+## WandB Observability Design (v0.3)
+
+**Choice:** `WandBSink` as an optional fourth telemetry sink.
+
+WandB is activated only when `WANDB_API_KEY` is set in the environment.
+This keeps the default code path entirely free of external network calls —
+a training job that does not set `WANDB_API_KEY` never touches the WandB API.
+
+`WandBSink.log()` emits all numeric `StepRecord` fields under section-prefixed
+keys (`collective/dispatch_ms`, `routing/z_loss`, etc.), preserving the same
+hierarchical structure as TensorBoard. `log_config()` forwards the full YAML
+config to `wandb.config.update()` so every run records its hyperparameters.
+
+`WandBSink.finish()` is called by `StructuredLogger.close()` to mark the run
+as complete. This is safe to call even when WandB is inactive (no-op).
 
 ---
 
@@ -235,18 +260,18 @@ not glossed over in the roadmap or README.
 
 ## Status Summary
 
-| Area | v0.1 | v0.2 |
-|---|---|---|
+| Area | v0.1 | v0.2 | v0.3 |
+|---|---|---|---|
 | Triton router (fwd + bwd) | ✅ | ✅ (unchanged) |
-| EP all-to-all + overlap | ✅ | ✅ (unchanged) |
-| DP via FSDP2 | ✅ | ✅ (unchanged) |
-| TP ColumnParallel + RowParallel | ⚠️ (tp=1 only tested) | ✅ (2-rank verified; all_reduce fixed) |
-| SwiGLU TP sharding consistency | ❌ (w_gate was nn.Linear) | ✅ (both w_gate + w_up ColumnParallel) |
-| PP 1F1B (single-process) | ❌ | ✅ |
-| PP multi-process activation passing | ❌ | ❌ (v0.3) |
-| Sequence Parallelism | ✅ | ✅ (unchanged) |
-| MFU sparse accounting | ✅ | ✅ + MFUResult breakdown + smoothing |
-| Routing quality metrics | ❌ | ✅ (load_imbalance + z_loss) |
-| Prometheus endpoint | ❌ | ✅ |
-| Docker + Kubernetes | ❌ | ✅ |
-| Chaos A fix | ❌ | ⚠️ (mitigated; root fix v0.3) |
+| EP all-to-all + overlap | ✅ | ✅ (unchanged) | ✅ +expert_compute_ms, +overlap_ratio |
+| DP via FSDP2 | ✅ | ✅ (unchanged) | ✅ (unchanged) |
+| TP ColumnParallel + RowParallel | ⚠️ (tp=1 only) | ✅ v0.2 (2-rank verified) | ✅ v0.3 (unchanged) |
+| PP 1F1B single-process | ❌ | ✅ v0.2 | ✅ v0.3 (unchanged) |
+| PP multi-process dist.send/recv | ❌ | ❌ | ✅ v0.3 (run_1f1b_distributed) |
+| SP scatter/gather | ✅ | ✅ (unchanged) | ✅ v0.3 +fused all-gather path |
+| MFU + routing metrics | ✅ | ✅ v0.2 | ✅ v0.3 +overlap_ratio, +expert_compute_ms |
+| WandB integration | ❌ | ❌ | ✅ v0.3 (WandBSink) |
+| Prometheus endpoint | ❌ | ✅ v0.2 (8 gauges) | ✅ v0.3 (10 gauges: +expert_compute_ms, +overlap_ratio) |
+| Docker + Kubernetes | ❌ | ✅ v0.2 | ✅ v0.3 (unchanged) |
+| Chaos A fix | ❌ | ⚠️ mitigated ~85% | ⚠️ unchanged; root fix v0.4 (needs GPU) |
+| WandB sink | ❌ | ❌ | ✅ v0.3 (WandBSink; WANDB_API_KEY; log_config) |

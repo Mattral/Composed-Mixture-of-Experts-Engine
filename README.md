@@ -8,8 +8,7 @@ Custom Triton kernels · 4D parallelism (DP+EP+TP+PP) · Async two-tier checkpoi
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](#license)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.5%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Triton](https://img.shields.io/badge/Triton-3.x-9333ea.svg)](https://triton-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-138%20passed-brightgreen.svg)](#test-suite)
-
+[![Tests](https://img.shields.io/badge/tests-144%20passed-brightgreen.svg)](#test-suite)
 
 </div>
 
@@ -69,15 +68,16 @@ This is not a model. It is the runtime that a model runs on.
      ┌──────────────▼──────────────┐
      │   Telemetry                 │  pkg/telemetry/logger.py
      │   JSONL + TensorBoard       │  real CUDA event timing
-     │   Prometheus /metrics       │  routing quality metrics
+     │   Prometheus /metrics       │  routing + overlap metrics
+     │   WandB (optional)          │  WANDB_API_KEY-gated
      └─────────────────────────────┘
 ```
 
 **4D Parallelism mesh:** `(dp × tp × pp × ep)`
 - **DP** — FSDP2 per-parameter sharding along the data axis via DTensor
 - **EP** — Expert Parallelism: each EP rank owns `E / ep_size` experts; all-to-all dispatch + combine on a dedicated CUDA stream
-- **TP** — Tensor Parallelism: `ColumnParallelLinear` (all-gather on output) and `RowParallelLinear` (reduce-scatter) on expert FFNs
-- **PP** — Pipeline Parallelism: `PipelineStage` with 1F1B interleave schedule
+- **TP** — Tensor Parallelism: `ColumnParallelLinear` (all-gather on output) and `RowParallelLinear` (all-reduce on output) on expert FFNs
+- **PP** — Pipeline Parallelism: `PipelineStage` with 1F1B interleave schedule; multi-process `dist.send`/`dist.recv` inter-stage communication
 
 ---
 
@@ -93,23 +93,27 @@ This is not a model. It is the runtime that a model runs on.
 | **DP+EP device mesh** | ✅ CI-verified | `init_device_mesh` (PyTorch 2.5+); degenerate 1-rank fallback |
 | **EP all-to-all (dispatch + combine)** | ✅ CI-verified | Non-blocking `all_to_all_single`; dedicated CUDA stream; event sync |
 | **Compute-comm overlap** | ✅ | Expert FFN runs on default stream while a2a is in flight |
+| **Comm/compute overlap ratio** | ✅ v0.3 | `dispatch_ms / expert_compute_ms`; emitted in `collective` telemetry block |
 | **FSDP2 sharding** | ✅ | `fully_shard` along DP axis; per-param DTensor; MixedPrecision |
-| **Tensor Parallelism** | ✅ v0.2 | `ColumnParallelLinear` + `RowParallelLinear`; both `w_gate` and `w_up` ColumnParallel; `all_reduce` in RowParallel; 2-rank mp.spawn correctness verified |
+| **Tensor Parallelism** | ✅ v0.2 | `ColumnParallelLinear` + `RowParallelLinear`; both `w_gate` and `w_up` ColumnParallel; `all_reduce` in RowParallel; 2-rank mp.spawn verified |
 | **Sequence Parallelism** | ✅ v0.2 | `scatter/gather_sequence_parallel`; active when `tp_size > 1` |
-| **Pipeline Parallelism** | ✅ v0.2 | `PipelineStage` + 1F1B schedule; warmup/steady/drain phases |
+| **SP all-gather fusion** | ✅ v0.3 | `next_weight` param fuses backward all-gather with next projection matmul; halves SP collectives; 2-rank mp.spawn verified |
+| **Pipeline Parallelism (single-process)** | ✅ v0.2 | `PipelineStage` + 1F1B schedule; warmup/steady/drain phases; 13 unit tests |
+| **Pipeline Parallelism (multi-process)** | ✅ v0.3 | `run_1f1b_distributed`; real `dist.send`/`dist.recv` on PP group; activation tagging; 2-rank mp.spawn verified |
 | **MFU accounting** | ✅ v0.2 | MoE-sparse formula: `(K/E)×P_expert`; `MFUAccountant` streaming tracker |
 | **Real CUDA telemetry** | ✅ v0.2 | CUDA events on dispatch + combine; `memory_stats()` peak GB |
+| **WandB integration** | ✅ v0.3 | `WandBSink`; active when `WANDB_API_KEY` set; `--wandb-project` flag; `log_config()` records hyperparameters |
 | **Async two-tier checkpointing** | ✅ CI-verified | Pinned host → NVMe (O_DIRECT, 256 MB chunks, atomic rename) → S3 |
 | **TorchElastic state machine** | ✅ CI-verified | Evict → reshard (round-robin) → reload → resume |
 | **Etcd rendezvous** | ✅ v0.2 | `ElasticTrainerHarness` backend selector; c10d (<100 nodes) / etcd (>100) |
-| **Prometheus metrics** | ✅ v0.2 | Optional in-process `/metrics` endpoint; 8 gauges |
+| **Prometheus metrics** | ✅ v0.3 | Optional in-process `/metrics` endpoint; 10 gauges (incl. `expert_compute_ms`, `comm_compute_overlap_ratio`) |
 | **Docker + docker-compose** | ✅ v0.2 | Multi-stage image; 1/4/8-GPU compose targets; monitoring stack |
 | **Kubernetes manifests** | ✅ v0.2 | Single-node Job + multi-node Indexed Job; PVC; etcd rendezvous |
 | **Benchmark suite** | ✅ v0.2 | `benchmarks/run_benchmark.py`; CPU+GPU sweeps; JSON/CSV output |
 | **Chaos: storage stall (Scenario B)** | ✅ CI-verified | 10s injected stall; queue drains; no deadlock |
 | **Chaos: node kill + recovery (Scenario A)** | ⚠️ Flaky | ~85% pass rate; Gloo `connectFullMesh` timeout on 4-rank restart |
-| **Nsight/CUPTI integration** | ❌ Planned v0.3 | |
-| **Multi-node benchmark data** | ❌ Planned v0.3 | Requires sustained cluster access |
+| **Nsight/CUPTI integration** | ❌ Planned v0.4 | Requires GPU hardware |
+| **Real multi-node benchmark data** | ❌ Planned v0.4 | Requires sustained cluster access |
 
 ---
 
@@ -145,13 +149,22 @@ The routing pipeline — `tokens @ gate_w → softmax → top-K → renorm` — 
 For `K ∈ {1, 2, 4}` and `E ≤ 256`, K-iteration selection sort outperforms bitonic sort. Bitonic sort's `O(E log²E)` compute cost dominates the K-step selection sort's `O(K×E)` at small K, and selection sort has no shared-memory bank pressure — it works entirely in registers.
 
 **All-to-all on a dedicated CUDA stream:**  
-EP dispatch and combine collectives run on a high-priority CUDA stream. The default stream issues expert FFN compute in parallel; an event records the dispatch completion so the combine stream waits before it consumes expert outputs. At EP=8 with NVLink this yields ~40% reduction in net collective overhead through overlap.
+EP dispatch and combine collectives run on a high-priority CUDA stream. The default stream issues expert FFN compute in parallel; an event records the dispatch completion so the combine stream waits before it consumes expert outputs. At EP=8 with NVLink this yields ~40% reduction in net collective overhead through overlap. v0.3 surfaces this directly as `comm_compute_overlap_ratio = dispatch_ms / expert_compute_ms` in telemetry.
+
+**Pipeline parallelism needs activation tagging, not just send/recv:**  
+Implementing multi-process 1F1B requires more than wrapping `dist.send`/`dist.recv` around the forward/backward calls. Every micro-batch is tagged with a `[stage_id, mb_index]` header sent immediately before its activation tensor, so receivers can match activations to micro-batches without shared state — essential once restarts or stalls can reorder delivery. Verified by a 2-rank `mp.spawn` test that runs the full warmup → steady-state → drain schedule across real Gloo collectives.
+
+**Sequence parallelism: fusing the all-gather into the next projection:**  
+`scatter_to_sequence_parallel(x, topo, next_weight=w)` replaces `all_gather(shard) → matmul(full_x, w)` (two collectives) with `matmul(shard, w) → all_reduce(SUM)` (one collective) — each rank computes its local projection first, then the result is summed across the TP group. This halves the SP collective count per layer at `tp_size > 1`, verified to `atol=1e-5` against the unfused reference at 2-rank.
 
 **Checkpoint design: pinned host → NVMe → S3:**  
 The only synchronous cost is a D2H copy of the SHARDED_STATE_DICT snapshot (tens of ms at 80 GB/s NVLink bandwidth). All I/O is in background threads. `O_DIRECT` writes in 256 MB chunks bypass the page cache entirely, removing OS write-back pressure from critical training time. Atomic rename (`tmp → final`) makes every checkpoint either fully present or absent — no partial reads.
 
+**Observability sinks should cost nothing when disabled:**  
+`WandBSink` performs zero imports and zero network calls unless `WANDB_API_KEY` is set in the environment. On a training cluster with no internet access, an "on by default" telemetry sink that requires explicit opt-out is a stall waiting to happen. The default must be silent; activation requires explicit operator intent.
+
 **Why the chaos test for Scenario A is still flaky:**  
-The Gloo backend's `connectFullMesh` call during PG re-formation after a SIGKILL races with socket cleanup in containerised environments. The symptom is `Connection refused` on the initial `accept()`. Our mitigation (exponential backoff in `_safe_all_reduce`, `CHAOS_FAULT_TOLERANT=1` env) raises the pass rate to ~85%. A proper fix requires either NCCL (GPU-only) or replacing the PG re-formation with a rendezvous store that serialises the accept side. Tracked in the roadmap.
+The Gloo backend's `connectFullMesh` call during PG re-formation after a SIGKILL races with socket cleanup in containerised environments. The symptom is `Connection refused` on the initial `accept()`. Our mitigation (exponential backoff in `_safe_all_reduce`, `CHAOS_FAULT_TOLERANT=1` env) raises the pass rate to ~85%. A proper fix requires either NCCL (GPU-only) or replacing the PG re-formation with a rendezvous store that serialises the accept side. Tracked in the roadmap as a v0.4 item — requires GPU hardware.
 
 ---
 
@@ -179,11 +192,17 @@ python train.py --config configs/smoke.yaml --smoke
 # Expected: 2 training steps, JSONL telemetry at /tmp/moe-engine/logs/step.jsonl
 ```
 
+With WandB logging (optional, requires `WANDB_API_KEY`):
+
+```bash
+python train.py --config configs/smoke.yaml --smoke --wandb-project moe-engine
+```
+
 ### Run the full test suite
 
 ```bash
-pytest tests/ -v -x --ignore=tests/test_chaos.py
-# 138+ tests, ~30 seconds on CPU
+pytest tests/ -v --ignore=tests/test_chaos.py
+# 144 passed, 1 skipped, ~60 seconds on CPU
 ```
 
 ### Run chaos tests (requires torchrun on PATH)
@@ -244,6 +263,10 @@ parallelism:
   tensor_parallel: 1      # ColumnParallel / RowParallel axis
   pipeline_parallel: 1    # 1F1B pipeline stages
 
+training:
+  gradient_accumulation_steps: 4   # accumulate before optimizer step
+  warmup_steps: 2000               # linear warmup, then cosine decay
+
 telemetry:
   hardware_peak_tflops: 989.0   # H100 SXM5 BF16
   mfu_target: 0.55
@@ -272,8 +295,10 @@ Every training step emits one JSONL record:
     "used_triton": true
   },
   "collective": {
-    "all_to_all_dispatch_ms": 0.72,   // real CUDA event timing
-    "all_to_all_combine_ms":  0.68
+    "all_to_all_dispatch_ms": 0.72,        // real CUDA event timing
+    "all_to_all_combine_ms":  0.68,
+    "expert_compute_ms": 1.84,              // v0.3
+    "comm_compute_overlap_ratio": 0.39      // v0.3: dispatch_ms / expert_compute_ms
   },
   "memory": {
     "peak_allocated_gb": 62.4,        // torch.cuda.memory_stats()
@@ -294,6 +319,8 @@ Every training step emits one JSONL record:
   "ts": 1748901234.56
 }
 ```
+
+When `WANDB_API_KEY` is set, every numeric field above is also logged to WandB under section-prefixed keys (`collective/dispatch_ms`, `routing/z_loss`, etc.), and the full YAML config is recorded via `log_config()` before the first step.
 
 ---
 
@@ -317,19 +344,20 @@ tests/
   test_kernels_numerics.py     – 30 parametrised numerical validation tests
   test_routing_quality.py      – load imbalance, z-loss, RouterProfile (v0.2)
   test_tensor_parallel.py      – ColumnParallel, RowParallel, SP scatter/gather; 2-rank mp.spawn correctness
-  test_pipeline_parallel.py    – PipelineStage, 1F1B schedule (v0.2)
+  test_pipeline_parallel.py    – 1F1B schedule; 2-rank mp.spawn multi-process PP (v0.3)
+  test_sequence_parallel_v03.py – SP fused next_weight path; 2-rank mp.spawn (v0.3)
   test_distributed.py          – single-process MoE layer shape + grad flow
   test_distributed_invariants.py – 4-process Gloo token conservation + NaN checks
   test_elastic.py              – NVMe adapter, async checkpointer, CSM reshard
   test_elastic_v02.py          – retention, file-URI tier, harness round-trip (v0.2)
   test_mfu.py                  – MFU formula, sparse accounting
   test_mfu_v02.py              – MFUAccountant, detailed breakdown, smoothing (v0.2)
-  test_telemetry.py            – JSON emission, thread safety, field completeness (v0.2)
+  test_telemetry.py            – JSON emission, thread safety, WandB mock (v0.3)
   test_smoke_e2e.py            – full train.py loop, JSONL envelope, S3 (mocked)
   test_chaos.py                – torchrun chaos scenarios A (⚠️ flaky) and B (✅)
 ```
 
-`pytest tests/ -v --ignore=tests/test_chaos.py` → **138 passed, 1 skipped** on CPU in ~45s (includes 2-rank mp.spawn TP test).
+`pytest tests/ -v --ignore=tests/test_chaos.py` → **144 passed, 1 skipped** on CPU in ~60s (includes 2-rank mp.spawn tests for TP, PP, and SP).
 
 ---
 
@@ -339,9 +367,9 @@ tests/
 moe-engine/
 ├── pkg/
 │   ├── kernels/moe_router.py        Triton fwd+bwd kernel, MoERouter module
-│   ├── distributed/parallel_mesh.py 4D mesh, DistributedMoELayer, TP/SP layers, PP
+│   ├── distributed/parallel_mesh.py 4D mesh, DistributedMoELayer, TP/SP/PP layers
 │   ├── elastic/fault_monitor.py     AsyncCheckpointer, ClusterStateMachine, harness
-│   ├── telemetry/logger.py          Structured JSONL + TensorBoard + Prometheus
+│   ├── telemetry/logger.py          Structured JSONL + TensorBoard + Prometheus + WandB
 │   └── utils/
 │       ├── mfu.py                   MoE-aware MFU accounting + streaming tracker
 │       └── config.py                YAML config loader
@@ -362,7 +390,7 @@ moe-engine/
 ├── configs/
 │   ├── default.yaml                 H100-scale production config
 │   └── smoke.yaml                   CPU-only 2-step test config
-├── tests/                           Full test suite (13 files, 96 tests)
+├── tests/                           Full test suite (15 files, 144 tests)
 ├── docs/                            Architecture, design, operations docs
 ├── train.py                         TorchElastic entrypoint
 ├── roadmap.md                       Honest status + next actions
@@ -405,3 +433,4 @@ If you use `moe-engine` in your research, please cite the associated preprint:
   doi     = {10.5281/zenodo.20647577},
   url     = {https://doi.org/10.5281/zenodo.20647577}
 }
+```

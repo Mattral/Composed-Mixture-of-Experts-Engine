@@ -1,6 +1,6 @@
 # Deployment Guide
 
-**Version:** v0.2  
+**Version:** v0.3  
 **Last updated:** June 2026
 
 ---
@@ -135,7 +135,7 @@ torchrun \
 ### Build the image
 
 ```bash
-docker build -f deploy/docker/Dockerfile -t moe-engine:v0.2 moe-engine/
+docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3 moe-engine/
 ```
 
 The `Dockerfile` uses a two-stage build:
