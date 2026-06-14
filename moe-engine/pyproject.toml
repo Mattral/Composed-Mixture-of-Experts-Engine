@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "moe-engine"
-version = "0.2.0"
-description = "Composed Mixture-of-Experts Engine: Triton kernels, 4D parallelism (DP+EP+TP+PP), elastic fault tolerance."
+version = "0.3.0"
+description = "Composed Mixture-of-Experts Engine: Triton kernels, 4D parallelism (DP+EP+TP+PP with real inter-stage PP), fused SP, elastic fault tolerance."
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
