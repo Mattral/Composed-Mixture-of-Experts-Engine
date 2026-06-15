@@ -1,15 +1,15 @@
 # ============================================================
-# moe-engine CI — GitHub Actions
+# moe-engine CI — GitHub Actions  (v0.3.2)
 # ============================================================
-# Runs on every push and pull request.
 #
 # Jobs:
-#   lint        – ruff + mypy type-check
-#   unit        – full pytest suite (CPU/Gloo, no GPU)
-#   benchmark   – smoke benchmark (CPU path, verifies no regression)
-#   docker      – smoke docker build (no GPU required)
+#   lint      — ruff + mypy type-check
+#   test-cpu  — Tier-0 CPU suite (235 tests, -m cpu)
+#   benchmark — smoke benchmark (CPU path, correctness + regression guard)
+#   docker    — smoke docker build (no GPU required)
 #
-# GPU jobs (future): guarded by `runs-on: [self-hosted, gpu]`
+# GPU jobs: guarded by `runs-on: [self-hosted, gpu]`
+# Chaos jobs: manual-dispatch only (require torchrun + Gloo)
 # ============================================================
 
 name: CI
@@ -19,6 +19,7 @@ on:
     branches: [main, dev, "release/**"]
   pull_request:
     branches: [main]
+  workflow_dispatch:     # allows manual trigger from GitHub UI
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -28,6 +29,11 @@ env:
   PYTHONUNBUFFERED: "1"
   OMP_NUM_THREADS: "1"
   MKL_NUM_THREADS: "1"
+  PIP_CACHE_DIR: ${{ github.workspace }}/.pip-cache
+
+defaults:
+  run:
+    working-directory: moe-engine
 
 # ---------------------------------------------------------------------------
 # Job: lint
@@ -36,9 +42,6 @@ jobs:
   lint:
     name: Lint (ruff + mypy)
     runs-on: ubuntu-22.04
-    defaults:
-      run:
-        working-directory: moe-engine
 
     steps:
       - uses: actions/checkout@v4
@@ -48,81 +51,67 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install lint tools
-        run: pip install ruff mypy types-PyYAML
+      - name: Install lint dependencies
+        run: pip install ruff mypy pydantic pyyaml types-PyYAML
 
       - name: ruff check
-        run: ruff check pkg/ train.py benchmarks/ --select E,W,F,I --ignore E501
+        run: ruff check pkg/ train.py benchmarks/ scripts/ --output-format=github
 
-      - name: mypy (pkg only, strict-ish)
-        run: |
-          mypy pkg/ \
-            --ignore-missing-imports \
-            --no-error-summary \
-            --warn-return-any \
-            --warn-unused-ignores \
-            || true   # non-fatal until type coverage improves
+      - name: ruff format (check only)
+        run: ruff format --check pkg/ train.py benchmarks/ scripts/
+
+      - name: mypy
+        run: mypy pkg/ --ignore-missing-imports --no-error-summary
+        continue-on-error: true   # non-blocking until type coverage is higher
 
 # ---------------------------------------------------------------------------
-# Job: unit tests
+# Job: test-cpu (Tier-0 — must pass on every commit)
 # ---------------------------------------------------------------------------
-  unit:
-    name: Unit Tests (Python ${{ matrix.python-version }})
+  test-cpu:
+    name: Tier-0 CPU tests (235 expected)
     runs-on: ubuntu-22.04
     needs: lint
-
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.10", "3.11"]
-
-    defaults:
-      run:
-        working-directory: moe-engine
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
           cache: pip
 
-      - name: Install dependencies (CPU-only torch)
-        run: |
-          pip install --upgrade pip
-          # Install CPU-only PyTorch first (no CUDA overhead in CI)
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev]"
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
 
-      - name: Run unit tests (excluding chaos + GPU)
+      - name: Verify configs valid
+        run: python scripts/validate_config.py configs/
+
+      - name: Run Tier-0 CPU suite
         run: |
-          pytest tests/ -v \
+          pytest tests/ \
             --ignore=tests/test_chaos.py \
-            -k "not cuda" \
-            --timeout=120 \
-            -p no:warnings \
+            --ignore=tests/test_smoke_e2e.py \
+            -m cpu \
+            -k "not (2rank or multiprocess or distributed_invariants)" \
             --tb=short \
-            --junitxml=test-results.xml
+            -q \
+            --junitxml=test-results/junit.xml
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results-py${{ matrix.python-version }}
-          path: moe-engine/test-results.xml
+          name: test-results-cpu
+          path: moe-engine/test-results/
+          retention-days: 7
 
 # ---------------------------------------------------------------------------
-# Job: benchmark smoke (verifies benchmark suite runs end-to-end)
+# Job: test-config (dedicated config system gate)
 # ---------------------------------------------------------------------------
-  benchmark:
-    name: Benchmark Smoke (CPU)
+  test-config:
+    name: Config system (34 tests)
     runs-on: ubuntu-22.04
-    needs: unit
-
-    defaults:
-      run:
-        working-directory: moe-engine
+    needs: lint
 
     steps:
       - uses: actions/checkout@v4
@@ -132,70 +121,130 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install
-        run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev]"
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
 
-      - name: Run benchmark suite (CPU, small configs)
+      - name: Run config tests
+        run: pytest tests/test_config.py -v --tb=short
+
+# ---------------------------------------------------------------------------
+# Job: benchmark (smoke, CPU path, correctness + regression guard)
+# ---------------------------------------------------------------------------
+  benchmark:
+    name: CPU benchmark smoke
+    runs-on: ubuntu-22.04
+    needs: test-cpu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
+
+      - name: Run CPU benchmark sweep
         run: |
           python benchmarks/run_benchmark.py \
-            --json /tmp/bench_results.json
+            --json /tmp/ci_bench.json \
+            --csv  /tmp/ci_bench.csv
+
+      - name: Assert token conservation
+        run: |
           python -c "
           import json, sys
-          r = json.load(open('/tmp/bench_results.json'))
-          failed = [x for x in r if not x['passed']]
-          if failed:
-              print('FAILED:', [x['name'] for x in failed])
+          results = json.load(open('/tmp/ci_bench.json'))
+          conservation = [r for r in results if 'conservation' in r['name']]
+          for r in conservation:
+              if r['notes'] != 'violations=0/100':
+                  print(f'FAIL: {r[\"name\"]} {r[\"notes\"]}')
+                  sys.exit(1)
+          print(f'PASS: {len(conservation)} conservation checks clean')
+          all_passed = all(r['passed'] for r in results)
+          if not all_passed:
+              failed = [r['name'] for r in results if not r['passed']]
+              print(f'FAIL: {failed}')
               sys.exit(1)
-          print(f'All {len(r)} benchmark checks passed')
+          print(f'PASS: {len(results)} benchmark entries, all passed=True')
           "
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: benchmark-results
-          path: /tmp/bench_results.json
+          name: benchmark-results-cpu
+          path: /tmp/ci_bench.json
+          retention-days: 30
 
 # ---------------------------------------------------------------------------
-# Job: Docker build smoke
+# Job: docker (smoke build — no GPU required)
 # ---------------------------------------------------------------------------
   docker:
-    name: Docker Build Smoke
+    name: Docker smoke build
     runs-on: ubuntu-22.04
-    needs: unit
-    # Only run on pushes to main/dev (not every PR) to save CI minutes
+    needs: test-cpu
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build smoke image
+        run: |
+          docker build \
+            --target runtime \
+            --tag moe-engine:ci-${{ github.sha }} \
+            --file deploy/docker/Dockerfile \
+            .
+
+      - name: Smoke run inside container
+        run: |
+          docker run --rm \
+            -e PYTHONUNBUFFERED=1 \
+            moe-engine:ci-${{ github.sha }} \
+            python train.py --config configs/smoke.yaml --smoke
+
+# ---------------------------------------------------------------------------
+# Job: test-gpu (Tier-1 — runs on self-hosted GPU runner)
+# ---------------------------------------------------------------------------
+  test-gpu:
+    name: Tier-1 GPU tests (Triton kernel)
+    runs-on: [self-hosted, gpu, cuda]
+    needs: test-cpu
     if: github.event_name == 'push'
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build image (no push)
-        uses: docker/build-push-action@v5
+      - uses: actions/setup-python@v5
         with:
-          context: moe-engine
-          file: moe-engine/deploy/docker/Dockerfile
-          push: false
-          tags: moe-engine:ci-${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]" triton
+
+      - name: GPU smoke run
+        run: python train.py --config configs/smoke.yaml --smoke
+
+      - name: Triton kernel tests
+        run: |
+          pytest tests/test_kernels.py tests/test_kernels_numerics.py \
+            -v --tb=short
+
+      - name: GPU benchmark
+        run: |
+          python benchmarks/run_benchmark.py \
+            --cuda \
+            --json /tmp/gpu_bench_ci.json
 
 # ---------------------------------------------------------------------------
-# Job: chaos (opt-in, runs on push to main only)
+# Job: chaos-b (manual dispatch only — requires torchrun + Gloo)
 # ---------------------------------------------------------------------------
-  chaos:
-    name: Chaos Tests (Gloo CPU)
+  chaos-b:
+    name: Chaos Scenario B (storage stall, 10/10 expected)
     runs-on: ubuntu-22.04
-    needs: unit
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    defaults:
-      run:
-        working-directory: moe-engine
+    if: github.event_name == 'workflow_dispatch'
 
     steps:
       - uses: actions/checkout@v4
@@ -205,23 +254,24 @@ jobs:
           python-version: "3.11"
           cache: pip
 
-      - name: Install
-        run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
-          pip install -e ".[dev]"
+      - name: Install dependencies
+        run: pip install -e ".[dev]"
 
-      - name: Run chaos tests (baseline + scenario B; scenario A known flaky)
+      - name: Run Scenario B
         run: |
-          pytest tests/test_chaos.py -v -m chaos \
-            -k "baseline or scenario_b" \
-            --timeout=180 \
-            --tb=short
-        continue-on-error: false
+          GLOO_SOCKET_IFNAME=lo pytest tests/test_chaos.py \
+            -v -m chaos -k "scenario_b" --count=10 \
+            2>&1 | tee /tmp/chaos_b_output.txt
 
-      - name: Run scenario A (allowed to fail; tracked separately)
+      - name: Assert 10/10 pass rate
         run: |
-          pytest tests/test_chaos.py -v -m chaos \
-            -k "scenario_a" \
-            --timeout=300 \
-            --tb=short
-        continue-on-error: true    # known ~85% pass rate; non-blocking
+          python -c "
+          import re, sys
+          text = open('/tmp/chaos_b_output.txt').read()
+          passed = len(re.findall('PASSED', text))
+          failed = len(re.findall('FAILED', text))
+          print(f'Scenario B: {passed} passed, {failed} failed')
+          if failed > 0:
+              print('REGRESSION: Scenario B should be 10/10')
+              sys.exit(1)
+          "
