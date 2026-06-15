@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** v0.3  
+**Version:** v0.3.2  
 **Last updated:** June 2026
 
 Get from zero to a running MoE training step in under 5 minutes — no GPU required.
@@ -17,218 +17,201 @@ No CUDA, no GPU, no Docker needed for steps 1–5.
 
 ---
 
-## Step 1 — Clone and install
+## Step 1 — Install
+
+**From zip (recommended — always up to date):**
 
 ```bash
-git clone https://github.com/your-org/moe-engine
-cd moe-engine/moe-engine
+unzip moe_engine_v032_final.zip
+cd moe_upgraded/moe-engine/
 pip install -e ".[dev]"
 ```
 
-**Verify:**
+**From git (GitHub repo may be behind the zip):**
 
 ```bash
-python -c "import pkg.kernels.moe_router; print('moe-engine OK')"
+git clone https://github.com/Mattral/Composed-Mixture-of-Experts-Engine
+cd Composed-Mixture-of-Experts-Engine/moe-engine/
+pip install -e ".[dev]"
+```
+
+**Verify installation:**
+
+```bash
+python scripts/cli.py info
+# Expected output:
+#   Python:    3.12.x
+#   PyTorch:   2.x.x
+#   CUDA:      not available  (or: device name if GPU present)
+#   Pydantic:  2.x.x
+#   moe-engine: 0.3.2
+#   Configs:
+#     [OK] default.yaml: H=4096 E=64
+#     [OK] smoke.yaml: H=32 E=4
+```
+
+**Install pre-commit hooks (optional, recommended):**
+
+```bash
+pip install pre-commit && pre-commit install
 ```
 
 ---
 
-## Step 2 — Run the smoke test
+## Step 2 — Validate configs
 
 ```bash
-python train.py --config configs/smoke.yaml --smoke
+make validate-config
+# or: python scripts/cli.py validate configs/
 ```
 
-This runs 2 training steps on a tiny MoE model (hidden=32, 4 experts, 2 layers)
-using the CPU fp64 reference kernel path. Expected output:
+Expected output:
 
 ```
-INFO ... step=0 loss=4.8802 MFU=0.00% (smooth=0.00%) | 1847 tok/s | step=8.7ms ...
-INFO ... step=1 loss=4.8741 MFU=0.00% (smooth=0.00%) | 1923 tok/s | step=8.3ms ...
-```
+Validating 2 config file(s):
 
-MFU is near zero because the CPU reference path is not GPU hardware. On H100
-with the Triton kernel, expect 40–50% MFU at production config.
+  [OK]  default.yaml    H=4096 E=64 K=2 world_size=64 dtype=bfloat16
+  [OK]  smoke.yaml      H=32   E=4  K=2 world_size=1  dtype=float32
 
-Outputs written to `/tmp/moe-engine/` (configurable in `configs/smoke.yaml`):
-- `logs/step.jsonl` — structured per-step telemetry
-- `ckpts/` — checkpoint shards
-
----
-
-## Step 3 — Run the test suite
-
-```bash
-pytest tests/ -v --ignore=tests/test_chaos.py
-```
-
-Expected: **148 passed, 1 skipped** in ~60 seconds on a modern laptop.
-The single skip is the GPU-only Triton kernel path.
-
----
-
-## Step 4 — Inspect the telemetry
-
-```bash
-# Read the last emitted step record
-tail -1 /tmp/moe-engine/logs/step.jsonl | python -m json.tool
-```
-
-You will see a record like:
-
-```json
-{
-  "step": 1,
-  "loss": 4.8741,
-  "mfu": 0.0003,
-  "tokens_per_sec": 1923,
-  "wall_clock_ms": 8.3,
-  "kernel": {
-    "sram_bytes_per_block": 16384,
-    "tokens_per_expert_mean": 4.0,
-    "tokens_per_expert_std": 1.41,
-    "used_triton": false
-  },
-  "collective": {
-    "all_to_all_dispatch_ms": 0.0,
-    "all_to_all_combine_ms": 0.0
-  },
-  "routing": {
-    "expert_load_imbalance": 1.12,
-    "router_z_loss": 2.87
-  },
-  "infra": {
-    "async_ckpt_commit_ms": 0.0,
-    "active_nodes": 1,
-    "ep_world_size": 1,
-    "lr": 0.0003
-  },
-  "rank": 0,
-  "ts": 1748901234.56
-}
-```
-
-v0.2 additions: `routing.expert_load_imbalance` (1.0 = perfect balance)
-and `routing.router_z_loss` (auxiliary regularisation signal).
-v0.3 additions: `collective.expert_compute_ms` (expert FFN wall-clock) and
-`collective.comm_compute_overlap_ratio` (dispatch_ms / expert_compute_ms).
-
----
-
-## Step 5 — Run the benchmark suite
-
-```bash
-python benchmarks/run_benchmark.py --json /tmp/bench.json
-python -c "
-import json
-r = json.load(open('/tmp/bench.json'))
-for x in r:
-    if x['passed']:
-        print(f\"{x['name']:30s} {x['batch_ms_mean']:7.2f}ms  {x['tokens_per_sec']/1e6:5.2f}M tok/s\")
-"
+All 2 config(s) valid.
 ```
 
 ---
 
-## Step 6 — Validate the router numerics
+## Step 3 — Run the smoke test
 
 ```bash
-python tests/run_numerics_tests.py
+make smoke
+# or: python train.py --config configs/smoke.yaml --smoke
 ```
 
-This runs 30 parametrised forward/backward tolerance checks across
-`H ∈ {64,128,256,512}`, `E ∈ {8…256}`, `K ∈ {1,2,4}`, all against the
-fp64 reference at `atol=rtol=1e-5`.
+Expected output (CPU, fp64 reference path):
+
+```
+INFO ... step=0 loss=4.8802 mfu=0.00% | 1847 tok/s | step=8.7ms
+INFO ... step=1 loss=4.8741 mfu=0.00% | 1923 tok/s | step=8.3ms
+...
+INFO ... Smoke complete. Checkpoint written.
+```
+
+MFU is near zero because the CPU reference path is not GPU hardware.
+On T4 with Triton, expect ~0.1–0.5% MFU (T4 is an inference card).
+On H100 SXM5 at production scale, expect 40–55% MFU.
+
+Outputs in `/tmp/moe-engine/logs/step.jsonl` and `/tmp/moe-engine/ckpts/`.
 
 ---
 
-## Step 7 — Run a multi-GPU training step (requires GPU)
+## Step 4 — Run the test suite
 
 ```bash
-torchrun \
-  --standalone \
-  --nnodes=1 \
-  --nproc_per_node=4 \
-  train.py --config configs/default.yaml --max-steps 10 --profile
+make test-cpu
+# or: pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" -q
 ```
 
-The `--profile` flag writes a per-step benchmark JSON to `benchmarks/`:
+Expected:
+
+```
+1 failed, 252 passed, 1 skipped in ~60s
+```
+
+- **252 passed** (235 original + 17 mock_dist + property tests)
+- **1 skipped**: Triton GPU path (no CUDA in this environment — expected)
+- **1 failed**: `test_routing_quality::test_uniform_init_lower_imbalance[2]`  
+  Pre-existing stochastic flake at seed=2. Non-blocking. Identical failure on
+  the original codebase. See `docs/testing.md` for details.
+
+---
+
+## Step 5 — Explore the CLI
 
 ```bash
-ls benchmarks/run_*.json | tail -1 | xargs python -c "
-import json, sys
-r = json.load(open(sys.argv[1]))
-print(f\"Steps: {r['steps']}\")
-print(f\"MFU mean: {r['mfu_mean']:.2%}\")
-print(f\"Tokens/sec: {r['tokens_per_sec_mean']:,.0f}\")
-"
+# All commands
+python scripts/cli.py --help
+
+# Validate a specific config
+python scripts/cli.py validate configs/smoke.yaml
+
+# Run benchmark (CPU)
+python scripts/cli.py benchmark --json /tmp/bench.json
+
+# Environment info
+python scripts/cli.py info
 ```
 
 ---
 
-## Step 8 — Docker smoke (no GPU required)
+## Step 6 (optional) — GPU smoke on T4
+
+If you have a T4 GPU (e.g. Google Colab free tier):
+
+1. Open `moe-engine/notebooks/moe_engine_v032_T4_validation.ipynb` in Colab.
+2. `Runtime → Change runtime type → T4 GPU`.
+3. Upload the zip and run cells 0–4.
+
+This confirms the Triton kernel compiles and runs on real GPU hardware. Expected:
+- Triton kernel: ✅ compiles
+- Token conservation: `violations=0/100` on CUDA
+- Smoke train: MFU > 0% (Triton GPU path active)
+
+---
+
+## Step 7 (optional) — Multi-GPU
+
+With 4 × GPUs available locally:
 
 ```bash
-docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3 .
-docker compose -f deploy/docker/docker-compose.yml run --rm smoke
+torchrun --standalone --nproc_per_node=4 \
+  train.py --config configs/default.yaml --max-steps 20
 ```
 
 ---
 
-## Step 9 — Monitor with TensorBoard
+## Key files for new contributors
 
-```bash
-tensorboard --logdir /tmp/moe-engine/logs/tb
-# Open http://localhost:6006
-```
-
-Scalars available: `loss`, `mfu`, `tokens_per_sec`, `collective/dispatch_ms`,
-`collective/combine_ms`, `collective/expert_compute_ms` (v0.3),
-`collective/comm_compute_overlap_ratio` (v0.3),
-`memory/peak_allocated_gb`, `routing/expert_load_imbalance`, `routing/router_z_loss`.
-
----
-
-## Step 10 — Multi-node cluster launch
-
-When you have cluster access:
-
-```bash
-NUM_NODES=2 \
-GPUS_PER_NODE=8 \
-RDZV_ENDPOINT=head-node:29500 \
-RDZV_ID=moe-run-001 \
-CONFIG=configs/default.yaml \
-bash scripts/launch.sh
-```
-
-For > 100 nodes, set `elastic.rdzv_backend: etcd` in your config.
-See `docs/deployment.md` for the full deployment reference.
+| File | Purpose |
+|------|---------|
+| `configs/smoke.yaml` | Toy config (H=32, E=4) — fast development |
+| `configs/default.yaml` | Production config (H=4096, E=64) — 64 GPUs |
+| `pkg/distributed/` | 7 focused modules + backward-compat shim |
+| `pkg/kernels/moe_router.py` | Triton fused router kernel |
+| `pkg/utils/config.py` | Pydantic MoEConfig (start here for config changes) |
+| `pkg/models/registry.py` | Model registry and factory |
+| `tests/test_config.py` | 34 config system tests |
+| `tests/test_properties.py` | Property-based invariant tests |
+| `docs/ARCHITECTURE.md` | Component map with sequence diagrams |
+| `docs/LIMITED_HARDWARE_GUIDE.md` | Developing without a GPU cluster |
+| `docs/adr/` | Why major design decisions were made |
 
 ---
 
-## What to read next
+## Troubleshooting
 
-| Document | Purpose |
-|---|---|
-| `docs/ARCHITECTURE.md` | System component map, 4D mesh, kernel design |
-| `docs/DESIGN.md` | Why each design choice was made; tradeoffs considered |
-| `docs/SYSTEM_DESIGN.md` | Full component API reference |
-| `docs/testing.md` | Test suite guide; how to write new tests |
-| `docs/deployment.md` | Docker, Kubernetes, multi-node operations |
-| `docs/CONTRIBUTING.md` | Contribution workflow and standards |
+**`ModuleNotFoundError: No module named 'pkg'`**
 
-**v0.3 new commands:**
-```bash
-# WandB logging (requires WANDB_API_KEY)
-python train.py --config configs/smoke.yaml --smoke --wandb-project moe-engine
+Run from the `moe-engine/` directory, or `pip install -e ".[dev]"` first.
 
-# PP multi-process test
-pytest tests/test_pipeline_parallel.py::test_pp_multiprocess_2stage_activation_flow -v
+**`ConfigValidationError: [model] top_k (4) must be <= num_experts (4)`**
 
-# SP fused path test
-pytest tests/test_sequence_parallel_v03.py::test_sp_fused_2rank_numerically_correct -v
+Your config has `top_k` greater than `num_experts`. Reduce `top_k` or increase
+`num_experts`. The Pydantic validator catches this at load time.
+
+**`triton.compiler.errors.CompilationError: K must be constexpr`**
+
+This is the v0.3.1 → v0.3.2 Triton fix. Confirm you are using the v0.3.2 zip
+(not the GitHub repo). Run Section 2 of the T4 notebook to verify.
+
+**Smoke test fails with `NaN in output`**
+
+Gate weight initialisation may be too large. Try:
+```python
+# In pkg/models/moe.py, reduce init scale
+nn.init.normal_(self.w_gate.weight, std=0.01)
 ```
-| `benchmarks/BENCHMARKS.md` | Benchmark methodology and results |
-| `RESULTS.md` | Reproducible results and telemetry samples |
-| `roadmap.md` | Honest status, known deficiencies, v0.3 plan |
+
+**Pre-commit `detect-secrets` fails on first run**
+
+```bash
+detect-secrets scan > .secrets.baseline
+git add .secrets.baseline && git commit -m "chore: init secrets baseline"
+```

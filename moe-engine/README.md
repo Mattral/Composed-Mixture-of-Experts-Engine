@@ -47,63 +47,7 @@ becomes fully realised as the matrix size grows relative to the T4's L2 cache.
 
 ### GPU router throughput chart (v0.3.2, T4, real measurements)
 
-```
-                                 ┌─────────────────────────────────────────────┐
-                                 │              train.py  (entrypoint)         │
-                                 │  argparse → load_config → build_topology    │
-                                 └──────────────┬──────────────────────────────┘
-                                                │
-            ┌───────────────────────────────────┼────────────────────────────────────┐
-            │                                   │                                    │
-            ▼                                   ▼                                    ▼
-┌────────────────────────────┐   ┌──────────────────────────────┐   ┌──────────────────────────────┐
-│ pkg/distributed/           │   │ pkg/elastic/                 │   │ pkg/kernels/                 │
-│   parallel_mesh.py         │   │   fault_monitor.py           │   │   moe_router.py              │
-│                            │   │                              │   │                              │
-│ • ParallelTopology         │   │ • ElasticTrainerHarness      │   │ • MoERouter (nn.Module)      │
-│ • init_device_mesh((dp,ep))│   │ • AsyncCheckpointer          │   │   ├─ forward: Triton @jit    │
-│   with TP axis reserved    │   │ • _PinnedHostStager          │   │   │   - dynamic-bound mask   │
-│ • DistributedMoELayer      │   │ • ClusterStateMachine        │   │   │   - 128B aligned loads   │
-│ • apply_fsdp2(...)         │   │ • LocalNVMeAdapter           │   │   └─ backward: Triton JIT    │
-│ • all_to_all_dispatch      │   │ • S3Adapter (boto3)          │   │ • CPU autograd fallback      │
-│   on dedicated comm stream │   │                              │   │                              │
-└───────────┬────────────────┘   └─────────────┬────────────────┘   └──────────────┬───────────────┘
-            │                                  │                                   │
-            │   DeviceMesh sub-meshes          │   pinned-host snapshot queue      │  routing tokens
-            │   ("pp","dp","ep","tp")          │                                   │  + gating weights
-            │                                  │                                   │
-            ▼                                  ▼                                   ▼
-   ┌────────────────────┐         ┌───────────────────────────┐         ┌──────────────────────┐
-   │ NCCL / Gloo        │         │ tier-1 NVMe (staging)     │         │ Triton runtime       │
-   │ process groups     │         │ tier-2 S3 / MinIO mirror  │         │ (CUDA / ROCm)        │
-   │ (one per axis)     │         │ background I/O thread×N   │         │                      │
-   └────────────────────┘         └───────────┬───────────────┘         └──────────────────────┘
-                                              │
-                                              ▼
-                                  ┌───────────────────────────┐
-                                  │ TorchElastic agent        │
-                                  │ (rdzv: c10d / etcd)       │
-                                  │ rendezvous → restart loop │
-                                  └───────────────────────────┘
-
-                       Data-flow per training step
-                       ───────────────────────────
-   ids → embed → (TP shard) → block_0 ── … ── block_N → norm → lm_head → loss
-                                  │
-                                  ▼
-                    DistributedMoELayer.forward
-                    ┌────────────────────────────┐
-                    │ 1. router (Triton fwd)     │
-                    │ 2. sort by target EP rank  │
-                    │ 3. all_to_all_single       │
-                    │    on a dedicated comm stream ──► launch  ─────────┐
-                    │ 4. independent compute  ─── overlap ───►│  GPU compute
-                    │ 5. work.wait() on dispatch              │  in flight
-                    │ 6. local SwiGLU experts                            │
-                    │ 7. all_to_all_combine on a dedicated comm stream ──┘
-                    │ 8. weight ⊗ combine → reduce-K  │
-                    └──────────────────────────────────┘
-```
+![Router throughput GPU v0.3.2](benchmarks/charts/router_throughput_gpu_v0_3_2.png)
 
 *Forward-only (blue) and forward+backward (orange) throughput on T4 GPU
 (Triton kernel) vs CPU reference path (green dashed). Log scale.
@@ -400,4 +344,4 @@ If you use moe-engine in your research, please cite the preprint:
 
 ## License
 
-Apache-2.0. See `LICENSE`.
+Apache 2.0. See [`LICENSE`](../LICENSE).
