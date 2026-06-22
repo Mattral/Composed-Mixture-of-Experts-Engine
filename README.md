@@ -80,6 +80,7 @@ This is not a model. It is the runtime that a model runs on.
      │   Prometheus /metrics       │  routing + overlap metrics
      │   WandB (optional)          │  WANDB_API_KEY-gated
      └─────────────────────────────┘
+
 ```
 
 **4D Parallelism mesh:** `(dp × tp × pp × ep)`
