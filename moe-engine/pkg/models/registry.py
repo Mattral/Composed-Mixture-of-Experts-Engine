@@ -44,6 +44,11 @@ Public API
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from pkg.distributed.mesh import ParallelTopology
+
 import logging
 from typing import Callable, Dict, Optional, Type
 
@@ -110,7 +115,7 @@ class ModelRegistry:
 def register_model(name: str) -> Callable[[Type[nn.Module]], Type[nn.Module]]:
     """Decorator to register a model class under a given name.
 
-    The class must accept ``(cfg: MoEConfig, topology: ParallelTopology)``
+    The class must accept ``(cfg: MoEConfig, topology: "ParallelTopology")``
     as its first two constructor arguments.
 
     Parameters
@@ -128,13 +133,15 @@ def register_model(name: str) -> Callable[[Type[nn.Module]], Type[nn.Module]]:
 
         @register_model("my_moe_v2")
         class MyMoEv2(nn.Module):
-            def __init__(self, cfg: MoEConfig, topology: ParallelTopology):
+            def __init__(self, cfg: MoEConfig, topology: "ParallelTopology"):
                 super().__init__()
                 ...
     """
+
     def decorator(cls: Type[nn.Module]) -> Type[nn.Module]:
         ModelRegistry.register(name, cls)
         return cls
+
     return decorator
 
 
@@ -193,6 +200,7 @@ def _register_builtins() -> None:
     """Register all built-in model classes. Called once on module import."""
     try:
         import pkg.models.moe as _moe_module  # noqa: F401  (side-effect: registration)
+
         log.debug("Built-in models registered: %s", ModelRegistry.list())
     except ImportError as exc:
         log.warning("Could not register built-in models: %s", exc)
