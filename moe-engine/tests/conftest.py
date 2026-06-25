@@ -16,6 +16,7 @@ then return the port. The window between close and use is tiny; the test
 runner spawns workers sequentially, so collisions are effectively impossible.
 A module-scoped counter further separates different test files.
 """
+
 from __future__ import annotations
 
 import socket
@@ -27,12 +28,11 @@ from typing import Iterator
 import pytest
 import torch.distributed as dist
 
-
 # ---------------------------------------------------------------------------
 # Thread-safe port allocator
 # ---------------------------------------------------------------------------
 _port_lock = threading.Lock()
-_port_base = 29600        # well above system reserved (< 1024) and common defaults
+_port_base = 29600  # well above system reserved (< 1024) and common defaults
 
 
 def _get_free_port() -> int:

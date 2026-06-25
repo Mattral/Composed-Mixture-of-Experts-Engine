@@ -25,29 +25,36 @@ or from ``pkg.distributed`` (the package __init__) for the public API.
    Use ``pkg.distributed`` or the specific submodule instead.
 """
 
-from __future__ import annotations
+from __future__ import annotations  # noqa: E402
+
+from pkg.distributed.data_parallel import apply_fsdp2  # noqa: F401
+from pkg.distributed.expert_parallel import (  # noqa: F401
+    all_to_all_combine,
+    all_to_all_dispatch,
+)
 
 # Re-export everything from the focused submodules.
-from pkg.distributed.mesh import (         # noqa: F401
+from pkg.distributed.mesh import (  # noqa: F401
     ParallelTopology,
     build_topology,
-    tp_process_group  as _tp_process_group,
-    pp_process_group  as _pp_process_group,
 )
+from pkg.distributed.mesh import (  # noqa: E402
+    pp_process_group as _pp_process_group,
+)
+from pkg.distributed.mesh import (  # noqa: E402
+    tp_process_group as _tp_process_group,
+)
+from pkg.distributed.moe_layer import (  # noqa: E402
+    DistributedMoELayer,  # noqa: F401
+    _SwiGLUExpert,  # noqa: F401  (private; tests inspect it)
+)
+from pkg.distributed.pipeline_parallel import PipelineStage  # noqa: F401
 from pkg.distributed.tensor_parallel import (  # noqa: F401
     ColumnParallelLinear,
     RowParallelLinear,
-    scatter_to_sequence_parallel,
     gather_from_sequence_parallel,
+    scatter_to_sequence_parallel,
 )
-from pkg.distributed.expert_parallel import (  # noqa: F401
-    all_to_all_dispatch,
-    all_to_all_combine,
-)
-from pkg.distributed.pipeline_parallel import PipelineStage   # noqa: F401
-from pkg.distributed.data_parallel import apply_fsdp2         # noqa: F401
-from pkg.distributed.moe_layer import DistributedMoELayer     # noqa: F401
-from pkg.distributed.moe_layer import _SwiGLUExpert           # noqa: F401  (private; tests inspect it)
 
 # Legacy aliases kept for backward compat (private names some tests access)
 _tp_process_group = _tp_process_group
@@ -67,4 +74,4 @@ __all__ = [
     "DistributedMoELayer",
 ]
 
-from pkg.distributed.router import MoERouterInterface, RouterStats  # noqa: F401
+from pkg.distributed.router import MoERouterInterface, RouterStats  # noqa: F401,E402

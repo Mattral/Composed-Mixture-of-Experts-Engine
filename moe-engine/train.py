@@ -48,23 +48,24 @@ import torch
 import torch.distributed as dist
 
 from pkg.distributed import (
-    build_topology,
     apply_fsdp2,
+    build_topology,
 )
 from pkg.elastic.fault_monitor import (
     ElasticConfig as _ElasticRuntimeConfig,
+)
+from pkg.elastic.fault_monitor import (
     ElasticTrainerHarness,
 )
-from pkg.models import ToyMoEModel
 from pkg.models.moe import build_model
-from pkg.telemetry.logger import StructuredLogger, StepRecord
+from pkg.telemetry.logger import StepRecord, StructuredLogger
 from pkg.utils.config import MoEConfig, load_config
 from pkg.utils.mfu import MFUAccountant, compute_moe_flops
-
 
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
+
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -72,24 +73,37 @@ def parse_args() -> argparse.Namespace:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--config", required=True, help="Path to YAML config file.")
-    p.add_argument("--max-steps", type=int, default=None,
-                   help="Override max_steps from config.")
-    p.add_argument("--smoke", action="store_true",
-                   help="Minimal smoke-test run (2 steps, tiny dimensions).")
-    p.add_argument("--profile", action="store_true",
-                   help="Write a benchmark JSON to benchmarks/ on exit.")
-    p.add_argument("--prometheus-port", type=int, default=0,
-                   help="Port for Prometheus /metrics endpoint (0=disabled).")
-    p.add_argument("--wandb-project", type=str, default=None,
-                   help="WandB project name (requires WANDB_API_KEY env var).")
-    p.add_argument("--no-wandb", action="store_true",
-                   help="Disable WandB logging even if WANDB_API_KEY is set.")
+    p.add_argument("--max-steps", type=int, default=None, help="Override max_steps from config.")
+    p.add_argument(
+        "--smoke", action="store_true", help="Minimal smoke-test run (2 steps, tiny dimensions)."
+    )
+    p.add_argument(
+        "--profile", action="store_true", help="Write a benchmark JSON to benchmarks/ on exit."
+    )
+    p.add_argument(
+        "--prometheus-port",
+        type=int,
+        default=0,
+        help="Port for Prometheus /metrics endpoint (0=disabled).",
+    )
+    p.add_argument(
+        "--wandb-project",
+        type=str,
+        default=None,
+        help="WandB project name (requires WANDB_API_KEY env var).",
+    )
+    p.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Disable WandB logging even if WANDB_API_KEY is set.",
+    )
     return p.parse_args()
 
 
 # ---------------------------------------------------------------------------
 # LR schedule
 # ---------------------------------------------------------------------------
+
 
 def _get_lr(step: int, warmup_steps: int, max_steps: int, lr: float) -> float:
     """Linear warm-up + cosine decay."""
@@ -102,6 +116,7 @@ def _get_lr(step: int, warmup_steps: int, max_steps: int, lr: float) -> float:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main() -> None:
     logging.basicConfig(
@@ -117,29 +132,31 @@ def main() -> None:
     # for backward-compatible dict access.  New code should use
     # MoEConfig.from_yaml(args.config) directly.
     legacy_cfg = load_config(args.config)
-    cfg = legacy_cfg.typed()   # typed MoEConfig
+    cfg = legacy_cfg.typed()  # typed MoEConfig
 
     # Smoke-test overrides on the typed config's raw dict representation.
     if args.smoke:
-        cfg = MoEConfig.from_dict({
-            **cfg.to_dict(),
-            "model": {
-                **cfg.to_dict()["model"],
-                "hidden_dim": 64,
-                "num_layers": 2,
-                "ffn_dim": 128,
-                "num_experts": 4,
-                "sequence_length": 16,
-                "vocab_size": 256,
-            },
-            "training": {
-                **cfg.to_dict()["training"],
-                "micro_batch_size": 2,
-                "max_steps": 5,
-                "gradient_accumulation_steps": 1,
-                "warmup_steps": 0,
-            },
-        })
+        cfg = MoEConfig.from_dict(
+            {
+                **cfg.to_dict(),
+                "model": {
+                    **cfg.to_dict()["model"],
+                    "hidden_dim": 64,
+                    "num_layers": 2,
+                    "ffn_dim": 128,
+                    "num_experts": 4,
+                    "sequence_length": 16,
+                    "vocab_size": 256,
+                },
+                "training": {
+                    **cfg.to_dict()["training"],
+                    "micro_batch_size": 2,
+                    "max_steps": 5,
+                    "gradient_accumulation_steps": 1,
+                    "warmup_steps": 0,
+                },
+            }
+        )
 
     # ----------------------------------------------------------------
     # Process group bootstrap.
@@ -149,13 +166,16 @@ def main() -> None:
     if world_size > 1 and not dist.is_initialized():
         dist.init_process_group(
             backend="nccl" if torch.cuda.is_available() else "gloo",
-            world_size=world_size, rank=rank,
+            world_size=world_size,
+            rank=rank,
         )
 
     par = cfg.parallelism
     dp, ep, tp, pp = (
-        par.data_parallel, par.expert_parallel,
-        par.tensor_parallel, par.pipeline_parallel,
+        par.data_parallel,
+        par.expert_parallel,
+        par.tensor_parallel,
+        par.pipeline_parallel,
     )
 
     # Auto-reduce parallelism if world_size is smaller than config demands.
@@ -166,7 +186,10 @@ def main() -> None:
             dp = max(1, world_size // (tp * pp * ep))
 
     topology = build_topology(
-        dp_size=dp, ep_size=ep, tp_size=tp, pp_size=pp,
+        dp_size=dp,
+        ep_size=ep,
+        tp_size=tp,
+        pp_size=pp,
         device_type="cuda" if torch.cuda.is_available() else "cpu",
     )
 
@@ -175,15 +198,15 @@ def main() -> None:
     # ----------------------------------------------------------------
     model = build_model(cfg, topology)
     model = apply_fsdp2(
-        model, topology,
-        mixed_precision_dtype=(
-            torch.bfloat16 if cfg.model.dtype == "bfloat16" else None
-        ),
+        model,
+        topology,
+        mixed_precision_dtype=(torch.bfloat16 if cfg.model.dtype == "bfloat16" else None),
     )
 
     lr = cfg.training.learning_rate
     optimizer = torch.optim.AdamW(
-        model.parameters(), lr=lr,
+        model.parameters(),
+        lr=lr,
         weight_decay=cfg.training.weight_decay,
         betas=(0.9, 0.95),
     )
@@ -248,9 +271,7 @@ def main() -> None:
     # ----------------------------------------------------------------
     # Training loop.
     # ----------------------------------------------------------------
-    max_steps = (
-        args.max_steps if args.max_steps is not None else cfg.training.max_steps
-    )
+    max_steps = args.max_steps if args.max_steps is not None else cfg.training.max_steps
     warmup_steps = cfg.training.warmup_steps
     grad_accum = cfg.training.gradient_accumulation_steps
 
@@ -273,11 +294,30 @@ def main() -> None:
             ids = torch.randint(0, V, (B, S), device=topology.device)
             targets = torch.randint(0, V, (B, S), device=topology.device)
             logits = model(ids)
-            loss = torch.nn.functional.cross_entropy(
-                logits.view(-1, V).float(), targets.view(-1),
-            ) / grad_accum
+            ce_loss = (
+                torch.nn.functional.cross_entropy(
+                    logits.view(-1, V).float(),
+                    targets.view(-1),
+                )
+                / grad_accum
+            )
+
+            # Aux z-loss (P2.2 — advanced load balancing).
+            # Weight from cfg, default 0 (disabled). Enable with
+            # MOE_TRAINING__Z_LOSS_WEIGHT=1e-3 or in config YAML.
+            z_loss_weight = getattr(cfg.training, "z_loss_weight", 0.0)
+            z_loss_aux = 0.0
+            if z_loss_weight > 0.0:
+                try:
+                    p_info = model.blocks[0].moe.router.last_profile
+                    if p_info is not None:
+                        z_loss_aux = p_info.router_z_loss * z_loss_weight / grad_accum
+                except (AttributeError, IndexError):
+                    pass
+
+            loss = ce_loss + z_loss_aux
             loss.backward()
-            total_loss += float(loss.detach().item())
+            total_loss += float(ce_loss.detach().item())  # log CE only
 
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
         optimizer.step()
@@ -317,10 +357,42 @@ def main() -> None:
                     "tokens_per_expert_std": p_info.tokens_per_expert_std,
                     "used_triton": p_info.used_triton,
                 }
+                # Compute v0.3.2 MoE-specific telemetry fields
+                E = cfg.model.num_experts
+                K = cfg.model.top_k
+                dispatch_cnt = getattr(p_info, "dispatch_counts", None)
+                dead_expert_count = 0
+                active_experts = E
+                routing_efficiency = 1.0
+                if dispatch_cnt is not None:
+                    import torch as _torch
+
+                    dc = (
+                        _torch.tensor(dispatch_cnt)
+                        if not hasattr(dispatch_cnt, "shape")
+                        else dispatch_cnt
+                    )
+                    dead_expert_count = int((dc == 0).sum().item())
+                    active_experts = int((dc > 0).sum().item())
+                    capacity = model.blocks[0].moe.capacity_factor * (B * S * K / E)
+                    total_capacity = capacity * E
+                    actual_tokens = float(dc.sum().item())
+                    routing_efficiency = actual_tokens / max(total_capacity, 1.0)
+
                 rec.routing = {
                     "expert_load_imbalance": p_info.expert_load_imbalance,
                     "router_z_loss": p_info.router_z_loss,
+                    # v0.3.2 fields
+                    "sparse_mfu": mfu_res.mfu * (K / max(E, 1)),
+                    "dead_expert_count": dead_expert_count,
+                    "routing_efficiency": routing_efficiency,
+                    "active_experts": active_experts,
                 }
+                # Mirror into StepRecord typed fields for Prometheus / WandB
+                rec.sparse_mfu = mfu_res.mfu * (K / max(E, 1))
+                rec.dead_expert_count = dead_expert_count
+                rec.routing_efficiency = routing_efficiency
+                rec.active_experts = active_experts
             rec.collective = {
                 "all_to_all_dispatch_ms": first_moe.last_dispatch_ms,
                 "all_to_all_combine_ms": first_moe.last_combine_ms,
@@ -335,7 +407,9 @@ def main() -> None:
             if topology.rank == 0:
                 logging.info(
                     "step=%d loss=%.4f %s",
-                    step, total_loss, mfu_acct.summary_str(),
+                    step,
+                    total_loss,
+                    mfu_acct.summary_str(),
                 )
 
         if step > 0 and step % cfg.training.ckpt_interval == 0:
@@ -345,21 +419,21 @@ def main() -> None:
             dead = harness.health_check()
             if dead:
                 logging.warning("Rank drop: %s; entering recovery", dead)
-                topology = harness.recover(
-                    model, optimizer, num_experts=cfg.model.num_experts
-                )
+                topology = harness.recover(model, optimizer, num_experts=cfg.model.num_experts)
 
         if args.profile:
-            profile_records.append({
-                "step": step,
-                "step_ms": mfu_res.step_ms,
-                "mfu": mfu_res.mfu,
-                "tokens_per_sec": mfu_res.tokens_per_sec,
-                "loss": total_loss,
-                "dispatch_ms": rec.collective.get("all_to_all_dispatch_ms", 0.0),
-                "combine_ms": rec.collective.get("all_to_all_combine_ms", 0.0),
-                "load_imbalance": rec.routing.get("expert_load_imbalance", 1.0),
-            })
+            profile_records.append(
+                {
+                    "step": step,
+                    "step_ms": mfu_res.step_ms,
+                    "mfu": mfu_res.mfu,
+                    "tokens_per_sec": mfu_res.tokens_per_sec,
+                    "loss": total_loss,
+                    "dispatch_ms": rec.collective.get("all_to_all_dispatch_ms", 0.0),
+                    "combine_ms": rec.collective.get("all_to_all_combine_ms", 0.0),
+                    "load_imbalance": rec.routing.get("expert_load_imbalance", 1.0),
+                }
+            )
 
     # ----------------------------------------------------------------
     # Shutdown.
@@ -385,7 +459,10 @@ def main() -> None:
                 "num_layers": cfg.model.num_layers,
                 "dtype": cfg.model.dtype,
                 "world_size": world_size,
-                "dp": dp, "ep": ep, "tp": tp, "pp": pp,
+                "dp": dp,
+                "ep": ep,
+                "tp": tp,
+                "pp": pp,
             },
             "steps": n,
             "mfu_mean": sum(mfu_all) / n,

@@ -40,6 +40,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
 import signal
 import sys
 import time
@@ -47,7 +48,6 @@ import traceback
 from datetime import timedelta
 from pathlib import Path
 from typing import Dict
-import random
 
 import torch
 import torch.distributed as dist
@@ -133,12 +133,14 @@ def main() -> int:
     tele = tele_path.open("a", buffering=1)
 
     def emit(**rec: object) -> None:
-        rec.update({
-            "rank": rank,
-            "world": world,
-            "generation": generation,
-            "ts": time.time(),
-        })
+        rec.update(
+            {
+                "rank": rank,
+                "world": world,
+                "generation": generation,
+                "ts": time.time(),
+            }
+        )
         # Emit a JSON line so the test harness can parse it. Convert non-
         # serializable types to strings for robustness.
         safe_rec = {}
@@ -154,25 +156,29 @@ def main() -> int:
         except OSError:
             pass
 
-    emit(event="boot", local_rank=local_rank, scenario=scenario,
-         pid=os.getpid(), torch_version=torch.__version__,
-         master_addr=os.environ.get("MASTER_ADDR"),
-         master_port=os.environ.get("MASTER_PORT"),
-         gloo_ifname=os.environ.get("GLOO_SOCKET_IFNAME"),
-         elastic_restart_count=os.environ.get("TORCHELASTIC_RESTART_COUNT"),
-         rank=rank,
-         world=world,
+    emit(
+        event="boot",
+        local_rank=local_rank,
+        scenario=scenario,
+        pid=os.getpid(),
+        torch_version=torch.__version__,
+        master_addr=os.environ.get("MASTER_ADDR"),
+        master_port=os.environ.get("MASTER_PORT"),
+        gloo_ifname=os.environ.get("GLOO_SOCKET_IFNAME"),
+        elastic_restart_count=os.environ.get("TORCHELASTIC_RESTART_COUNT"),
+        rank=rank,
+        world=world,
     )
 
     # ----- process group ------------------------------------------------
     # Gloo can sometimes fail to connect transiently in containerized
     # or heavily-loaded CI environments. Retry more aggressively so the
     # chaos scenario is not masked by infrastructure flakiness.
-    master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")
-    master_port = os.environ.get("MASTER_PORT", "29500")
+    master_addr = os.environ.get("MASTER_ADDR", "127.0.0.1")  # noqa: F841
+    master_port = os.environ.get("MASTER_PORT", "29500")  # noqa: F841
     # Use env:// by default so torchrun/elastic provides rank/world via env vars.
     init_method = os.environ.get("INIT_METHOD", "env://")
-    
+
     # On restart (non-zero elastic restart count), increase timeout and add
     # substantial synchronization delay to allow all ranks to be re-launched
     # and ready to bind sockets before attempting PG formation.
@@ -186,12 +192,16 @@ def main() -> int:
         timeout = timedelta(seconds=60)
         # Small initial jitter to avoid simultaneous connect storms across ranks
         time.sleep(random.uniform(0.0, 0.2))
-    
+
     max_init_attempts = 24
     for attempt in range(1, max_init_attempts + 1):
         try:
-            emit(event="pg_init_attempt", attempt=attempt,
-                 init_method=init_method, timeout_s=timeout.total_seconds())
+            emit(
+                event="pg_init_attempt",
+                attempt=attempt,
+                init_method=init_method,
+                timeout_s=timeout.total_seconds(),
+            )
             # Use env:// for compatibility with torchrun/elastic which
             # supplies rank/WORLD_SIZE via environment variables.
             dist.init_process_group(
@@ -205,8 +215,14 @@ def main() -> int:
             base = min(10.0, 0.5 * attempt)
             jitter = random.uniform(0.0, 0.5)
             wait_s = base + jitter
-            emit(event="pg_init_retry", attempt=attempt,
-                 error=str(e), wait_s=wait_s, base=base, jitter=jitter)
+            emit(
+                event="pg_init_retry",
+                attempt=attempt,
+                error=str(e),
+                wait_s=wait_s,
+                base=base,
+                jitter=jitter,
+            )
             if attempt == max_init_attempts:
                 raise
             time.sleep(wait_s)
@@ -231,8 +247,7 @@ def main() -> int:
             marker = marker_dir / f"rank-{rank:02d}-gen-{generation:02d}"
             if (target_seg in key) and (not marker.exists()):
                 marker.touch()
-                emit(event="latency_inject", step=latency_step,
-                     seconds=latency_seconds, key=key)
+                emit(event="latency_inject", step=latency_step, seconds=latency_seconds, key=key)
                 time.sleep(latency_seconds)
             original_put(key, payload)
 
@@ -251,32 +266,34 @@ def main() -> int:
         # work/checksums/) AND additionally do a tensor-bitwise compare
         # via torch.testing.assert_close(rtol=0, atol=0).
         loaded_sha = _model_sha256(model)
-        saved_meta_path = (
-            work / "checksums" / f"step-{latest:06d}-rank-{rank:02d}.json"
-        )
+        saved_meta_path = work / "checksums" / f"step-{latest:06d}-rank-{rank:02d}.json"
         match = False
         saved_sha = None
         if saved_meta_path.exists():
             saved = json.loads(saved_meta_path.read_text())
             saved_sha = saved["sha256"]
-            match = (saved_sha == loaded_sha)
+            match = saved_sha == loaded_sha
             # Bit-exact tensor equality on top of the SHA — belt & braces.
             saved_tensors_blob = saved.get("tensors_path")
             if saved_tensors_blob:
-                blob = torch.load(saved_tensors_blob, map_location="cpu",
-                                  weights_only=False)
+                blob = torch.load(saved_tensors_blob, map_location="cpu", weights_only=False)
                 live = _state_dict_snapshot(model)
                 for k in sorted(blob.keys()):
                     torch.testing.assert_close(
-                        live[k], blob[k], rtol=0.0, atol=0.0,
+                        live[k],
+                        blob[k],
+                        rtol=0.0,
+                        atol=0.0,
                         msg=f"tensor mismatch at key={k} step={latest}",
                     )
-        emit(event="checksum_verify", step=latest,
-             saved_sha256=saved_sha, loaded_sha256=loaded_sha, match=match)
-        assert match, (
-            f"checksum identity broken on resume: "
-            f"saved={saved_sha} loaded={loaded_sha}"
+        emit(
+            event="checksum_verify",
+            step=latest,
+            saved_sha256=saved_sha,
+            loaded_sha256=loaded_sha,
+            match=match,
         )
+        assert match, f"checksum identity broken on resume: saved={saved_sha} loaded={loaded_sha}"
         start_step = latest + 1
         emit(event="resume", from_step=latest, start_step=start_step)
     else:
@@ -320,8 +337,9 @@ def main() -> int:
 
         # Save sharded snapshot. We block on the writer queue so that the
         # checksum we record reflects what is actually persisted on disk.
-        ckpt.save(model, optim, step, rank=rank,
-                  extra_meta={"world": world, "generation": generation})
+        ckpt.save(
+            model, optim, step, rank=rank, extra_meta={"world": world, "generation": generation}
+        )
         ckpt._q.join()
 
         sha = _model_sha256(model)
@@ -332,19 +350,26 @@ def main() -> int:
         tensors_path = ck_dir / f"step-{step:06d}-rank-{rank:02d}.pt"
         torch.save(_state_dict_snapshot(model), tensors_path)
         (ck_dir / f"step-{step:06d}-rank-{rank:02d}.json").write_text(
-            json.dumps({
-                "sha256": sha, "step": step, "rank": rank,
-                "tensors_path": str(tensors_path),
-            })
+            json.dumps(
+                {
+                    "sha256": sha,
+                    "step": step,
+                    "rank": rank,
+                    "tensors_path": str(tensors_path),
+                }
+            )
         )
-        emit(event="step", step=step, loss=float(loss.item()),
-             tokens=tokens_per_step, cum_tokens=cum_tokens, sha256=sha)
+        emit(
+            event="step",
+            step=step,
+            loss=float(loss.item()),
+            tokens=tokens_per_step,
+            cum_tokens=cum_tokens,
+            sha256=sha,
+        )
 
         # ---------- Scenario A: SIGKILL the targeted local rank ----------
-        if (scenario == "A"
-                and step == kill_step
-                and local_rank == kill_rank
-                and generation == 0):
+        if scenario == "A" and step == kill_step and local_rank == kill_rank and generation == 0:
             emit(event="self_sigkill", step=step, local_rank=local_rank)
             tele.flush()
             try:
@@ -362,13 +387,15 @@ def main() -> int:
     final_dir = work / "final"
     final_dir.mkdir(parents=True, exist_ok=True)
     (final_dir / f"rank-{rank:02d}-gen-{generation:02d}.json").write_text(
-        json.dumps({
-            "rank": rank,
-            "generation": generation,
-            "final_step": total_steps - 1,
-            "cum_tokens": cum_tokens,
-            "final_sha256": _model_sha256(model),
-        })
+        json.dumps(
+            {
+                "rank": rank,
+                "generation": generation,
+                "final_step": total_steps - 1,
+                "cum_tokens": cum_tokens,
+                "final_sha256": _model_sha256(model),
+            }
+        )
     )
     emit(event="finish", final_step=total_steps - 1, cum_tokens=cum_tokens)
     tele.close()

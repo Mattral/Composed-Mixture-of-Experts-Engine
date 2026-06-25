@@ -2,7 +2,7 @@
 
 **A fault-tolerant runtime for hyperscale Mixture-of-Experts training.**
 
-[![Tests](https://img.shields.io/badge/tests-235%20passing-brightgreen)](RESULTS.md)
+[![Tests](https://img.shields.io/badge/tests-260%20passing-brightgreen)](RESULTS.md)
 [![Chaos B](https://img.shields.io/badge/Chaos%20B-10%2F10%20✅-brightgreen)](RESULTS.md#fault-tolerance--chaos-test-results)
 [![T4 validated](https://img.shields.io/badge/T4%20GPU-validated%20June%202026-blue)](notebooks/moe_engine_v032_T4_validation.ipynb)
 [![Version](https://img.shields.io/badge/version-v0.3.2-orange)](roadmap.md)
@@ -301,7 +301,7 @@ Open in Colab with a T4 GPU to reproduce:
 **P0.2 — Testing & validation**
 - `test_config.py`: 34 new tests covering the full `MoEConfig` system
 - `@pytest.mark.cpu` on all 14 CPU test files; `@pytest.mark.gpu` registered
-- Total: **235 tests passing** (up from 201)
+- Total: **260 tests passing** (up from 201)
 - Every "illustrative" number in docs replaced with real T4 measurements
 
 **P0.3 — Developer experience**

@@ -21,20 +21,23 @@ import pytest
 import torch
 
 from pkg.kernels.moe_router import (
-
     MoERouter,
-    moe_topk_route,
     MoERouterFunction,
     _reference_route_fp64,
+    moe_topk_route,
 )
 
 pytestmark = pytest.mark.cpu
 
-@pytest.mark.parametrize("B,S,H,E,K", [
-    (2, 16, 64, 8, 2),
-    (1, 32, 128, 16, 1),
-    (4, 8, 64, 32, 4),
-])
+
+@pytest.mark.parametrize(
+    "B,S,H,E,K",
+    [
+        (2, 16, 64, 8, 2),
+        (1, 32, 128, 16, 1),
+        (4, 8, 64, 32, 4),
+    ],
+)
 def test_forward_tolerance(B, S, H, E, K):
     torch.manual_seed(0)
     tokens = torch.randn(B * S, H, dtype=torch.float64)
@@ -49,13 +52,20 @@ def test_forward_tolerance(B, S, H, E, K):
     assert torch.equal(idx.cpu(), ref_idx.cpu())
 
     assert torch.allclose(
-        w.double().cpu(), ref_w.double().cpu(), atol=1e-5, rtol=1e-5,
-    ), f"forward weight tolerance violated, max_diff={(w.double()-ref_w.double()).abs().max()}"
+        w.double().cpu(),
+        ref_w.double().cpu(),
+        atol=1e-5,
+        rtol=1e-5,
+    ), f"forward weight tolerance violated, max_diff={(w.double() - ref_w.double()).abs().max()}"
 
-@pytest.mark.parametrize("B,S,H,E,K", [
-    (2, 8, 32, 8, 2),
-    (1, 16, 64, 16, 2),
-])
+
+@pytest.mark.parametrize(
+    "B,S,H,E,K",
+    [
+        (2, 8, 32, 8, 2),
+        (1, 16, 64, 16, 2),
+    ],
+)
 def test_backward_tolerance(B, S, H, E, K):
     """Manual analytical backward vs torch.autograd through the reference path."""
     torch.manual_seed(7)
@@ -84,16 +94,26 @@ def test_backward_tolerance(B, S, H, E, K):
     (w * grad_w.float()).sum().backward()
 
     assert torch.allclose(
-        tokens2.grad.double(), ref_grad_tokens, atol=1e-5, rtol=1e-5,
-    ), f"grad_tokens diff {(tokens2.grad.double()-ref_grad_tokens).abs().max()}"
+        tokens2.grad.double(),
+        ref_grad_tokens,
+        atol=1e-5,
+        rtol=1e-5,
+    ), f"grad_tokens diff {(tokens2.grad.double() - ref_grad_tokens).abs().max()}"
     assert torch.allclose(
-        gate2.grad.double(), ref_grad_gate, atol=1e-5, rtol=1e-5,
-    ), f"grad_gate diff {(gate2.grad.double()-ref_grad_gate).abs().max()}"
+        gate2.grad.double(),
+        ref_grad_gate,
+        atol=1e-5,
+        rtol=1e-5,
+    ), f"grad_gate diff {(gate2.grad.double() - ref_grad_gate).abs().max()}"
 
-@pytest.mark.parametrize("B,S,H,E,K", [
-    (2, 32, 64, 8, 2),
-    (3, 16, 64, 32, 4),
-])
+
+@pytest.mark.parametrize(
+    "B,S,H,E,K",
+    [
+        (2, 32, 64, 8, 2),
+        (3, 16, 64, 32, 4),
+    ],
+)
 def test_token_conservation(B, S, H, E, K):
     """Every token is dispatched exactly K times; no drops, no duplicates."""
     torch.manual_seed(1)
@@ -112,6 +132,7 @@ def test_token_conservation(B, S, H, E, K):
     diffs = sorted_idx[:, 1:] - sorted_idx[:, :-1]
     assert (diffs > 0).all() if K > 1 else True, "duplicate expert assignment within a token"
 
+
 def test_combine_weights_sum_to_one():
     torch.manual_seed(2)
     tokens = torch.randn(64, 32)
@@ -119,6 +140,7 @@ def test_combine_weights_sum_to_one():
     _, w, _ = router(tokens)
     sums = w.sum(dim=-1)
     assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5)
+
 
 def test_router_profile_populated():
     torch.manual_seed(3)
@@ -129,6 +151,7 @@ def test_router_profile_populated():
     assert prof is not None
     assert prof.sram_bytes_per_block > 0
     assert prof.tokens_per_expert_mean > 0
+
 
 def test_triton_kernels_declare_k_as_constexpr():
     """Regression test (v0.3.2): both Triton kernels must declare ``K`` as
@@ -150,6 +173,7 @@ def test_triton_kernels_declare_k_as_constexpr():
     `test_tensor_parallel.py` guards the RowParallel collective bug.
     """
     import inspect
+
     from pkg.kernels.moe_router import TRITON_AVAILABLE
 
     if not TRITON_AVAILABLE:
@@ -166,6 +190,7 @@ def test_triton_kernels_declare_k_as_constexpr():
             f"found a plain 'K' argument, which breaks tl.static_range(0, K) "
             f"on every real GPU invocation (v0.3.2 regression)"
         )
+
 
 def test_triton_kernel_source_declares_k_as_constexpr():
     """Regression test (v0.3.2), Triton-independent variant.
@@ -204,4 +229,3 @@ def test_triton_kernel_source_declares_k_as_constexpr():
         "_router_bwd_kernel signature still declares K as a plain positional "
         "argument (the v0.3.2 bug pattern)"
     )
-

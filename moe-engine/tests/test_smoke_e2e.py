@@ -11,11 +11,11 @@ We assert that:
     object-store tier (one test uses `file://`, another uses an
     in-process moto-mocked S3 bucket via `boto3`).
 """
+
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 import tempfile
 import textwrap
@@ -29,10 +29,12 @@ pytestmark = pytest.mark.cpu
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+
 def _smoke_yaml(work_dir: Path, remote_uri: str) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
     cfg = work_dir / "smoke.yaml"
-    cfg.write_text(textwrap.dedent(f"""
+    cfg.write_text(
+        textwrap.dedent(f"""
         model:
           hidden_dim: 32
           num_layers: 2
@@ -77,8 +79,10 @@ def _smoke_yaml(work_dir: Path, remote_uri: str) -> Path:
           json_path: {work_dir}/logs/step.jsonl
           mfu_target: 0.55
           hardware_peak_tflops: 989.0
-    """).strip())
+    """).strip()
+    )
     return cfg
+
 
 def _run_train(cfg_path: Path) -> None:
     """Invoke train.main() in-process so we share any mock contexts."""
@@ -88,16 +92,28 @@ def _run_train(cfg_path: Path) -> None:
             del sys.modules[mod]
     sys.argv = ["train.py", "--config", str(cfg_path), "--max-steps", "2", "--smoke"]
     from train import main as train_main
+
     train_main()
 
+
 def _assert_telemetry_envelope(jsonl_path: Path) -> None:
-    lines = [l for l in jsonl_path.read_text().splitlines() if l.strip()]
+    lines = [line_ for line_ in jsonl_path.read_text().splitlines() if line_.strip()]
     assert len(lines) >= 2, f"expected >=2 telemetry lines, got {len(lines)}"
     for line in lines:
         rec = json.loads(line)
-        for k in ("step", "loss", "mfu", "tokens_per_sec",
-                  "kernel", "collective", "memory", "infra",
-                  "wall_clock_ms", "rank", "ts"):
+        for k in (
+            "step",
+            "loss",
+            "mfu",
+            "tokens_per_sec",
+            "kernel",
+            "collective",
+            "memory",
+            "infra",
+            "wall_clock_ms",
+            "rank",
+            "ts",
+        ):
             assert k in rec, f"missing key {k!r} in telemetry record"
         # Kernel block must report Triton/CPU-fallback usage.
         assert "used_triton" in rec["kernel"]
@@ -122,9 +138,8 @@ def _assert_telemetry_envelope(jsonl_path: Path) -> None:
             assert "expert_load_imbalance" in rec["routing"], (
                 "expert_load_imbalance missing from routing section"
             )
-            assert "router_z_loss" in rec["routing"], (
-                "router_z_loss missing from routing section"
-            )
+            assert "router_z_loss" in rec["routing"], "router_z_loss missing from routing section"
+
 
 def test_load_config_raw_is_plain_dict() -> None:
     """Regression test (v0.3.1): ``load_config(path).raw`` must be a plain
@@ -142,8 +157,8 @@ def test_load_config_raw_is_plain_dict() -> None:
     future change re-wraps ``cfg`` in a ``Config``-like object, this test
     will fail loudly instead of surfacing as a runtime crash in ``main()``.
     """
-    from pkg.utils.config import load_config
     from pkg.telemetry.logger import StructuredLogger
+    from pkg.utils.config import load_config
 
     with tempfile.TemporaryDirectory() as td:
         cfg_path = _smoke_yaml(Path(td) / "run", remote_uri=f"file://{td}/remote")
@@ -158,11 +173,14 @@ def test_load_config_raw_is_plain_dict() -> None:
         )
         # The actual call made in train.py — must not raise.
         logger = StructuredLogger(
-            json_path=str(Path(td) / "step.jsonl"), rank=0, also_stdout=False,
+            json_path=str(Path(td) / "step.jsonl"),
+            rank=0,
+            also_stdout=False,
             wandb_enabled=False,
         )
         logger.log_config(cfg)  # must not raise AttributeError
         logger.close()
+
 
 def test_smoke_local_file_tier(tmp_path: Path) -> None:
     work = tmp_path / "run"
@@ -178,8 +196,9 @@ def test_smoke_local_file_tier(tmp_path: Path) -> None:
         assert any(f.endswith(".pt") for f in files), f"no .pt in {tier}"
         assert any(f.endswith(".meta.json") for f in files), f"no meta in {tier}"
 
+
 def test_smoke_s3_tier_with_moto(tmp_path: Path) -> None:
-    moto = pytest.importorskip("moto")
+    # moto imported for side-effects
     import boto3
     from moto import mock_aws
 
@@ -199,7 +218,6 @@ def test_smoke_s3_tier_with_moto(tmp_path: Path) -> None:
         resp = s3.list_objects_v2(Bucket=bucket)
         keys = [obj["Key"] for obj in resp.get("Contents", [])]
         assert any(k.endswith(".pt") for k in keys), f"no .pt in mocked S3: {keys}"
-        assert any(k.endswith(".meta.json") for k in keys), \
-            f"no meta.json in mocked S3: {keys}"
+        assert any(k.endswith(".meta.json") for k in keys), f"no meta.json in mocked S3: {keys}"
 
     _assert_telemetry_envelope(work / "logs" / "step.jsonl")
