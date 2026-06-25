@@ -1,0 +1,87 @@
+# .pre-commit-config.yaml
+# ========================
+# Pre-commit hooks for moe-engine.
+#
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+# Skip a hook: SKIP=mypy git commit ...
+#
+# These hooks run on staged files before every commit.
+# They match what CI checks so there are no surprises.
+
+repos:
+  # ---------------------------------------------------------------------------
+  # 1. Basic file hygiene
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: "^moe-engine/benchmarks/charts/"
+      - id: end-of-file-fixer
+        exclude: "^moe-engine/benchmarks/charts/"
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-json
+        exclude: "^moe-engine/notebooks/"   # ipynb are JSON but not simple
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=1024]   # block files > 1 MB (e.g. accidental .pt uploads)
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: debug-statements   # catch stray pdb / breakpoint() calls
+
+  # ---------------------------------------------------------------------------
+  # 2. Python formatting — ruff format (replaces black)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.4.7
+    hooks:
+      - id: ruff-format
+        args: [--line-length=100]
+        files: ^moe-engine/(pkg|tests|benchmarks|scripts|train\.py)
+      - id: ruff
+        args:
+          - --fix
+          - --line-length=100
+          - --select=E,F,W,I,UP,B,C4
+          - --ignore=E501,B008,UP007
+        files: ^moe-engine/(pkg|tests|benchmarks|scripts|train\.py)
+
+  # ---------------------------------------------------------------------------
+  # 3. Type checking — mypy (non-blocking on pre-commit; blocking in CI)
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v1.10.0
+    hooks:
+      - id: mypy
+        name: mypy (non-blocking)
+        args:
+          - --ignore-missing-imports
+          - --no-error-summary
+          - --follow-imports=silent
+        files: ^moe-engine/pkg/
+        additional_dependencies:
+          - pydantic>=2.0
+          - types-PyYAML
+        verbose: false
+
+  # ---------------------------------------------------------------------------
+  # 4. Jupyter notebook hygiene
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/nbQA-dev/nbQA
+    rev: 1.8.5
+    hooks:
+      - id: nbqa-ruff
+        args: [--line-length=100, --ignore=E501,F401]
+        files: ^moe-engine/notebooks/
+
+  # ---------------------------------------------------------------------------
+  # 5. Secrets detection — never commit API keys or tokens
+  # ---------------------------------------------------------------------------
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: [--baseline, .secrets.baseline]
+        exclude: "(package-lock\\.json|poetry\\.lock|\\.ipynb$)"

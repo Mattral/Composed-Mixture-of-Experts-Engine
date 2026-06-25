@@ -215,8 +215,15 @@ class RowParallelLinear(nn.Module):
         return local_out
 
 
-# ===========================================================================
-# Sequence Parallelism utilities  (v0.3: fused all-gather path)
+# ---------------------------------------------------------------------------
+# Sequence Parallelism — re-exported from pkg.distributed.sequence_parallel
+# (v0.3.2: SP extracted into its own module; kept here for backward compat)
+# ---------------------------------------------------------------------------
+from pkg.distributed.sequence_parallel import (  # noqa: E402, F401
+    scatter_to_sequence_parallel,
+    gather_from_sequence_parallel,
+)
+
 # ===========================================================================
 
 def scatter_to_sequence_parallel(
