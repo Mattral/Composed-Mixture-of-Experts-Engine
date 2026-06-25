@@ -38,6 +38,12 @@ dev = [
     "pytest-timeout>=2.3.0",
     "pytest-repeat>=0.9.3",
     "moto>=5.0.0",
+    "hypothesis>=6.100.0",
+    "typer>=0.12.0",
+    "ruff>=0.4.0",
+    "mypy>=1.10.0",
+    "types-PyYAML>=6.0.0",
+    "pre-commit>=3.7.0",
 ]
 monitoring = [
     "prometheus-client>=0.20.0",
@@ -47,7 +53,7 @@ all = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/your-org/moe-engine"
+Homepage = "https://github.com/Mattral/Composed-Mixture-of-Experts-Engine"
 Repository = "https://github.com/your-org/moe-engine"
 Documentation = "https://github.com/your-org/moe-engine/tree/main/docs"
 "Bug Tracker" = "https://github.com/your-org/moe-engine/issues"

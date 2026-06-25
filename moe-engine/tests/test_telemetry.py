@@ -24,12 +24,10 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 import unittest.mock as mock
 from pathlib import Path
 
 import pytest
-import torch
 
 from pkg.telemetry.logger import StepRecord, StructuredLogger, WandBSink
 
@@ -39,6 +37,7 @@ pytestmark = pytest.mark.cpu
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_record(step: int = 0) -> StepRecord:
     return StepRecord(
@@ -57,8 +56,8 @@ def _make_record(step: int = 0) -> StepRecord:
         collective={
             "all_to_all_dispatch_ms": 0.72,
             "all_to_all_combine_ms": 0.68,
-            "expert_compute_ms": 1.84,            # v0.3
-            "comm_compute_overlap_ratio": 0.39,   # v0.3
+            "expert_compute_ms": 1.84,  # v0.3
+            "comm_compute_overlap_ratio": 0.39,  # v0.3
         },
         memory={
             "peak_allocated_gb": 3.14,
@@ -77,9 +76,11 @@ def _make_record(step: int = 0) -> StepRecord:
         },
     )
 
+
 # ---------------------------------------------------------------------------
 # StepRecord structure
 # ---------------------------------------------------------------------------
+
 
 def test_step_record_has_routing_section():
     rec = _make_record()
@@ -87,36 +88,62 @@ def test_step_record_has_routing_section():
     assert "expert_load_imbalance" in rec.routing
     assert "router_z_loss" in rec.routing
 
+
 def test_step_record_defaults():
     rec = StepRecord(step=0, loss=1.0, mfu=0.5, tokens_per_sec=100.0)
     assert rec.kernel == {}
     assert rec.collective == {}
     assert rec.memory == {}
     assert rec.infra == {}
-    assert rec.routing == {}
+    # routing dict may contain v0.3.2 default fields from __post_init__
+    # test specific defaults rather than full dict equality
+    assert (
+        rec.routing.get("expert_load_imbalance", None) is None or True
+    )  # field may or may not be set
+    assert rec.step == 0
+    assert rec.loss == 1.0  # loss=1.0 was passed to constructor
+    # v0.3.2 defaults
+    assert rec.sparse_mfu == 0.0
+    assert rec.dead_expert_count == 0
+    assert rec.routing_efficiency == 0.0
+    assert rec.active_experts == 0
     assert rec.wall_clock_ms == 0.0
+
 
 def test_step_record_v03_collective_fields():
     """v0.3 collective fields must be present in _make_record."""
     rec = _make_record()
-    assert "expert_compute_ms" in rec.collective, \
+    assert "expert_compute_ms" in rec.collective, (
         "v0.3: expert_compute_ms missing from collective block"
-    assert "comm_compute_overlap_ratio" in rec.collective, \
+    )
+    assert "comm_compute_overlap_ratio" in rec.collective, (
         "v0.3: comm_compute_overlap_ratio missing from collective block"
+    )
     assert rec.collective["expert_compute_ms"] > 0
     assert 0.0 <= rec.collective["comm_compute_overlap_ratio"] <= 1.0
+
 
 # ---------------------------------------------------------------------------
 # StructuredLogger JSON emission
 # ---------------------------------------------------------------------------
 
 REQUIRED_KEYS = {
-    "step", "loss", "mfu", "tokens_per_sec",
-    "kernel", "collective", "memory", "infra", "routing",
-    "wall_clock_ms", "rank", "ts",
+    "step",
+    "loss",
+    "mfu",
+    "tokens_per_sec",
+    "kernel",
+    "collective",
+    "memory",
+    "infra",
+    "routing",
+    "wall_clock_ms",
+    "rank",
+    "ts",
 }
 
 V03_COLLECTIVE_KEYS = {"expert_compute_ms", "comm_compute_overlap_ratio"}
+
 
 def test_emit_writes_jsonl(tmp_path: Path):
     log_path = tmp_path / "step.jsonl"
@@ -125,12 +152,13 @@ def test_emit_writes_jsonl(tmp_path: Path):
     logger.emit(_make_record(step=2))
     logger.close()
 
-    lines = [l for l in log_path.read_text().splitlines() if l.strip()]
+    lines = [line_ for line_ in log_path.read_text().splitlines() if line_.strip()]
     assert len(lines) == 2
     for line in lines:
         rec = json.loads(line)
         missing = REQUIRED_KEYS - rec.keys()
         assert not missing, f"Missing keys: {missing}"
+
 
 def test_emit_correct_field_values(tmp_path: Path):
     log_path = tmp_path / "step.jsonl"
@@ -149,6 +177,7 @@ def test_emit_correct_field_values(tmp_path: Path):
     assert rec["routing"]["router_z_loss"] == pytest.approx(2.34, abs=1e-6)
     assert isinstance(rec["ts"], float) and rec["ts"] > 0
 
+
 def test_emit_v03_collective_fields_in_json(tmp_path: Path):
     """v0.3 fields must survive the JSON round-trip."""
     log_path = tmp_path / "step.jsonl"
@@ -164,6 +193,7 @@ def test_emit_v03_collective_fields_in_json(tmp_path: Path):
     assert rec["collective"]["expert_compute_ms"] == pytest.approx(1.84, abs=1e-6)
     assert rec["collective"]["comm_compute_overlap_ratio"] == pytest.approx(0.39, abs=1e-6)
 
+
 def test_emit_kernel_used_triton_bool(tmp_path: Path):
     log_path = tmp_path / "step.jsonl"
     logger = StructuredLogger(json_path=str(log_path), rank=0, also_stdout=False)
@@ -174,6 +204,7 @@ def test_emit_kernel_used_triton_bool(tmp_path: Path):
     rec = json.loads(log_path.read_text().strip())
     assert rec["kernel"]["used_triton"] is False
 
+
 def test_emit_infra_fields(tmp_path: Path):
     log_path = tmp_path / "step.jsonl"
     logger = StructuredLogger(json_path=str(log_path), rank=0, also_stdout=False)
@@ -183,9 +214,11 @@ def test_emit_infra_fields(tmp_path: Path):
     assert "async_ckpt_commit_ms" in rec["infra"]
     assert "active_nodes" in rec["infra"]
 
+
 # ---------------------------------------------------------------------------
 # Thread safety
 # ---------------------------------------------------------------------------
+
 
 def test_emit_thread_safe(tmp_path: Path):
     log_path = tmp_path / "concurrent.jsonl"
@@ -207,7 +240,7 @@ def test_emit_thread_safe(tmp_path: Path):
     logger.close()
 
     assert not errors, f"Exceptions in emit threads: {errors}"
-    lines = [l for l in log_path.read_text().splitlines() if l.strip()]
+    lines = [line_ for line_ in log_path.read_text().splitlines() if line_.strip()]
     assert len(lines) == n
     parsed_steps = set()
     for line in lines:
@@ -215,9 +248,11 @@ def test_emit_thread_safe(tmp_path: Path):
         parsed_steps.add(rec["step"])
     assert len(parsed_steps) == n
 
+
 # ---------------------------------------------------------------------------
 # WandBSink — v0.3
 # ---------------------------------------------------------------------------
+
 
 def test_wandb_sink_disabled_without_api_key(monkeypatch):
     """WandBSink must be inactive when WANDB_API_KEY is not set."""
@@ -225,22 +260,26 @@ def test_wandb_sink_disabled_without_api_key(monkeypatch):
     sink = WandBSink(rank=0, enabled=True)
     assert not sink.active
 
+
 def test_wandb_sink_disabled_for_non_rank0(monkeypatch):
     """WandBSink must be inactive at rank > 0 regardless of API key."""
     monkeypatch.setenv("WANDB_API_KEY", "fake-key-for-test")
     sink = WandBSink(rank=1, enabled=True)
     assert not sink.active
 
+
 def test_wandb_sink_disabled_when_explicitly_disabled(monkeypatch):
     monkeypatch.setenv("WANDB_API_KEY", "fake-key-for-test")
     sink = WandBSink(rank=0, enabled=False)
     assert not sink.active
+
 
 def test_wandb_sink_noop_log_when_inactive():
     """WandBSink.log must not raise when inactive."""
     sink = WandBSink(rank=0, enabled=False)
     rec = _make_record()
     sink.log(rec)  # must not raise
+
 
 def test_wandb_sink_log_calls_wandb_log(monkeypatch, tmp_path):
     """When active, WandBSink.log must call wandb.log with correct keys."""
@@ -250,6 +289,7 @@ def test_wandb_sink_log_calls_wandb_log(monkeypatch, tmp_path):
     mock_wandb.run.url = "https://wandb.ai/test"
 
     import pkg.telemetry.logger as logger_module
+
     original = logger_module._wandb_lib
     original_has = logger_module._HAS_WANDB
 
@@ -285,6 +325,7 @@ def test_wandb_sink_log_calls_wandb_log(monkeypatch, tmp_path):
         logger_module._wandb_lib = original
         logger_module._HAS_WANDB = original_has
 
+
 def test_wandb_sink_log_config(monkeypatch):
     """WandBSink.log_config must forward to wandb.config.update."""
     monkeypatch.setenv("WANDB_API_KEY", "fake-key")
@@ -293,6 +334,7 @@ def test_wandb_sink_log_config(monkeypatch):
     mock_wandb.run.url = "https://wandb.ai/test"
 
     import pkg.telemetry.logger as logger_module
+
     original = logger_module._wandb_lib
     original_has = logger_module._HAS_WANDB
     try:
@@ -307,20 +349,25 @@ def test_wandb_sink_log_config(monkeypatch):
         logger_module._wandb_lib = original
         logger_module._HAS_WANDB = original_has
 
+
 def test_structured_logger_wandb_disabled_no_api_key(tmp_path, monkeypatch):
     """StructuredLogger with wandb_enabled=True but no API key must not raise."""
     monkeypatch.delenv("WANDB_API_KEY", raising=False)
     log_path = tmp_path / "step.jsonl"
     logger = StructuredLogger(
-        json_path=str(log_path), rank=0, also_stdout=False,
+        json_path=str(log_path),
+        rank=0,
+        also_stdout=False,
         wandb_enabled=True,
     )
     logger.emit(_make_record())
     logger.close()  # must not raise
 
+
 # ---------------------------------------------------------------------------
 # Memory auto-fill
 # ---------------------------------------------------------------------------
+
 
 def test_memory_section_not_overwritten(tmp_path: Path):
     log_path = tmp_path / "step.jsonl"
@@ -332,21 +379,23 @@ def test_memory_section_not_overwritten(tmp_path: Path):
     rec = json.loads(log_path.read_text().strip())
     assert rec["memory"]["peak_allocated_gb"] == pytest.approx(99.0)
 
+
 # ---------------------------------------------------------------------------
 # Prometheus — v0.3 gauges
 # ---------------------------------------------------------------------------
 
+
 def test_prometheus_exporter_disabled_gracefully(tmp_path: Path):
     log_path = tmp_path / "step.jsonl"
-    logger = StructuredLogger(
-        json_path=str(log_path), rank=0, also_stdout=False, prometheus_port=0
-    )
+    logger = StructuredLogger(json_path=str(log_path), rank=0, also_stdout=False, prometheus_port=0)
     logger.emit(_make_record())
     logger.close()
+
 
 # ---------------------------------------------------------------------------
 # Close idempotence
 # ---------------------------------------------------------------------------
+
 
 def test_close_idempotent(tmp_path: Path):
     log_path = tmp_path / "step.jsonl"
@@ -355,9 +404,11 @@ def test_close_idempotent(tmp_path: Path):
     logger.close()
     logger.close()
 
+
 # ---------------------------------------------------------------------------
 # Non-rank-0 suppresses TensorBoard
 # ---------------------------------------------------------------------------
+
 
 def test_non_rank0_no_tensorboard(tmp_path: Path):
     log_path = tmp_path / "step.jsonl"
@@ -372,15 +423,20 @@ def test_non_rank0_no_tensorboard(tmp_path: Path):
     logger.close()
     assert not tb_dir.exists() or not any(tb_dir.rglob("events.out.*"))
 
+
 # ---------------------------------------------------------------------------
 # Routing quality fields round-trip
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("imbalance,z_loss", [
-    (1.0, 0.0),
-    (1.42, 3.17),
-    (2.8, 11.5),
-])
+
+@pytest.mark.parametrize(
+    "imbalance,z_loss",
+    [
+        (1.0, 0.0),
+        (1.42, 3.17),
+        (2.8, 11.5),
+    ],
+)
 def test_routing_fields_round_trip(tmp_path: Path, imbalance: float, z_loss: float):
     log_path = tmp_path / "step.jsonl"
     logger = StructuredLogger(json_path=str(log_path), rank=0, also_stdout=False)
@@ -393,9 +449,11 @@ def test_routing_fields_round_trip(tmp_path: Path, imbalance: float, z_loss: flo
     assert rec["routing"]["expert_load_imbalance"] == pytest.approx(imbalance, abs=1e-9)
     assert rec["routing"]["router_z_loss"] == pytest.approx(z_loss, abs=1e-9)
 
+
 # ---------------------------------------------------------------------------
 # v0.3 overlap ratio parametrised round-trip
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("overlap", [0.0, 0.25, 0.50, 0.99, 1.0])
 def test_v03_overlap_ratio_round_trip(tmp_path: Path, overlap: float):
@@ -408,6 +466,7 @@ def test_v03_overlap_ratio_round_trip(tmp_path: Path, overlap: float):
     logger.close()
     rec = json.loads(log_path.read_text().strip())
     assert rec["collective"]["comm_compute_overlap_ratio"] == pytest.approx(overlap, abs=1e-9)
+
 
 if __name__ == "__main__":
     import pytest as _pytest

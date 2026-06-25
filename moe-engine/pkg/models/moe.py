@@ -25,7 +25,7 @@ Public API
 
 from __future__ import annotations
 
-from typing import Any, Dict, Union
+from typing import Dict
 
 import torch
 import torch.nn as nn
@@ -40,10 +40,13 @@ __all__ = [
     "ToyMoEModel",
 ]
 
+
 # Registry import (lazy - avoids circular import at module level)
 def _get_register_model():
     from pkg.models.registry import register_model
+
     return register_model
+
 
 _DTYPE_MAP: Dict[str, torch.dtype] = {
     "float32": torch.float32,
@@ -55,6 +58,7 @@ _DTYPE_MAP: Dict[str, torch.dtype] = {
 # ===========================================================================
 # Building blocks
 # ===========================================================================
+
 
 class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalisation.
@@ -148,18 +152,20 @@ class ToyMoEModel(nn.Module):
         H = m.hidden_dim
 
         self.embed = nn.Embedding(m.vocab_size, H, dtype=dtype)
-        self.blocks = nn.ModuleList([
-            ToyMoEBlock(
-                hidden_dim=H,
-                ffn_dim=m.ffn_dim,
-                num_experts=m.num_experts,
-                top_k=m.top_k,
-                topology=topology,
-                capacity_factor=m.capacity_factor,
-                dtype=dtype,
-            )
-            for _ in range(m.num_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                ToyMoEBlock(
+                    hidden_dim=H,
+                    ffn_dim=m.ffn_dim,
+                    num_experts=m.num_experts,
+                    top_k=m.top_k,
+                    topology=topology,
+                    capacity_factor=m.capacity_factor,
+                    dtype=dtype,
+                )
+                for _ in range(m.num_layers)
+            ]
+        )
         self.norm = RMSNorm(H)
         self.lm_head = nn.Linear(H, m.vocab_size, bias=False, dtype=dtype)
 
@@ -192,20 +198,11 @@ class ToyMoEModel(nn.Module):
             other          — norms and any remaining parameters
         """
         total = sum(p.numel() for p in self.parameters())
-        embed = (
-            sum(p.numel() for p in self.embed.parameters())
-            + sum(p.numel() for p in self.lm_head.parameters())
+        embed = sum(p.numel() for p in self.embed.parameters()) + sum(
+            p.numel() for p in self.lm_head.parameters()
         )
-        router = sum(
-            p.numel()
-            for blk in self.blocks
-            for p in blk.moe.router.parameters()
-        )
-        experts = sum(
-            p.numel()
-            for blk in self.blocks
-            for p in blk.moe.experts.parameters()
-        )
+        router = sum(p.numel() for blk in self.blocks for p in blk.moe.router.parameters())
+        experts = sum(p.numel() for blk in self.blocks for p in blk.moe.experts.parameters())
         return {
             "total": total,
             "embed": embed,
@@ -218,6 +215,7 @@ class ToyMoEModel(nn.Module):
 # ---------------------------------------------------------------------------
 # Factory helper
 # ---------------------------------------------------------------------------
+
 
 def build_model(cfg: MoEConfig, topology: ParallelTopology) -> ToyMoEModel:
     """Construct and move :class:`ToyMoEModel` to the topology's device.

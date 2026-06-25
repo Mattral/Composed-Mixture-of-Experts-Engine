@@ -57,7 +57,6 @@ value, the same way it already does per ``BLOCK_E``.
 from __future__ import annotations
 
 import math
-import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -69,12 +68,13 @@ import torch
 # are both available.
 # --------------------------------------------------------------------------
 try:
-    import triton                       # type: ignore
-    import triton.language as tl        # type: ignore
+    import triton  # type: ignore
+    import triton.language as tl  # type: ignore
+
     TRITON_AVAILABLE = True
-except Exception:                       # pragma: no cover - import-time guard
-    triton = None                       # type: ignore
-    tl = None                           # type: ignore
+except Exception:  # pragma: no cover - import-time guard
+    triton = None  # type: ignore
+    tl = None  # type: ignore
     TRITON_AVAILABLE = False
 
 
@@ -90,8 +90,8 @@ class RouterProfile:
     tokens_per_expert_mean: float
     tokens_per_expert_std: float
     # v0.2 additions — routing quality metrics
-    expert_load_imbalance: float        # max_load / mean_load; 1.0 = perfect
-    router_z_loss: float                # auxiliary z-loss magnitude (log-sum-exp)
+    expert_load_imbalance: float  # max_load / mean_load; 1.0 = perfect
+    router_z_loss: float  # auxiliary z-loss magnitude (log-sum-exp)
 
 
 # ==========================================================================
@@ -101,13 +101,24 @@ if TRITON_AVAILABLE:
 
     @triton.jit
     def _router_fwd_kernel(
-        tokens_ptr, gate_w_ptr, topk_idx_ptr, topk_w_ptr, logits_ptr,
-        stride_tn, stride_th,
-        stride_gh, stride_ge,
-        stride_in, stride_ik,
-        stride_wn, stride_wk,
-        stride_ln, stride_le,
-        N, H, E,
+        tokens_ptr,
+        gate_w_ptr,
+        topk_idx_ptr,
+        topk_w_ptr,
+        logits_ptr,
+        stride_tn,
+        stride_th,
+        stride_gh,
+        stride_ge,
+        stride_in,
+        stride_ik,
+        stride_wn,
+        stride_wk,
+        stride_ln,
+        stride_le,
+        N,
+        H,
+        E,
         K: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_H: tl.constexpr,
@@ -126,18 +137,21 @@ if TRITON_AVAILABLE:
             mask_h = offs_h < H
             tok_tile = tl.load(
                 tokens_ptr + offs_n[:, None] * stride_tn + offs_h[None, :] * stride_th,
-                mask=mask_n[:, None] & mask_h[None, :], other=0.0,
+                mask=mask_n[:, None] & mask_h[None, :],
+                other=0.0,
             ).to(tl.float32)
             gate_tile = tl.load(
                 gate_w_ptr + offs_h[:, None] * stride_gh + offs_e[None, :] * stride_ge,
-                mask=mask_h[:, None] & mask_e[None, :], other=0.0,
+                mask=mask_h[:, None] & mask_e[None, :],
+                other=0.0,
             ).to(tl.float32)
             acc += tl.dot(tok_tile, gate_tile, allow_tf32=False)
 
         logits = tl.where(mask_e[None, :], acc, float("-inf"))
         tl.store(
             logits_ptr + offs_n[:, None] * stride_ln + offs_e[None, :] * stride_le,
-            logits, mask=mask_n[:, None] & mask_e[None, :],
+            logits,
+            mask=mask_n[:, None] & mask_e[None, :],
         )
 
         row_max = tl.max(logits, axis=1)
@@ -163,12 +177,20 @@ if TRITON_AVAILABLE:
 
     @triton.jit
     def _router_bwd_kernel(
-        grad_w_ptr, topk_idx_ptr, logits_ptr, grad_logits_ptr,
-        stride_gn, stride_gk,
-        stride_in, stride_ik,
-        stride_ln, stride_le,
-        stride_dn, stride_de,
-        N, E,
+        grad_w_ptr,
+        topk_idx_ptr,
+        logits_ptr,
+        grad_logits_ptr,
+        stride_gn,
+        stride_gk,
+        stride_in,
+        stride_ik,
+        stride_ln,
+        stride_le,
+        stride_dn,
+        stride_de,
+        N,
+        E,
         K: tl.constexpr,
         BLOCK_N: tl.constexpr,
         BLOCK_E: tl.constexpr,
@@ -186,7 +208,8 @@ if TRITON_AVAILABLE:
 
         logits = tl.load(
             logits_ptr + offs_n[:, None] * stride_ln + offs_e[None, :] * stride_le,
-            mask=mask_n[:, None] & mask_e[None, :], other=float("-inf"),
+            mask=mask_n[:, None] & mask_e[None, :],
+            other=float("-inf"),
         )
         row_max = tl.max(logits, axis=1)
         exp_l = tl.exp(logits - row_max[:, None])
@@ -197,10 +220,10 @@ if TRITON_AVAILABLE:
         S = tl.zeros((BLOCK_N,), dtype=tl.float32)
         gwv = tl.zeros((BLOCK_N,), dtype=tl.float32)
         for k in tl.static_range(0, K):
-            idx_k = tl.load(topk_idx_ptr + offs_n * stride_in + k * stride_ik,
-                            mask=mask_n, other=0).to(tl.int32)
-            gw_k = tl.load(grad_w_ptr + offs_n * stride_gn + k * stride_gk,
-                           mask=mask_n, other=0.0)
+            idx_k = tl.load(
+                topk_idx_ptr + offs_n * stride_in + k * stride_ik, mask=mask_n, other=0
+            ).to(tl.int32)
+            gw_k = tl.load(grad_w_ptr + offs_n * stride_gn + k * stride_gk, mask=mask_n, other=0.0)
             onehot = (tl.arange(0, BLOCK_E)[None, :] == idx_k[:, None]).to(tl.float32)
             v_k = tl.sum(probs * onehot, axis=1)
             S += v_k
@@ -211,10 +234,10 @@ if TRITON_AVAILABLE:
 
         grad_p = tl.zeros((BLOCK_N, BLOCK_E), dtype=tl.float32)
         for k in tl.static_range(0, K):
-            idx_k = tl.load(topk_idx_ptr + offs_n * stride_in + k * stride_ik,
-                            mask=mask_n, other=0).to(tl.int32)
-            gw_k = tl.load(grad_w_ptr + offs_n * stride_gn + k * stride_gk,
-                           mask=mask_n, other=0.0)
+            idx_k = tl.load(
+                topk_idx_ptr + offs_n * stride_in + k * stride_ik, mask=mask_n, other=0
+            ).to(tl.int32)
+            gw_k = tl.load(grad_w_ptr + offs_n * stride_gn + k * stride_gk, mask=mask_n, other=0.0)
             grad_v_k = gw_k * inv_S - gwv * inv_S2
             onehot = (tl.arange(0, BLOCK_E)[None, :] == idx_k[:, None]).to(tl.float32)
             grad_p += onehot * grad_v_k[:, None]
@@ -223,7 +246,8 @@ if TRITON_AVAILABLE:
         grad_l = probs * (grad_p - dot[:, None])
         tl.store(
             grad_logits_ptr + offs_n[:, None] * stride_dn + offs_e[None, :] * stride_de,
-            grad_l, mask=mask_n[:, None] & mask_e[None, :],
+            grad_l,
+            mask=mask_n[:, None] & mask_e[None, :],
         )
 
 
@@ -274,7 +298,7 @@ def _triton_forward(
     tokens: torch.Tensor,
     gate_w: torch.Tensor,
     k: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float, int, float]:   # pragma: no cover
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, float, int, float]:  # pragma: no cover
     N, H = tokens.shape
     E = gate_w.shape[1]
     BLOCK_N = 64
@@ -291,38 +315,76 @@ def _triton_forward(
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         _router_fwd_kernel[grid](
-            tokens.contiguous(), gate_w.contiguous(), topk_idx, topk_w, logits,
-            tokens.stride(0), tokens.stride(1),
-            gate_w.stride(0), gate_w.stride(1),
-            topk_idx.stride(0), topk_idx.stride(1),
-            topk_w.stride(0), topk_w.stride(1),
-            logits.stride(0), logits.stride(1),
-            N, H, E, K=k, BLOCK_N=BLOCK_N, BLOCK_H=BLOCK_H, BLOCK_E=BLOCK_E,
+            tokens.contiguous(),
+            gate_w.contiguous(),
+            topk_idx,
+            topk_w,
+            logits,
+            tokens.stride(0),
+            tokens.stride(1),
+            gate_w.stride(0),
+            gate_w.stride(1),
+            topk_idx.stride(0),
+            topk_idx.stride(1),
+            topk_w.stride(0),
+            topk_w.stride(1),
+            logits.stride(0),
+            logits.stride(1),
+            N,
+            H,
+            E,
+            K=k,
+            BLOCK_N=BLOCK_N,
+            BLOCK_H=BLOCK_H,
+            BLOCK_E=BLOCK_E,
         )
-        end.record(); end.synchronize()
+        end.record()
+        end.synchronize()
         kernel_ms = max(end.elapsed_time(start), 0.0)
     else:
         _router_fwd_kernel[grid](
-            tokens.contiguous(), gate_w.contiguous(), topk_idx, topk_w, logits,
-            tokens.stride(0), tokens.stride(1),
-            gate_w.stride(0), gate_w.stride(1),
-            topk_idx.stride(0), topk_idx.stride(1),
-            topk_w.stride(0), topk_w.stride(1),
-            logits.stride(0), logits.stride(1),
-            N, H, E, K=k, BLOCK_N=BLOCK_N, BLOCK_H=BLOCK_H, BLOCK_E=BLOCK_E,
+            tokens.contiguous(),
+            gate_w.contiguous(),
+            topk_idx,
+            topk_w,
+            logits,
+            tokens.stride(0),
+            tokens.stride(1),
+            gate_w.stride(0),
+            gate_w.stride(1),
+            topk_idx.stride(0),
+            topk_idx.stride(1),
+            topk_w.stride(0),
+            topk_w.stride(1),
+            logits.stride(0),
+            logits.stride(1),
+            N,
+            H,
+            E,
+            K=k,
+            BLOCK_N=BLOCK_N,
+            BLOCK_H=BLOCK_H,
+            BLOCK_E=BLOCK_E,
         )
         kernel_ms = 0.0
 
     dtype_size = tokens.element_size()
     bytes_moved = (
-        tokens.numel() * dtype_size + gate_w.numel() * dtype_size
-        + logits.numel() * 4 + topk_idx.numel() * 4 + topk_w.numel() * 4
+        tokens.numel() * dtype_size
+        + gate_w.numel() * dtype_size
+        + logits.numel() * 4
+        + topk_idx.numel() * 4
+        + topk_w.numel() * 4
     )
     achieved_bw = (bytes_moved / 1e9) / max(kernel_ms / 1e3, 1e-9)
     sram_bytes = BLOCK_N * BLOCK_E * dtype_size * 3
     return (
-        topk_idx.to(torch.long), topk_w.to(tokens.dtype),
-        logits.to(tokens.dtype), kernel_ms, sram_bytes, achieved_bw,
+        topk_idx.to(torch.long),
+        topk_w.to(tokens.dtype),
+        logits.to(tokens.dtype),
+        kernel_ms,
+        sram_bytes,
+        achieved_bw,
     )
 
 
@@ -334,7 +396,6 @@ def _next_pow2(x: int) -> int:
 # Autograd Function
 # ==========================================================================
 class MoERouterFunction(torch.autograd.Function):
-
     @staticmethod
     def forward(ctx, tokens, gate_w, k, force_reference=False):
         assert tokens.dim() == 2
@@ -345,15 +406,17 @@ class MoERouterFunction(torch.autograd.Function):
         assert 1 <= k <= E
 
         use_triton = (
-            (not force_reference) and TRITON_AVAILABLE
-            and tokens.is_cuda and gate_w.is_cuda
+            (not force_reference) and TRITON_AVAILABLE and tokens.is_cuda and gate_w.is_cuda
         )
 
-        if use_triton:                                                   # pragma: no cover
-            topk_idx, topk_w, logits, kernel_ms, sram_bytes, achieved_bw = \
-                _triton_forward(tokens, gate_w, k)
+        if use_triton:  # pragma: no cover
+            topk_idx, topk_w, logits, kernel_ms, sram_bytes, achieved_bw = _triton_forward(
+                tokens, gate_w, k
+            )
         else:
-            kernel_ms = 0.0; sram_bytes = 0; achieved_bw = 0.0
+            kernel_ms = 0.0  # noqa: F841 (placeholder; CPU path doesn't report kernel timing here)
+            sram_bytes = 0  # noqa: F841
+            achieved_bw = 0.0  # noqa: F841
             topk_idx, topk_w, logits = _reference_route_fp64(tokens, gate_w, k)
 
         assert topk_idx.shape == (N, k)
@@ -371,7 +434,7 @@ class MoERouterFunction(torch.autograd.Function):
         N, H = tokens.shape
         E = gate_w.shape[1]
 
-        if ctx.use_triton:                                               # pragma: no cover
+        if ctx.use_triton:  # pragma: no cover
             grad_logits = torch.empty_like(logits, dtype=torch.float32)
             BLOCK_N = 64
             BLOCK_E = _next_pow2(E)
@@ -381,16 +444,28 @@ class MoERouterFunction(torch.autograd.Function):
                 topk_idx.contiguous().to(torch.int32),
                 logits.contiguous().to(torch.float32),
                 grad_logits,
-                grad_w.stride(0), grad_w.stride(1),
-                topk_idx.stride(0), topk_idx.stride(1),
-                logits.stride(0), logits.stride(1),
-                grad_logits.stride(0), grad_logits.stride(1),
-                N, E, K=k, BLOCK_N=BLOCK_N, BLOCK_E=BLOCK_E,
+                grad_w.stride(0),
+                grad_w.stride(1),
+                topk_idx.stride(0),
+                topk_idx.stride(1),
+                logits.stride(0),
+                logits.stride(1),
+                grad_logits.stride(0),
+                grad_logits.stride(1),
+                N,
+                E,
+                K=k,
+                BLOCK_N=BLOCK_N,
+                BLOCK_E=BLOCK_E,
             )
             grad_logits = grad_logits.to(tokens.dtype)
         else:
             grad_logits = _reference_backward_fp64(
-                logits.detach(), topk_idx, grad_w, k, E,
+                logits.detach(),
+                topk_idx,
+                grad_w,
+                k,
+                E,
             ).to(tokens.dtype)
 
         grad_tokens = grad_logits @ gate_w.t()
@@ -453,8 +528,8 @@ def _compute_router_z_loss(logits: torch.Tensor) -> float:
     Typically used as an auxiliary loss term (weight ~1e-3).
     """
     # logits: [N, E]
-    log_sum_exp = torch.logsumexp(logits.float(), dim=-1)   # [N]
-    return float((log_sum_exp ** 2).mean().item())
+    log_sum_exp = torch.logsumexp(logits.float(), dim=-1)  # [N]
+    return float((log_sum_exp**2).mean().item())
 
 
 # ==========================================================================
@@ -489,13 +564,9 @@ class MoERouter(torch.nn.Module):
         self.hidden_dim = hidden_dim
         self.num_experts = num_experts
         self.top_k = top_k
-        self.gate_w = torch.nn.Parameter(
-            torch.empty(hidden_dim, num_experts, dtype=dtype)
-        )
+        self.gate_w = torch.nn.Parameter(torch.empty(hidden_dim, num_experts, dtype=dtype))
         torch.nn.init.normal_(self.gate_w, mean=0.0, std=1.0 / math.sqrt(hidden_dim))
-        self.bias = (
-            torch.nn.Parameter(torch.zeros(num_experts, dtype=dtype)) if bias else None
-        )
+        self.bias = torch.nn.Parameter(torch.zeros(num_experts, dtype=dtype)) if bias else None
         self.last_profile: Optional[RouterProfile] = None
 
         # Saved for z-loss / load-imbalance computation
@@ -524,12 +595,14 @@ class MoERouter(torch.nn.Module):
 
         if self.bias is not None and force_reference:
             with torch.no_grad():
-                logits = flat.to(torch.float32) @ gate_w.to(torch.float32) + \
-                         self.bias.to(torch.float32)
+                logits = flat.to(torch.float32) @ gate_w.to(torch.float32) + self.bias.to(
+                    torch.float32
+                )
                 probs = torch.softmax(logits, dim=-1)
                 topk_vals, idx_new = torch.topk(probs, k=self.top_k, dim=-1)
-                w_new = (topk_vals / topk_vals.sum(-1, keepdim=True).clamp_min(1e-30)
-                         ).to(tokens.dtype)
+                w_new = (topk_vals / topk_vals.sum(-1, keepdim=True).clamp_min(1e-30)).to(
+                    tokens.dtype
+                )
             idx, w = idx_new.to(torch.long), w_new
 
         # Dispatch count + invariant check
@@ -551,20 +624,21 @@ class MoERouter(torch.nn.Module):
         sram_bytes = 64 * max(BLOCK_E, 64) * dtype_size * 3
         bytes_moved = (flat.numel() + gate_w.numel()) * dtype_size
         kernel_ms = 0.0
-        achieved_bw = (bytes_moved / (1024 ** 3)) / 1e-3  # conservative 1ms
+        achieved_bw = (bytes_moved / (1024**3)) / 1e-3  # conservative 1ms
         sram_bytes_out = sram_bytes
 
         if TRITON_AVAILABLE and flat.is_cuda and not force_reference:  # pragma: no cover
             with torch.no_grad():
                 try:
-                    _, _, _, kernel_ms, sram_bytes_out, achieved_bw = \
-                        _triton_forward(flat, gate_w, self.top_k)
+                    _, _, _, kernel_ms, sram_bytes_out, achieved_bw = _triton_forward(
+                        flat, gate_w, self.top_k
+                    )
                 except Exception:
                     pass
 
         # Compute routing quality metrics (no_grad, detached)
         with torch.no_grad():
-            logits_fp32 = (flat.float() @ gate_w.float())
+            logits_fp32 = flat.float() @ gate_w.float()
             self._last_logits = logits_fp32.detach()
             z_loss = _compute_router_z_loss(logits_fp32)
             load_imbalance = _compute_load_imbalance(dispatch_cnt)

@@ -1,10 +1,11 @@
 """Elastic, fault-tolerant infrastructure layer."""
+
 from pkg.elastic.fault_monitor import (
     AsyncCheckpointer,
     ClusterStateMachine,
     ElasticTrainerHarness,
-    ObjectStoreAdapter,
     LocalNVMeAdapter,
+    ObjectStoreAdapter,
     S3Adapter,
 )
 

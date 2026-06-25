@@ -79,9 +79,7 @@ class PipelineStage:
         topology: Optional[ParallelTopology] = None,
     ):
         if stage_id < 0 or stage_id >= num_stages:
-            raise ValueError(
-                f"stage_id ({stage_id}) must be in [0, num_stages={num_stages})"
-            )
+            raise ValueError(f"stage_id ({stage_id}) must be in [0, num_stages={num_stages})")
         self.stage_id = int(stage_id)
         self.num_stages = int(num_stages)
         self.module = module
@@ -90,9 +88,7 @@ class PipelineStage:
             pp_process_group(topology) if topology is not None else None
         )
         self._multi_process: bool = (
-            topology is not None
-            and topology.pp_size > 1
-            and dist.is_initialized()
+            topology is not None and topology.pp_size > 1 and dist.is_initialized()
         )
         # Forward activation stash: mb_index → (input_tensor, output_tensor)
         self._activation_stash: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
@@ -176,9 +172,7 @@ class PipelineStage:
         """Receive gradient from the next stage."""
         next_rank = self._next_rank()
         if next_rank is None:
-            raise RuntimeError(
-                f"Stage {self.stage_id}: no next stage to receive gradient from"
-            )
+            raise RuntimeError(f"Stage {self.stage_id}: no next stage to receive gradient from")
         tag = self._GRAD_TAG_BASE + mb_index
         buf = torch.empty(shape, dtype=dtype, device=device)
         dist.recv(buf, src=next_rank, group=self._pp_group, tag=tag)
@@ -199,7 +193,9 @@ class PipelineStage:
         if self._multi_process:
             if not self.is_first:
                 micro_batch = self._recv_activation(
-                    micro_batch.shape, micro_batch.dtype, micro_batch.device,
+                    micro_batch.shape,
+                    micro_batch.dtype,
+                    micro_batch.device,
                     mb_index=0,  # simple single-stream; mb_index managed by run_1f1b
                 )
             out = self.module(micro_batch) if self.module is not None else micro_batch
