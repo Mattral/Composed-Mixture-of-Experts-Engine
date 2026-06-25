@@ -29,7 +29,7 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from pkg.utils.config import MoEConfig, ConfigValidationError  # noqa: E402
+from pkg.utils.config import ConfigValidationError, MoEConfig  # noqa: E402
 
 
 def validate_path(p: Path) -> bool:
@@ -89,7 +89,7 @@ def main() -> int:
     passed = sum(results)
     failed = len(results) - passed
 
-    print(f"\n{'─'*60}")
+    print(f"\n{'─' * 60}")
     if failed == 0:
         print(f"\033[92m  All {passed} config(s) valid.\033[0m\n")
         return 0

@@ -41,15 +41,12 @@ import torch.distributed as dist
 import torch.multiprocessing as mp
 
 from pkg.distributed.parallel_mesh import (
-
-
     DistributedMoELayer,
-    ParallelTopology,
     build_topology,
 )
 
-
 pytestmark = pytest.mark.cpu
+
 
 # ---------------------------------------------------------------------------
 # Free-port helper (also in conftest.py, duplicated here for standalone use)
@@ -59,6 +56,7 @@ def _free_port() -> int:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
 
 # ---------------------------------------------------------------------------
 # Shared worker
@@ -85,7 +83,9 @@ def _run_worker(
         os.environ["MASTER_ADDR"] = "127.0.0.1"
         os.environ["MASTER_PORT"] = str(port)
         dist.init_process_group(
-            backend="gloo", rank=rank, world_size=world_size,
+            backend="gloo",
+            rank=rank,
+            world_size=world_size,
         )
 
         # Build a real topology via build_topology (not a hand-rolled shim).
@@ -100,8 +100,12 @@ def _run_worker(
         B, S = 2, 4
 
         layer = DistributedMoELayer(
-            hidden_dim=H, ffn_dim=F, num_experts=E, top_k=K,
-            topology=topo, dtype=torch.float32,
+            hidden_dim=H,
+            ffn_dim=F,
+            num_experts=E,
+            top_k=K,
+            topology=topo,
+            dtype=torch.float32,
         )
 
         tokens = torch.randn(B, S, H, dtype=torch.float32)
@@ -122,7 +126,7 @@ def _run_worker(
         total_dispatched = int(total_tensor.item())
         expected = B * S * K * world_size
 
-        token_ok = (total_dispatched == expected)
+        token_ok = total_dispatched == expected
         assert token_ok, (
             f"rank {rank}: token conservation broken — "
             f"dispatched={total_dispatched}, expected={expected}"
@@ -147,12 +151,15 @@ def _run_worker(
         except Exception:
             pass
 
-    result_queue.put({
-        "rank": rank,
-        "token_conservation": token_ok,
-        "no_nan_grads": nan_ok,
-        "error": error,
-    })
+    result_queue.put(
+        {
+            "rank": rank,
+            "token_conservation": token_ok,
+            "no_nan_grads": nan_ok,
+            "error": error,
+        }
+    )
+
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -162,25 +169,22 @@ def _spawn_and_collect(port: int) -> list[dict]:
     ctx = mp.get_context("spawn")
     q: mp.Queue = ctx.Queue()
     world = 4
-    procs = [
-        ctx.Process(target=_run_worker, args=(r, world, port, q))
-        for r in range(world)
-    ]
+    procs = [ctx.Process(target=_run_worker, args=(r, world, port, q)) for r in range(world)]
     for p in procs:
         p.start()
     for p in procs:
         p.join(timeout=120)
-        assert p.exitcode == 0, (
-            f"Worker rank {procs.index(p)} exited with code {p.exitcode}"
-        )
+        assert p.exitcode == 0, f"Worker rank {procs.index(p)} exited with code {p.exitcode}"
     results = []
     while not q.empty():
         results.append(q.get_nowait())
     return results
 
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 def test_token_conservation_distributed() -> None:
     """Total dispatched tokens across all ranks must equal N_local × K × world."""
@@ -195,6 +199,7 @@ def test_token_conservation_distributed() -> None:
             f"rank {r['rank']}: token conservation failed. error={r['error']}"
         )
 
+
 def test_distributed_backward_no_nan() -> None:
     """No parameter gradient may be NaN or Inf after a forward+backward pass."""
     port = _free_port()
@@ -207,6 +212,7 @@ def test_distributed_backward_no_nan() -> None:
         assert r["no_nan_grads"], (
             f"rank {r['rank']}: non-finite gradient detected. error={r['error']}"
         )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

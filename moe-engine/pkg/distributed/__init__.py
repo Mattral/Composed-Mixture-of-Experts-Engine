@@ -22,12 +22,36 @@ directly only when necessary.
 
 from __future__ import annotations
 
+# -- Data Parallelism --
+from pkg.distributed.data_parallel import apply_fsdp2
+
+# -- Expert Parallelism --
+from pkg.distributed.expert_parallel import (
+    all_to_all_combine,
+    all_to_all_dispatch,
+)
+
 # -- Topology --
 from pkg.distributed.mesh import (
     ParallelTopology,
     build_topology,
-    tp_process_group,
     pp_process_group,
+    tp_process_group,
+)
+
+# -- MoE Layer --
+from pkg.distributed.moe_layer import DistributedMoELayer
+
+# -- Pipeline Parallelism --
+from pkg.distributed.pipeline_parallel import PipelineStage
+
+# -- High-level Router Interface --
+from pkg.distributed.router import MoERouterInterface, RouterStats
+
+# -- Sequence Parallelism (own module since v0.3.2) --
+from pkg.distributed.sequence_parallel import (
+    gather_from_sequence_parallel,
+    scatter_to_sequence_parallel,
 )
 
 # -- Tensor Parallelism --
@@ -35,30 +59,6 @@ from pkg.distributed.tensor_parallel import (
     ColumnParallelLinear,
     RowParallelLinear,
 )
-
-# -- Sequence Parallelism (own module since v0.3.2) --
-from pkg.distributed.sequence_parallel import (
-    scatter_to_sequence_parallel,
-    gather_from_sequence_parallel,
-)
-
-# -- Expert Parallelism --
-from pkg.distributed.expert_parallel import (
-    all_to_all_dispatch,
-    all_to_all_combine,
-)
-
-# -- Pipeline Parallelism --
-from pkg.distributed.pipeline_parallel import PipelineStage
-
-# -- Data Parallelism --
-from pkg.distributed.data_parallel import apply_fsdp2
-
-# -- MoE Layer --
-from pkg.distributed.moe_layer import DistributedMoELayer
-
-# -- High-level Router Interface --
-from pkg.distributed.router import MoERouterInterface, RouterStats
 
 __all__ = [
     # Topology

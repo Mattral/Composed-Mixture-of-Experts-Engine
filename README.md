@@ -7,7 +7,7 @@
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/LICENSE)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.5%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Triton](https://img.shields.io/badge/Triton-3.x-9333ea.svg)](https://triton-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-235%20passing-brightgreen)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/moe-engine/tests/)
+[![Tests](https://img.shields.io/badge/tests-260%20passing-brightgreen)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/moe-engine/tests/)
 [![T4 Validated](https://img.shields.io/badge/T4%20GPU-validated%20June%202026-blue)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/moe-engine/notebooks/moe_engine_v032_T4_validation.ipynb)
 [![Chaos B](https://img.shields.io/badge/Chaos%20B-10%2F10%20%E2%9C%85-brightgreen)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/RESULTS.md#fault-tolerance--chaos-test-results)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/pulls)
@@ -92,7 +92,7 @@ Most components are verified at 2-rank `mp.spawn` or single-T4 level. Sustained 
 - **TP** — Tensor Parallelism on expert FFNs (`ColumnParallelLinear` / `RowParallelLinear`) + Sequence Parallelism with `next_weight` fusion (halves collectives)
 - **PP** — Pipeline Parallelism with `PipelineStage` + 1F1B schedule and activation tagging for restart/stall robustness
 
-See `moe-engine/docs/ARCHITECTURE.md` for the detailed internal data-flow diagram (Triton router internals, dedicated-stream mechanics, token lifecycle, and per-layer forward/backward pass).
+See `docs/ARCHITECTURE.md` for the detailed internal data-flow diagram (Triton router internals, dedicated-stream mechanics, token lifecycle, and per-layer forward/backward pass).
 
 ---
 
@@ -210,7 +210,7 @@ make test-cpu
 # or
 pytest tests/ -v --ignore=tests/test_chaos.py
 ```
-235 tests passing (core CPU suite).
+260 tests passing (core CPU suite).
 
 ### 5. Using the Typer CLI
 ```bash
@@ -400,10 +400,15 @@ moe-engine/                          # installable package root
 │   ├── test_config.py               # 34 new tests in v0.3.2
 │   └── ...
 │
-├── docs/
-│   ├── ARCHITECTURE.md              # Component map, token lifecycle, detailed data-flow diagrams
-│   ├── DESIGN.md                    # System design rationale & engineering trade-offs
-│   └── testing.md                   # Four-tier test strategy
+│
+docs/                                # Top-level documentation (outside moe-engine/)
+├── ARCHITECTURE.md              # Component map, token lifecycle, detailed data-flow diagrams
+├── DESIGN.md                    # System design rationale & engineering trade-offs
+├── testing.md                   # Four-tier test strategy
+├── benchmarks.md                # Metrics reference and benchmark guide
+├── LIMITED_HARDWARE_GUIDE.md    # Developing without a GPU cluster
+├── CONTRIBUTING.md              # Contribution workflow, PR checklist, code standards
+└── adr/                         # Architecture Decision Records (ADR-001 through ADR-004)
 │
 └── README.md (package-level README)
 ```
@@ -434,7 +439,7 @@ Open in Colab with a T4 to reproduce:
 **Testing & validation**
 - `test_config.py`: 34 new tests for the full `MoEConfig` system
 - `@pytest.mark.cpu` / `@pytest.mark.gpu` markers on all relevant tests
-- Total: **235 tests passing**
+- Total: **260 tests passing**
 - Every illustrative number replaced with real T4 measurements
 
 **Developer experience**
@@ -448,7 +453,7 @@ See `benchmarks/BENCHMARKS.md` for the complete changelog.
 
 ## Roadmap (v0.4 priorities)
 
-See [`roadmap.md`](roadmap.md) and [`moe-engine/docs/ARCHITECTURE.md`](moe-engine/docs/ARCHITECTURE.md) for the full plan. High-priority items:
+See [`roadmap.md`](roadmap.md) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full plan. High-priority items:
 - Replace Gloo with NCCL in chaos harness → fix Scenario A flakiness
 - Real 8-GPU+ benchmark data and end-to-end MFU validation
 - Nsight/CUPTI roofline integration
@@ -464,7 +469,7 @@ See [`roadmap.md`](roadmap.md) and [`moe-engine/docs/ARCHITECTURE.md`](moe-engin
 | [`RESULTS.md`](RESULTS.md)      | Every numerical result + full telemetry samples      |
 | [`roadmap.md`](roadmap.md)      | Honest status + detailed v0.4 plan                   |
 | [`benchmarks/BENCHMARKS.md`](moe-engine/benchmarks/BENCHMARKS.md) | Methodology + patch notes                     |
-| [`moe-engine/docs/ARCHITECTURE.md`](moe-engine/docs/ARCHITECTURE.md) | Deep design + detailed data-flow diagrams     |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Deep design + detailed data-flow diagrams     |
 | T4 validation notebook          | Full reproduction of GPU numbers & charts            |
 | `deploy/`                       | Docker & Kubernetes manifests (single + multi-node)  |
 | Issues / Discussions            | Questions, bug reports, feature requests             |
@@ -494,3 +499,5 @@ Apache 2.0. See [`LICENSE`](LICENSE).
 Contributions are welcome. Please open an issue first for larger changes so we can align on scope and design.
 
 ---
+
+*This README is intentionally honest about verification scope (2-rank `mp.spawn`, single-T4 router validation, Chaos A still flaky) while clearly showing what has been built, measured, and engineered. Full hyperscale end-to-end validation requires sustained access to a large GPU cluster and is tracked as v0.4 work.*

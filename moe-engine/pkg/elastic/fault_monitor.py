@@ -32,7 +32,7 @@ import socket
 import threading
 import time
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -52,30 +52,56 @@ os.environ.setdefault("TORCH_NCCL_TRACE_BUFFER_SIZE", "1048576")
 
 # Optional boto3 -- gracefully degrade if missing so local tests still run.
 try:
-    import boto3                                                         # type: ignore
-    from botocore.config import Config as BotoConfig                     # type: ignore
+    import boto3  # type: ignore
+    from botocore.config import Config as BotoConfig  # type: ignore
+
     _HAS_BOTO3 = True
-except Exception:                                                        # pragma: no cover
-    boto3 = None                                                         # type: ignore
-    BotoConfig = None                                                    # type: ignore
+except Exception:  # pragma: no cover
+    boto3 = None  # type: ignore
+    BotoConfig = None  # type: ignore
     _HAS_BOTO3 = False
 
 # Optional distributed-checkpoint API. Falls back to a torch.save shim on
 # single-rank machines (CI / local test box) so the rest of the harness is
 # fully exercisable.
 try:
-    import torch.distributed.checkpoint as dcp                           # type: ignore
+    import torch.distributed.checkpoint as dcp  # type: ignore
     from torch.distributed.checkpoint.state_dict import (
-        get_model_state_dict, set_model_state_dict,
-        get_optimizer_state_dict, set_optimizer_state_dict,
         StateDictOptions,
+        get_model_state_dict,
+        get_optimizer_state_dict,
+        set_model_state_dict,
+        set_optimizer_state_dict,
     )
+
     _HAS_DCP = True
-except Exception:                                                        # pragma: no cover
-    dcp = None                                                           # type: ignore
+except Exception:  # pragma: no cover
+    dcp = None  # type: ignore
     _HAS_DCP = False
 
 log = logging.getLogger("moe_engine.elastic")
+
+
+CHECKPOINT_SCHEMA_VERSION: int = 2
+
+
+def _check_schema_compatibility(meta: dict) -> None:
+    """Warn if checkpoint schema differs from current version."""
+    loaded = meta.get("schema_version", 1)
+    if loaded > CHECKPOINT_SCHEMA_VERSION:
+        log.warning(
+            "Checkpoint schema_version=%d is newer than runtime=%d. "
+            "Upgrade moe-engine for full compatibility.",
+            loaded,
+            CHECKPOINT_SCHEMA_VERSION,
+        )
+    elif loaded < CHECKPOINT_SCHEMA_VERSION:
+        log.info(
+            "Checkpoint schema_version=%d is older than current=%d. "
+            "Checkpoint is forward-compatible; missing fields use defaults.",
+            loaded,
+            CHECKPOINT_SCHEMA_VERSION,
+        )
 
 
 # ==========================================================================
@@ -112,9 +138,11 @@ class LocalNVMeAdapter(ObjectStoreAdapter):
         self._write_chunked(tmp, payload)
         tmp.replace(p)
 
-    def _write_chunked(self, path: Path, payload: bytes, chunk_bytes: int = 256 * 1024 * 1024) -> None:
+    def _write_chunked(
+        self, path: Path, payload: bytes, chunk_bytes: int = 256 * 1024 * 1024
+    ) -> None:
         """Write payload in chunks to avoid OOM on large buffers.
-        
+
         Parameters
         ----------
         path : Path
@@ -128,7 +156,7 @@ class LocalNVMeAdapter(ObjectStoreAdapter):
         # or if payload is too small/misaligned for direct I/O.
         try:
             flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-            if hasattr(os, 'O_DIRECT'):
+            if hasattr(os, "O_DIRECT"):
                 flags |= os.O_DIRECT
             fd = os.open(str(path), flags, 0o644)
             use_direct = True
@@ -136,7 +164,7 @@ class LocalNVMeAdapter(ObjectStoreAdapter):
             # O_DIRECT not available, use buffered I/O
             fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
             use_direct = False
-        
+
         try:
             offset = 0
             total = len(payload)
@@ -193,7 +221,7 @@ class S3Adapter(ObjectStoreAdapter):
         if not _HAS_BOTO3:
             raise RuntimeError("boto3 is required for S3Adapter")
         assert uri.startswith("s3://"), f"Expected s3:// uri, got {uri}"
-        rest = uri[len("s3://"):]
+        rest = uri[len("s3://") :]
         bucket, _, prefix = rest.partition("/")
         self.bucket = bucket
         self.prefix = prefix.rstrip("/")
@@ -224,7 +252,7 @@ class S3Adapter(ObjectStoreAdapter):
         paginator = self._client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=self.bucket, Prefix=full):
             for obj in page.get("Contents", []):
-                keys.append(obj["Key"][len(self.prefix) + 1:] if self.prefix else obj["Key"])
+                keys.append(obj["Key"][len(self.prefix) + 1 :] if self.prefix else obj["Key"])
         return keys
 
     def delete(self, key: str) -> None:
@@ -237,8 +265,8 @@ class S3Adapter(ObjectStoreAdapter):
 @dataclass
 class _CheckpointJob:
     step: int
-    payload: bytes          # serialized sharded state dict (this rank's slice)
-    meta: Dict[str, Any]    # JSON metadata: rank, dp_size, ep_size, etc.
+    payload: bytes  # serialized sharded state dict (this rank's slice)
+    meta: Dict[str, Any]  # JSON metadata: rank, dp_size, ep_size, etc.
 
 
 class AsyncCheckpointer:
@@ -274,7 +302,9 @@ class AsyncCheckpointer:
         self.last_commit_ms: float = 0.0
         for i in range(workers):
             t = threading.Thread(
-                target=self._worker, name=f"ckpt-writer-{i}", daemon=True,
+                target=self._worker,
+                name=f"ckpt-writer-{i}",
+                daemon=True,
             )
             t.start()
             self._threads.append(t)
@@ -295,7 +325,8 @@ class AsyncCheckpointer:
             msd = get_model_state_dict(model, options=opts)
             osd = (
                 get_optimizer_state_dict(model, optimizer, options=opts)
-                if optimizer is not None else {}
+                if optimizer is not None
+                else {}
             )
             payload_obj = {"model": msd, "optim": osd}
         else:
@@ -304,11 +335,16 @@ class AsyncCheckpointer:
                 "optim": optimizer.state_dict() if optimizer is not None else {},
             }
         buf = _torch_dumps(payload_obj)
+        import torch as _torch_ckpt
+
         meta = {
+            "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "step": step,
             "rank": rank,
             "hostname": socket.gethostname(),
             "ts": time.time(),
+            "moe_engine_version": "0.3.2",
+            "torch_version": _torch_ckpt.__version__,
         }
         if extra_meta:
             meta.update(extra_meta)
@@ -358,7 +394,8 @@ class AsyncCheckpointer:
         try:
             meta = json.loads(self.local.get(meta_key).decode("utf-8"))
         except FileNotFoundError:
-            meta = {"step": step, "rank": rank}
+            meta = {"step": step, "rank": rank, "schema_version": 1}
+        _check_schema_compatibility(meta)
         return meta
 
     # ------------------------------------------------------------------
@@ -381,7 +418,7 @@ class AsyncCheckpointer:
                 job = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
-            if job.step < 0:                # poison pill
+            if job.step < 0:  # poison pill
                 self._q.task_done()
                 break
             try:
@@ -399,7 +436,7 @@ class AsyncCheckpointer:
                     )
                 with self._lock:
                     self._completed_steps.append(job.step)
-                    self._completed_steps = sorted(set(self._completed_steps))[-self.retention:]
+                    self._completed_steps = sorted(set(self._completed_steps))[-self.retention :]
                 self._prune()
             except Exception as e:
                 log.exception("checkpoint commit failed: %s", e)
@@ -424,6 +461,7 @@ class AsyncCheckpointer:
 
 def _torch_dumps(obj: Any) -> bytes:
     import io
+
     buf = io.BytesIO()
     torch.save(obj, buf)
     return buf.getvalue()
@@ -431,6 +469,7 @@ def _torch_dumps(obj: Any) -> bytes:
 
 def _torch_loads(payload: bytes) -> Any:
     import io
+
     return torch.load(io.BytesIO(payload), map_location="cpu", weights_only=False)
 
 
@@ -471,8 +510,7 @@ class ClusterStateMachine:
         self.min_nodes = min_nodes
         self.phase: str = self.PHASE_RUNNING
         self._healths: Dict[int, _RankHealth] = {
-            r: _RankHealth(rank=r, last_heartbeat=time.time())
-            for r in range(topology.world_size)
+            r: _RankHealth(rank=r, last_heartbeat=time.time()) for r in range(topology.world_size)
         }
         self._on_drop_callbacks: List[Callable[[List[int]], None]] = []
 
@@ -486,9 +524,12 @@ class ClusterStateMachine:
         try:
             # Use a short-timeout monitored_barrier when available.
             if hasattr(dist, "monitored_barrier"):
-                dist.monitored_barrier(timeout=__import__("datetime").timedelta(
-                    seconds=self.drop_grace,
-                ), wait_all_ranks=True)
+                dist.monitored_barrier(
+                    timeout=__import__("datetime").timedelta(
+                        seconds=self.drop_grace,
+                    ),
+                    wait_all_ranks=True,
+                )
             else:
                 dist.barrier()
             now = time.time()
@@ -547,7 +588,7 @@ class ClusterStateMachine:
     def _rebalance_experts(
         self,
         active_ranks: List[int],
-        mesh: Optional[DeviceMesh],
+        mesh: Optional[DeviceMesh],  # noqa: F821
         num_experts: int,
     ) -> Dict[int, List[int]]:
         """Evenly redistribute experts across surviving ranks.
@@ -569,7 +610,8 @@ class ClusterStateMachine:
         active_ranks = self.alive_ranks()
         log.warning(
             "rank failure detected, dead=%s active=%s",
-            dead_ranks, active_ranks,
+            dead_ranks,
+            active_ranks,
         )
         # Carrier: we do not have num_experts in this callback path, but
         # the recovery flow will still invoke reshard on the surviving ranks.
@@ -623,7 +665,7 @@ class ElasticTrainerHarness:
 
         self.cfg = cfg
         self.topology = topology
-        
+
         # Initialize rendezvous tracking for elastic recovery at scale.
         # At >100 nodes, use etcd for reliable rendezvous; otherwise c10d.
         self.rdzv_backend = os.environ.get("RDZV_BACKEND", "c10d")
@@ -633,14 +675,14 @@ class ElasticTrainerHarness:
             self._init_etcd_rendezvous()
         else:
             log.info(f"Using rendezvous backend: {self.rdzv_backend}")
-        
+
         self.local_adapter = LocalNVMeAdapter(cfg.local_ckpt_dir)
         self.remote_adapter: Optional[ObjectStoreAdapter] = None
         if cfg.remote_uri:
             if cfg.remote_uri.startswith("s3://") and _HAS_BOTO3:
                 self.remote_adapter = S3Adapter(cfg.remote_uri, cfg.s3_endpoint)
             elif cfg.remote_uri.startswith("file://"):
-                self.remote_adapter = LocalNVMeAdapter(cfg.remote_uri[len("file://"):])
+                self.remote_adapter = LocalNVMeAdapter(cfg.remote_uri[len("file://") :])
 
         self.async_ckpt = AsyncCheckpointer(
             local_adapter=self.local_adapter,
@@ -659,15 +701,17 @@ class ElasticTrainerHarness:
 
     def _init_etcd_rendezvous(self) -> None:
         """Initialize etcd-backed rendezvous for elastic recovery at scale.
-        
+
         This configures the TorchElastic rendezvous handler to use etcd as the
         coordination backend, which is more reliable than dist.barrier() at
         >100 nodes. This also enables tracking of training restarts via
         generation/epoch changes.
         """
         try:
-            from torch.distributed.elastic.rendezvous import etcd_rendezvous
-            from torch.distributed.elastic.rendezvous.etcd_rendezvous_handler import (
+            from torch.distributed.elastic.rendezvous import (
+                etcd_rendezvous,  # noqa: F401
+            )
+            from torch.distributed.elastic.rendezvous.etcd_rendezvous_handler import (  # noqa: F401
                 EtcdRendezvousHandler,
             )
         except ImportError:
@@ -677,12 +721,12 @@ class ElasticTrainerHarness:
             )
             self.rdzv_backend = "c10d"
             return
-        
+
         # Read etcd connection parameters from environment.
         # Typical: RDZV_ENDPOINT=etcd.example.com:2379 (set by torchrun agent)
         endpoint = os.environ.get("RDZV_ENDPOINT", "localhost:2379")
         run_id = os.environ.get("RDZV_ID", "default-run")
-        
+
         # Query current rendezvous state to detect if we're restarting.
         try:
             handler = EtcdRendezvousHandler(
@@ -690,7 +734,7 @@ class ElasticTrainerHarness:
                 port=int(endpoint.split(":")[-1]),
                 run_id=run_id,
                 min_workers=self.cfg.min_nodes,
-                max_workers=self.cfg.max_nodes if hasattr(self.cfg, 'max_nodes') else 1024,
+                max_workers=self.cfg.max_nodes if hasattr(self.cfg, "max_nodes") else 1024,
                 timeout=10.0,
             )
             self.rdzv_run_id = run_id
@@ -725,7 +769,7 @@ class ElasticTrainerHarness:
                 pass
         self._signals_installed = True
 
-    def _on_signal(self, signum, frame) -> None:        # noqa: D401
+    def _on_signal(self, signum, frame) -> None:  # noqa: D401
         log.warning("signal %d received; flushing async checkpoint queue", signum)
         self.async_ckpt.shutdown(drain=True)
 
@@ -737,7 +781,10 @@ class ElasticTrainerHarness:
         step: int,
     ) -> None:
         self.async_ckpt.save(
-            model, optimizer, step, rank=self.topology.rank,
+            model,
+            optimizer,
+            step,
+            rank=self.topology.rank,
             extra_meta={
                 "dp_size": self.topology.dp_size,
                 "ep_size": self.topology.ep_size,
@@ -768,7 +815,8 @@ class ElasticTrainerHarness:
         if new_world > 1:
             dist.init_process_group(
                 backend="nccl" if torch.cuda.is_available() else "gloo",
-                world_size=new_world, rank=new_rank,
+                world_size=new_world,
+                rank=new_rank,
             )
         # Step 2: recompute the topology. We preserve the ep_size factor as
         # the largest divisor of `new_world` that is <= the old ep_size.
@@ -786,8 +834,7 @@ class ElasticTrainerHarness:
         latest = self.async_ckpt.latest_step()
         if latest is not None:
             self.async_ckpt.load(model, optimizer, latest, rank=new_topo.rank)
-            log.info("resumed from step=%d on new topology dp=%d ep=%d",
-                     latest, new_dp, new_ep)
+            log.info("resumed from step=%d on new topology dp=%d ep=%d", latest, new_dp, new_ep)
         else:
             log.warning("no checkpoint found; starting from initial weights")
 

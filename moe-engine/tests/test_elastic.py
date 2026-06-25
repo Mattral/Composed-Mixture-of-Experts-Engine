@@ -11,10 +11,7 @@ Exercises:
 
 from __future__ import annotations
 
-import os
-import tempfile
 import time
-from pathlib import Path
 
 import pytest
 import torch
@@ -22,8 +19,6 @@ import torch.nn as nn
 
 from pkg.distributed.parallel_mesh import build_topology
 from pkg.elastic.fault_monitor import (
-
-
     AsyncCheckpointer,
     ClusterStateMachine,
     ElasticConfig,
@@ -32,8 +27,8 @@ from pkg.elastic.fault_monitor import (
     _largest_divisor_le,
 )
 
-
 pytestmark = pytest.mark.cpu
+
 
 def test_local_nvme_round_trip(tmp_path):
     store = LocalNVMeAdapter(str(tmp_path))
@@ -45,6 +40,7 @@ def test_local_nvme_round_trip(tmp_path):
     with pytest.raises(FileNotFoundError):
         store.get("a/b/c.bin")
 
+
 def test_local_nvme_chunked_write(tmp_path):
     """Verify that large payloads are written in chunks without OOM."""
     store = LocalNVMeAdapter(str(tmp_path))
@@ -54,6 +50,7 @@ def test_local_nvme_chunked_write(tmp_path):
     retrieved = store.get("large/data.bin")
     assert len(retrieved) == len(large_payload), "size mismatch after chunked write"
     assert retrieved == large_payload, "content mismatch after chunked write"
+
 
 def test_async_checkpointer_save_load(tmp_path):
     local = LocalNVMeAdapter(str(tmp_path))
@@ -79,6 +76,7 @@ def test_async_checkpointer_save_load(tmp_path):
     for p, q in zip(model.parameters(), fresh.parameters()):
         assert torch.allclose(p, q), "parameter divergence after load"
 
+
 def test_async_checkpointer_retention(tmp_path):
     local = LocalNVMeAdapter(str(tmp_path))
     ckpt = AsyncCheckpointer(local_adapter=local, remote_adapter=None, retention=2, workers=1)
@@ -98,6 +96,7 @@ def test_async_checkpointer_retention(tmp_path):
             pass
     assert surviving_steps == {4, 5}, f"expected {{4,5}} got {surviving_steps}"
 
+
 def test_cluster_reshard_continuity():
     topo = build_topology(dp_size=1, ep_size=4, device_type="cpu")
     csm = ClusterStateMachine(topology=topo, min_nodes=1)
@@ -110,6 +109,7 @@ def test_cluster_reshard_continuity():
             assert e not in seen, f"expert {e} duplicated"
             seen.add(e)
     assert seen == set(range(10))
+
 
 def test_zero_divergence_full_roundtrip(tmp_path):
     """End-to-end: save on old topology, load on new (smaller) topology,
@@ -141,6 +141,7 @@ def test_zero_divergence_full_roundtrip(tmp_path):
 
     for p, q in zip(model.parameters(), fresh.parameters()):
         assert torch.allclose(p, q, atol=0, rtol=0)
+
 
 def test_largest_divisor_helper():
     assert _largest_divisor_le(64, 8) == 8

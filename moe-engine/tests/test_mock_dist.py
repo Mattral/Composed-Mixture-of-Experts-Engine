@@ -20,9 +20,9 @@ from typing import List
 import pytest
 import torch
 
-from pkg.distributed.expert_parallel import all_to_all_dispatch, all_to_all_combine
+from pkg.distributed.expert_parallel import all_to_all_combine, all_to_all_dispatch
 from pkg.distributed.moe_layer import DistributedMoELayer
-from tests.mock_dist import MockTopology, MockDistEnv, make_mock_topology
+from tests.mock_dist import MockDistEnv, MockTopology, make_mock_topology
 
 pytestmark = pytest.mark.cpu
 
@@ -30,6 +30,7 @@ pytestmark = pytest.mark.cpu
 # ===========================================================================
 # MockTopology tests
 # ===========================================================================
+
 
 class TestMockTopology:
     def test_defaults(self):
@@ -68,6 +69,7 @@ class TestMockTopology:
 # dispatch/combine at ep_size=1 (identity through MockTopology)
 # ===========================================================================
 
+
 class TestDispatchCombineAtEpSize1:
     """At ep_size=1, dispatch and combine are no-ops (identity)."""
 
@@ -75,9 +77,7 @@ class TestDispatchCombineAtEpSize1:
         topo = MockTopology(ep_size=1)
         tokens = torch.randn(32, 64)
         send_counts = torch.tensor([32])
-        received, recv_counts, event, ms = all_to_all_dispatch(
-            tokens, send_counts, topo
-        )
+        received, recv_counts, event, ms = all_to_all_dispatch(tokens, send_counts, topo)
         assert received.shape == tokens.shape
         assert torch.allclose(received, tokens)
         assert event is None
@@ -88,9 +88,7 @@ class TestDispatchCombineAtEpSize1:
         expert_out = torch.randn(32, 64)
         recv_counts = torch.tensor([32])
         send_counts = torch.tensor([32])
-        combined, ms = all_to_all_combine(
-            expert_out, recv_counts, send_counts, topo
-        )
+        combined, ms = all_to_all_combine(expert_out, recv_counts, send_counts, topo)
         assert combined.shape == expert_out.shape
         assert torch.allclose(combined, expert_out)
         assert ms == 0.0
@@ -121,6 +119,7 @@ class TestDispatchCombineAtEpSize1:
 # DistributedMoELayer with MockTopology
 # ===========================================================================
 
+
 class TestMoELayerWithMockTopology:
     def test_full_forward_backward(self):
         topo = MockTopology(ep_size=1)
@@ -133,15 +132,15 @@ class TestMoELayerWithMockTopology:
         assert not torch.isnan(out).any()
         out.sum().backward()
         assert x.grad is not None
-        print(f"  overlap_ratio={layer.last_overlap_ratio:.3f}  "
-              f"dispatch_ms={layer.last_dispatch_ms:.3f}  "
-              f"compute_ms={layer.last_expert_compute_ms:.3f}")
+        print(
+            f"  overlap_ratio={layer.last_overlap_ratio:.3f}  "
+            f"dispatch_ms={layer.last_dispatch_ms:.3f}  "
+            f"compute_ms={layer.last_expert_compute_ms:.3f}"
+        )
 
     def test_expert_to_rank_round_trip(self):
         topo = MockTopology(ep_size=1)
-        layer = DistributedMoELayer(
-            hidden_dim=8, ffn_dim=16, num_experts=4, top_k=2, topology=topo
-        )
+        layer = DistributedMoELayer(hidden_dim=8, ffn_dim=16, num_experts=4, top_k=2, topology=topo)
         ids = torch.tensor([0, 1, 2, 3])
         ranks = layer._expert_to_rank(ids)
         # At ep_size=1, all experts map to rank 0
@@ -149,20 +148,22 @@ class TestMoELayerWithMockTopology:
 
     def test_token_conservation_via_mock(self):
         """Token conservation holds when run through MockTopology dispatch path."""
-        topo = MockTopology(ep_size=1)
+        topo = MockTopology(ep_size=1)  # noqa: F841
         from pkg.kernels.moe_router import MoERouter
+
         router = MoERouter(hidden_dim=64, num_experts=8, top_k=2)
         N, H = 128, 64
         tokens = torch.randn(N, H)
         idx, w, dispatch_cnt = router(tokens)
         assert int(dispatch_cnt.sum()) == N * 2, (
-            f"Token conservation violated: {int(dispatch_cnt.sum())} != {N*2}"
+            f"Token conservation violated: {int(dispatch_cnt.sum())} != {N * 2}"
         )
 
 
 # ===========================================================================
 # MockDistEnv — multi-rank simulation tests
 # ===========================================================================
+
 
 class TestMockDistEnv:
     def test_all_to_all_2ranks(self):
@@ -184,16 +185,18 @@ class TestMockDistEnv:
             env.barrier(rank)
 
         threads = [threading.Thread(target=worker, args=(r,)) for r in range(world_size)]
-        for t in threads: t.start()
-        for t in threads: t.join()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
         # Rank 0 should receive [rank0_tokens, rank1_tokens]
         for dst in range(world_size):
             assert results[dst] is not None
             for src in range(world_size):
-                chunk = results[dst][src * N_per_rank:(src + 1) * N_per_rank]
+                chunk = results[dst][src * N_per_rank : (src + 1) * N_per_rank]
                 assert (chunk == float(src)).all(), (
-                    f"Rank {dst} chunk from src {src}: expected {src}, got {chunk[0,0]}"
+                    f"Rank {dst} chunk from src {src}: expected {src}, got {chunk[0, 0]}"
                 )
 
     def test_all_to_all_4ranks(self):
@@ -214,15 +217,16 @@ class TestMockDistEnv:
             env.barrier(rank)
 
         threads = [threading.Thread(target=worker, args=(r,)) for r in range(world_size)]
-        for t in threads: t.start()
-        for t in threads: t.join()
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
 
         # Verify total received = sum of recv_sizes
         expected_total = sum(r + 1 for r in range(world_size))
         for dst in range(world_size):
             assert results[dst].shape[0] == expected_total, (
-                f"Rank {dst}: expected {expected_total} tokens, "
-                f"got {results[dst].shape[0]}"
+                f"Rank {dst}: expected {expected_total} tokens, got {results[dst].shape[0]}"
             )
 
     def test_barrier_blocks_until_all_arrive(self):
@@ -234,12 +238,15 @@ class TestMockDistEnv:
 
         def worker(rank):
             import time
+
             time.sleep(rank * 0.01)  # stagger arrivals
             env.barrier(rank)
             with lock:
                 arrival_order.append(rank)
 
         threads = [threading.Thread(target=worker, args=(r,)) for r in range(world_size)]
-        for t in threads: t.start()
-        for t in threads: t.join(timeout=5.0)
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5.0)
         assert len(arrival_order) == world_size, "Not all threads completed barrier"

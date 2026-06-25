@@ -46,7 +46,7 @@ from __future__ import annotations
 import queue
 import threading
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 import torch
 
@@ -60,6 +60,7 @@ __all__ = [
 # ===========================================================================
 # MockTopology — drop-in ParallelTopology for ep_size=1 tests
 # ===========================================================================
+
 
 @dataclass
 class MockTopology:
@@ -77,6 +78,7 @@ class MockTopology:
     pp_size : int    Pipeline parallel size (default 1).
     dp_size : int    Data parallel size (default 1).
     """
+
     ep_size: int = 1
     tp_size: int = 1
     pp_size: int = 1
@@ -87,16 +89,26 @@ class MockTopology:
     device: torch.device = field(default_factory=lambda: torch.device("cpu"))
 
     @property
-    def dp_rank(self) -> int: return 0
-    @property
-    def tp_rank(self) -> int: return 0
-    @property
-    def pp_rank(self) -> int: return 0
-    @property
-    def ep_rank(self) -> int: return 0
+    def dp_rank(self) -> int:
+        return 0
 
-    def is_first_pp_stage(self) -> bool: return True
-    def is_last_pp_stage(self) -> bool: return True
+    @property
+    def tp_rank(self) -> int:
+        return 0
+
+    @property
+    def pp_rank(self) -> int:
+        return 0
+
+    @property
+    def ep_rank(self) -> int:
+        return 0
+
+    def is_first_pp_stage(self) -> bool:
+        return True
+
+    def is_last_pp_stage(self) -> bool:
+        return True
 
     def experts_on_this_rank(self, total_experts: int) -> List[int]:
         return list(range(total_experts))
@@ -113,7 +125,10 @@ def make_mock_topology(
 ) -> MockTopology:
     """Factory for MockTopology — convenience wrapper for test parametrisation."""
     return MockTopology(
-        ep_size=ep_size, tp_size=tp_size, pp_size=pp_size, dp_size=dp_size,
+        ep_size=ep_size,
+        tp_size=tp_size,
+        pp_size=pp_size,
+        dp_size=dp_size,
         world_size=ep_size * tp_size * pp_size * dp_size,
     )
 
@@ -121,6 +136,7 @@ def make_mock_topology(
 # ===========================================================================
 # MockDistEnv — threading-based all_to_all simulation for ep_size > 1 tests
 # ===========================================================================
+
 
 class MockDistEnv:
     """Threading-based simulation of all_to_all_single for single-process tests.
@@ -179,9 +195,7 @@ class MockDistEnv:
         self._barrier_count = 0
         # queues[(src, dst)] → Queue holding tensors sent from src to dst
         self._queues: Dict[Tuple[int, int], queue.Queue] = {
-            (s, d): queue.Queue()
-            for s in range(world_size)
-            for d in range(world_size)
+            (s, d): queue.Queue() for s in range(world_size) for d in range(world_size)
         }
 
     def all_to_all(
@@ -217,7 +231,7 @@ class MockDistEnv:
         offset = 0
         for dst in range(self.world_size):
             n = send_sizes[dst]
-            chunk = input_tensor[offset: offset + n].clone()
+            chunk = input_tensor[offset : offset + n].clone()
             self._queues[(rank, dst)].put(chunk)
             offset += n
 
@@ -227,8 +241,7 @@ class MockDistEnv:
             chunk = self._queues[(src, rank)].get(timeout=timeout)
             expected = recv_sizes[src]
             assert chunk.shape[0] == expected, (
-                f"Rank {rank}: expected {expected} tokens from rank {src}, "
-                f"got {chunk.shape[0]}"
+                f"Rank {rank}: expected {expected} tokens from rank {src}, got {chunk.shape[0]}"
             )
             received_chunks.append(chunk)
 
