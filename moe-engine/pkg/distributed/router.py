@@ -28,7 +28,6 @@ Public API
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -42,6 +41,7 @@ __all__ = [
 # ---------------------------------------------------------------------------
 # Per-step statistics
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class RouterStats:
@@ -85,6 +85,7 @@ class RouterStats:
 # ---------------------------------------------------------------------------
 # MoERouterInterface
 # ---------------------------------------------------------------------------
+
 
 class MoERouterInterface(nn.Module):
     """High-level router interface for distributed MoE layers.
@@ -139,6 +140,7 @@ class MoERouterInterface(nn.Module):
             )
         if capacity_factor < 1.0:
             import warnings
+
             warnings.warn(
                 f"capacity_factor={capacity_factor} < 1.0 will silently drop tokens "
                 "when routing is imbalanced. Consider using ≥ 1.0.",
@@ -152,6 +154,7 @@ class MoERouterInterface(nn.Module):
 
         # Lazy import to avoid pulling Triton into environments that don't have it
         from pkg.kernels.moe_router import MoERouter
+
         self._kernel_router = MoERouter(
             hidden_dim=hidden_dim,
             num_experts=num_experts,
@@ -193,9 +196,7 @@ class MoERouterInterface(nn.Module):
 
         N, H = tokens.shape
         if H != self.hidden_dim:
-            raise ValueError(
-                f"Token hidden dim {H} ≠ router hidden_dim {self.hidden_dim}."
-            )
+            raise ValueError(f"Token hidden dim {H} ≠ router hidden_dim {self.hidden_dim}.")
 
         # Call the kernel router (Triton or fp64 fallback)
         idx, weights, dispatch_counts = self._kernel_router(tokens)
@@ -237,6 +238,5 @@ class MoERouterInterface(nn.Module):
         Tokens beyond budget are dropped (not dispatched to that expert).
         """
         import math
-        return math.ceil(
-            self.capacity_factor * num_tokens * self.top_k / self.num_experts
-        )
+
+        return math.ceil(self.capacity_factor * num_tokens * self.top_k / self.num_experts)
