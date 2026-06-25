@@ -1,10 +1,19 @@
 # Design Rationale and Trade-offs
 
-**Version:** v0.3  
+**Version:** v0.3.2  
 **Last updated:** June 2026
 
 This document explains *why* each major design choice was made and what
 alternatives were considered. For *what* is implemented, see `ARCHITECTURE.md`.
+For the formal record of each decision with consequences and rejected
+alternatives, see `docs/adr/`.
+
+> **v0.3.2 note:** The architectural content below (router kernel, TP/EP/PP
+> design rationale) is unchanged from v0.3 — those engineering decisions still
+> hold. v0.3.2 added: the Pydantic config system (ADR-003), the model registry
+> pattern, checkpoint schema versioning, and split the `parallel_mesh.py`
+> monolith into focused modules (ADR-004 covers the 4D composition rationale
+> that motivated the split). See `docs/adr/README.md` for the full index.
 
 ---
 
@@ -260,18 +269,84 @@ not glossed over in the roadmap or README.
 
 ## Status Summary
 
-| Area | v0.1 | v0.2 | v0.3 |
-|---|---|---|---|
-| Triton router (fwd + bwd) | ✅ | ✅ (unchanged) |
-| EP all-to-all + overlap | ✅ | ✅ (unchanged) | ✅ +expert_compute_ms, +overlap_ratio |
-| DP via FSDP2 | ✅ | ✅ (unchanged) | ✅ (unchanged) |
-| TP ColumnParallel + RowParallel | ⚠️ (tp=1 only) | ✅ v0.2 (2-rank verified) | ✅ v0.3 (unchanged) |
-| PP 1F1B single-process | ❌ | ✅ v0.2 | ✅ v0.3 (unchanged) |
-| PP multi-process dist.send/recv | ❌ | ❌ | ✅ v0.3 (run_1f1b_distributed) |
-| SP scatter/gather | ✅ | ✅ (unchanged) | ✅ v0.3 +fused all-gather path |
-| MFU + routing metrics | ✅ | ✅ v0.2 | ✅ v0.3 +overlap_ratio, +expert_compute_ms |
-| WandB integration | ❌ | ❌ | ✅ v0.3 (WandBSink) |
-| Prometheus endpoint | ❌ | ✅ v0.2 (8 gauges) | ✅ v0.3 (10 gauges: +expert_compute_ms, +overlap_ratio) |
-| Docker + Kubernetes | ❌ | ✅ v0.2 | ✅ v0.3 (unchanged) |
-| Chaos A fix | ❌ | ⚠️ mitigated ~85% | ⚠️ unchanged; root fix v0.4 (needs GPU) |
-| WandB sink | ❌ | ❌ | ✅ v0.3 (WandBSink; WANDB_API_KEY; log_config) |
+| Area | v0.1 | v0.2 | v0.3 | v0.3.2 |
+|---|---|---|---|---|
+| Triton router (fwd + bwd) | ✅ | ✅ (unchanged) | ✅ (unchanged) | ✅ +`K: tl.constexpr` fix |
+| EP all-to-all + overlap | ✅ | ✅ (unchanged) | ✅ +expert_compute_ms, +overlap_ratio | ✅ (unchanged) |
+| DP via FSDP2 | ✅ | ✅ (unchanged) | ✅ (unchanged) | ✅ (unchanged) |
+| TP ColumnParallel + RowParallel | ⚠️ (tp=1 only) | ✅ v0.2 (2-rank verified) | ✅ v0.3 (unchanged) | ✅ (unchanged) |
+| PP 1F1B single-process | ❌ | ✅ v0.2 | ✅ v0.3 (unchanged) | ✅ (unchanged) |
+| PP multi-process dist.send/recv | ❌ | ❌ | ✅ v0.3 (run_1f1b_distributed) | ✅ (unchanged) |
+| SP scatter/gather | ✅ | ✅ (unchanged) | ✅ v0.3 +fused all-gather path | ✅ extracted to own module |
+| MFU + routing metrics | ✅ | ✅ v0.2 | ✅ v0.3 +overlap_ratio, +expert_compute_ms | ✅ +sparse_mfu, +dead_expert_count, +routing_efficiency |
+| WandB integration | ❌ | ❌ | ✅ v0.3 (WandBSink) | ✅ (unchanged) |
+| Prometheus endpoint | ❌ | ✅ v0.2 (8 gauges) | ✅ v0.3 (10 gauges) | ✅ v0.3.2 (14 gauges) |
+| Docker + Kubernetes | ❌ | ✅ v0.2 | ✅ v0.3 (unchanged) | ✅ (unchanged) |
+| Chaos A fix | ❌ | ⚠️ mitigated ~85% | ⚠️ unchanged; root fix v0.4 | ⚠️ unchanged; root fix v0.4 |
+| Config system | flat dict | flat dict | flat dict | ✅ v0.3.2 Pydantic v2, 34 tests |
+| Module architecture | monolith | monolith | monolith | ✅ v0.3.2 split into 7 modules |
+| Model registry | ❌ | ❌ | ❌ | ✅ v0.3.2 `@register_model` |
+| Checkpoint versioning | unversioned | unversioned | unversioned | ✅ v0.3.2 `CHECKPOINT_SCHEMA_VERSION` |
+| Property-based testing | ❌ | ❌ | ❌ | ✅ v0.3.2 Hypothesis, 9 tests |
+| Mocked collective backend | ❌ | ❌ | ❌ | ✅ v0.3.2 `MockDistEnv` |
+
+---
+
+## v0.3.2 Design Additions
+
+### Pydantic Config: why now, not earlier
+
+The flat-dict config was tolerable at v0.1–v0.3 because the team was small and
+every config field was understood by inspection. As the config surface grew
+(6 sections, 30+ fields by v0.3), silent misconfigurations became a real cost:
+a `top_k=99` typo would not surface until the router kernel crashed with an
+opaque index error, 15 minutes into a training run.
+
+**Decision:** Pydantic v2 `BaseModel` hierarchy with cross-field validators.
+See `docs/adr/ADR-003-pydantic-config.md` for full rationale.
+
+**Why not earlier?** Adding strong validation to a flat dict requires touching
+every call site that reads `cfg["section"]["field"]`. We deferred this until
+the module split (v0.3.2) so both refactors could happen together with one
+backward-compatibility shim (`load_config()`) rather than two.
+
+### Model Registry: decoupling train.py from specific architectures
+
+Frontier training frameworks (Megatron-LM, torchTitan) use a registry pattern
+so `train.py` never imports a specific model class directly — it reads
+`cfg.model.arch` and dispatches. This was deferred from v0.1–v0.3 because
+there was only one model (`ToyMoEModel`). With the registry now in place,
+adding a second architecture (e.g. a real-scale LLaMA-style model) requires
+zero changes to `train.py`.
+
+**Trade-off accepted:** a small amount of indirection (`build_model_from_config`
+dispatch) in exchange for architecture extensibility. For a single-model
+research codebase this would be over-engineering; for an infrastructure
+runtime intended to train multiple model families, it is the correct default.
+
+### Checkpoint Schema Versioning: why version 2, not version 1.1
+
+Checkpoints persist across moe-engine version upgrades. A checkpoint written
+by v0.3 has no `schema_version` field at all (implicit version 1). Rather
+than silently failing to read old metadata fields, `_check_schema_compatibility`
+detects the version gap and logs at the appropriate level: `info` for
+older-but-compatible checkpoints (missing fields default gracefully), `warning`
+for newer-than-runtime checkpoints (potential field loss). This is a
+forward/backward compatibility contract, not just a version number — see
+`docs/adr/ADR-002-async-two-tier-checkpointing.md` for the original
+checkpointing design this versioning extends.
+
+### Module Split: why 7 modules and not 4 or 10
+
+The 1,165-line `parallel_mesh.py` monolith mixed five concerns: topology
+construction, TP primitives, EP primitives, PP scheduling, and the MoE layer
+orchestration. The split follows the single-responsibility boundary that
+already existed in the *testing* structure — `test_tensor_parallel.py`,
+`test_pipeline_parallel.py`, and `test_sequence_parallel_v03.py` were already
+separate files testing logically separate concerns before the production code
+was split to match. This is a deliberate "let the tests lead the architecture"
+principle: if your test suite already wants files split a certain way, your
+production code probably should be too.
+
+See `docs/adr/ADR-004-4d-parallelism-composition.md` for the full 4D
+parallelism design rationale that the split modules implement.
