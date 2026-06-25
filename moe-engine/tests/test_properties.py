@@ -28,14 +28,14 @@ import torch
 
 pytest.importorskip("hypothesis", reason="hypothesis not installed; pip install hypothesis")
 
-from hypothesis import given, settings, assume, HealthCheck
+from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
 from pkg.distributed.mesh import ParallelTopology
 from pkg.distributed.router import MoERouterInterface
 from pkg.kernels.moe_router import MoERouter
-from pkg.utils.config import MoEConfig, ConfigValidationError
 from pkg.models.registry import list_registered_models
+from pkg.utils.config import ConfigValidationError, MoEConfig
 
 pytestmark = pytest.mark.cpu
 
@@ -50,6 +50,7 @@ _THOROUGH = settings(max_examples=200, deadline=1000, suppress_health_check=[Hea
 # ===========================================================================
 # Token conservation — holds for all valid (N, H, E, K) combinations
 # ===========================================================================
+
 
 @_FAST
 @given(
@@ -66,14 +67,14 @@ def test_token_conservation_property(N: int, H: int, E: int, K: int) -> None:
     idx, w, dispatch_counts = router(tokens)
     total = int(dispatch_counts.sum().item())
     assert total == N * K, (
-        f"Token conservation failed: sum={total}, expected={N*K} "
-        f"(N={N}, K={K}, E={E}, H={H})"
+        f"Token conservation failed: sum={total}, expected={N * K} (N={N}, K={K}, E={E}, H={H})"
     )
 
 
 # ===========================================================================
 # Combine weight normalisation — weights sum to 1 per token
 # ===========================================================================
+
 
 @_FAST
 @given(
@@ -98,6 +99,7 @@ def test_weight_normalisation_property(N: int, H: int, E: int, K: int) -> None:
 # Index validity — all expert indices in [0, E)
 # ===========================================================================
 
+
 @_FAST
 @given(
     N=st.integers(min_value=1, max_value=64),
@@ -119,6 +121,7 @@ def test_index_validity_property(N: int, H: int, E: int, K: int) -> None:
 # ===========================================================================
 # No NaN — router never produces NaN outputs
 # ===========================================================================
+
 
 @_FAST
 @given(
@@ -143,6 +146,7 @@ def test_no_nan_property(N: int, H: int, E: int, K: int, token_scale: float) -> 
 # Expert ownership — every expert owned by exactly one EP rank
 # ===========================================================================
 
+
 @_FAST
 @given(
     total_experts=st.integers(min_value=2, max_value=64),
@@ -156,8 +160,12 @@ def test_expert_ownership_complete(total_experts: int, ep_size: int) -> None:
     all_owned: list[int] = []
     for rank in range(ep_size):
         topo = ParallelTopology(
-            world_size=ep_size, rank=rank,
-            dp_size=1, ep_size=ep_size, tp_size=1, pp_size=1,
+            world_size=ep_size,
+            rank=rank,
+            dp_size=1,
+            ep_size=ep_size,
+            tp_size=1,
+            pp_size=1,
         )
         owned = topo.experts_on_this_rank(total_experts)
         all_owned.extend(owned)
@@ -182,8 +190,12 @@ def test_expert_ownership_load_balance(total_experts: int, ep_size: int) -> None
     counts = []
     for rank in range(ep_size):
         topo = ParallelTopology(
-            world_size=ep_size, rank=rank,
-            dp_size=1, ep_size=ep_size, tp_size=1, pp_size=1,
+            world_size=ep_size,
+            rank=rank,
+            dp_size=1,
+            ep_size=ep_size,
+            tp_size=1,
+            pp_size=1,
         )
         counts.append(len(topo.experts_on_this_rank(total_experts)))
 
@@ -196,6 +208,7 @@ def test_expert_ownership_load_balance(total_experts: int, ep_size: int) -> None
 # MoEConfig validation — cross-field constraints hold for random inputs
 # ===========================================================================
 
+
 @_FAST
 @given(
     hidden_dim=st.integers(min_value=1, max_value=16).map(lambda x: x * 8),
@@ -205,33 +218,65 @@ def test_expert_ownership_load_balance(total_experts: int, ep_size: int) -> None
     warmup_steps=st.integers(min_value=0, max_value=500),
 )
 def test_config_validation_properties(
-    hidden_dim: int, num_experts: int, top_k: int,
-    max_steps: int, warmup_steps: int,
+    hidden_dim: int,
+    num_experts: int,
+    top_k: int,
+    max_steps: int,
+    warmup_steps: int,
 ) -> None:
     """Valid configs (top_k ≤ E, warmup < max) always load; invalid always raise."""
     valid_config = top_k <= num_experts and warmup_steps < max_steps
     d = {
         "model": {
-            "hidden_dim": hidden_dim, "num_layers": 1, "num_experts": num_experts,
-            "top_k": top_k, "capacity_factor": 1.25, "ffn_dim": hidden_dim * 2,
-            "vocab_size": 128, "sequence_length": 8, "dtype": "float32",
+            "hidden_dim": hidden_dim,
+            "num_layers": 1,
+            "num_experts": num_experts,
+            "top_k": top_k,
+            "capacity_factor": 1.25,
+            "ffn_dim": hidden_dim * 2,
+            "vocab_size": 128,
+            "sequence_length": 8,
+            "dtype": "float32",
         },
         "training": {
-            "global_batch_size": 8, "micro_batch_size": 2,
-            "learning_rate": 3e-4, "weight_decay": 0.1, "grad_clip": 1.0,
-            "max_steps": max_steps, "log_interval": 1, "ckpt_interval": 5,
-            "warmup_steps": warmup_steps, "gradient_accumulation_steps": 1,
+            "global_batch_size": 8,
+            "micro_batch_size": 2,
+            "learning_rate": 3e-4,
+            "weight_decay": 0.1,
+            "grad_clip": 1.0,
+            "max_steps": max_steps,
+            "log_interval": 1,
+            "ckpt_interval": 5,
+            "warmup_steps": warmup_steps,
+            "gradient_accumulation_steps": 1,
         },
-        "parallelism": {"data_parallel": 1, "expert_parallel": 1,
-                        "tensor_parallel": 1, "pipeline_parallel": 1},
-        "checkpoint": {"local_dir": "/tmp/test", "remote_uri": "file:///tmp/r",
-                       "async_workers": 1, "retention": 2},
-        "elastic": {"min_nodes": 1, "max_nodes": 4, "rdzv_backend": "c10d",
-                    "rdzv_endpoint": "localhost:29400",
-                    "health_check_interval_s": 1.0, "drop_grace_period_s": 5.0},
-        "telemetry": {"log_dir": "/tmp/l", "tensorboard_dir": "/tmp/l/tb",
-                      "json_path": "/tmp/l/s.jsonl",
-                      "mfu_target": 0.5, "hardware_peak_tflops": 989.0},
+        "parallelism": {
+            "data_parallel": 1,
+            "expert_parallel": 1,
+            "tensor_parallel": 1,
+            "pipeline_parallel": 1,
+        },
+        "checkpoint": {
+            "local_dir": "/tmp/test",
+            "remote_uri": "file:///tmp/r",
+            "async_workers": 1,
+            "retention": 2,
+        },
+        "elastic": {
+            "min_nodes": 1,
+            "max_nodes": 4,
+            "rdzv_backend": "c10d",
+            "rdzv_endpoint": "localhost:29400",
+            "health_check_interval_s": 1.0,
+            "drop_grace_period_s": 5.0,
+        },
+        "telemetry": {
+            "log_dir": "/tmp/l",
+            "tensorboard_dir": "/tmp/l/tb",
+            "json_path": "/tmp/l/s.jsonl",
+            "mfu_target": 0.5,
+            "hardware_peak_tflops": 989.0,
+        },
     }
     if valid_config:
         try:
@@ -263,6 +308,7 @@ def test_config_validation_properties(
 # RouterStats — MoERouterInterface returns valid stats for all sizes
 # ===========================================================================
 
+
 @_FAST
 @given(
     N=st.integers(min_value=1, max_value=32),
@@ -289,6 +335,7 @@ def test_router_interface_stats_valid(N: int, H: int, E: int, K: int) -> None:
 # ===========================================================================
 # Model registry — registered models remain stable
 # ===========================================================================
+
 
 def test_registry_invariant() -> None:
     """toy_moe is always registered after importing pkg.models."""
