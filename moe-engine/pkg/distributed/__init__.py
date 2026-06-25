@@ -34,6 +34,10 @@ from pkg.distributed.mesh import (
 from pkg.distributed.tensor_parallel import (
     ColumnParallelLinear,
     RowParallelLinear,
+)
+
+# -- Sequence Parallelism (own module since v0.3.2) --
+from pkg.distributed.sequence_parallel import (
     scatter_to_sequence_parallel,
     gather_from_sequence_parallel,
 )
@@ -52,6 +56,9 @@ from pkg.distributed.data_parallel import apply_fsdp2
 
 # -- MoE Layer --
 from pkg.distributed.moe_layer import DistributedMoELayer
+
+# -- High-level Router Interface --
+from pkg.distributed.router import MoERouterInterface, RouterStats
 
 __all__ = [
     # Topology
@@ -73,4 +80,7 @@ __all__ = [
     "apply_fsdp2",
     # MoE Layer
     "DistributedMoELayer",
+    # High-level Router Interface
+    "MoERouterInterface",
+    "RouterStats",
 ]
