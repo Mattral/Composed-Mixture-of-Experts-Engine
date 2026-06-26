@@ -23,9 +23,11 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.cpu
+
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-
 
 def _smoke_yaml(work_dir: Path, remote_uri: str) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -78,7 +80,6 @@ def _smoke_yaml(work_dir: Path, remote_uri: str) -> Path:
     """).strip())
     return cfg
 
-
 def _run_train(cfg_path: Path) -> None:
     """Invoke train.main() in-process so we share any mock contexts."""
     # Fresh import each call so torch/dist global state is rebuilt.
@@ -88,7 +89,6 @@ def _run_train(cfg_path: Path) -> None:
     sys.argv = ["train.py", "--config", str(cfg_path), "--max-steps", "2", "--smoke"]
     from train import main as train_main
     train_main()
-
 
 def _assert_telemetry_envelope(jsonl_path: Path) -> None:
     lines = [l for l in jsonl_path.read_text().splitlines() if l.strip()]
@@ -125,7 +125,6 @@ def _assert_telemetry_envelope(jsonl_path: Path) -> None:
             assert "router_z_loss" in rec["routing"], (
                 "router_z_loss missing from routing section"
             )
-
 
 def test_load_config_raw_is_plain_dict() -> None:
     """Regression test (v0.3.1): ``load_config(path).raw`` must be a plain
@@ -165,7 +164,6 @@ def test_load_config_raw_is_plain_dict() -> None:
         logger.log_config(cfg)  # must not raise AttributeError
         logger.close()
 
-
 def test_smoke_local_file_tier(tmp_path: Path) -> None:
     work = tmp_path / "run"
     remote = tmp_path / "remote"
@@ -179,7 +177,6 @@ def test_smoke_local_file_tier(tmp_path: Path) -> None:
         files = {p.name for p in tier.rglob("*") if p.is_file()}
         assert any(f.endswith(".pt") for f in files), f"no .pt in {tier}"
         assert any(f.endswith(".meta.json") for f in files), f"no meta in {tier}"
-
 
 def test_smoke_s3_tier_with_moto(tmp_path: Path) -> None:
     moto = pytest.importorskip("moto")
