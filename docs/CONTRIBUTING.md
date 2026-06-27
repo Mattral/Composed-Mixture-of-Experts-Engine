@@ -1,229 +1,230 @@
 # Contributing to moe-engine
 
-**Version:** v0.3  
+**Version:** v0.3.2  
 **Last updated:** June 2026
 
-moe-engine is a reference implementation for production-grade distributed
-Mixture-of-Experts training infrastructure. Contributions should improve
-correctness, observability, reproducibility, or operational resilience.
+moe-engine is a research-grade runtime for fault-tolerant MoE training at
+hyperscale. Contributions should improve correctness, observability,
+reproducibility, or operational resilience — or reduce the structural and DX
+debt identified in MOE instructions v2.1.
 
 ---
 
-## Getting Started
-
-### 1. Read the essential docs
-
-In order:
-
-1. `README.md` — architecture overview and results
-2. `docs/ARCHITECTURE.md` — component map and implementation status
-3. `docs/DESIGN.md` — why each design choice was made
-4. `docs/SYSTEM_DESIGN.md` — precise API reference for all modules
-5. `docs/testing.md` — test suite guide and how to write new tests
-6. `RESULTS.md` — reproducible results and telemetry samples
-7. `roadmap.md` — honest status and known deficiencies
-
-### 2. Install in editable mode with dev dependencies
+## Getting started in 5 minutes (no GPU required)
 
 ```bash
-cd moe-engine/moe-engine
+# 1. Clone the repository (or unzip moe_engine_v032_final.zip)
+cd moe-engine/
+
+# 2. Install in editable mode with dev dependencies
 pip install -e ".[dev]"
+pip install pre-commit && pre-commit install
+
+# 3. Verify setup
+python scripts/validate_config.py configs/   # both configs should pass
+make smoke                                    # ~5s smoke run
+make test-cpu                                 # ~60s, 235 tests expected
+
+# 4. Verify your environment
+python scripts/cli.py info
 ```
 
-### 3. Run the full test suite
+No GPU. No Docker. No cluster. You're ready to develop.
+
+---
+
+## Essential reading (in order)
+
+1. [`README.md`](../moe-engine/README.md) — what is actually built, key results
+2. [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) — component map, token lifecycle, design principles
+3. [`docs/LIMITED_HARDWARE_GUIDE.md`](LIMITED_HARDWARE_GUIDE.md) — how to develop without a GPU cluster
+4. [`docs/testing.md`](testing.md) — four-tier test model, markers, fixtures
+5. [`docs/benchmarks.md`](benchmarks.md) — MFU, routing quality, collective latency
+6. [`docs/adr/README.md`](adr/README.md) — why major design decisions were made
+7. [`RESULTS.md`](../RESULTS.md) — all real numbers with reproduction commands
+
+---
+
+## Development workflow
+
+### Standard loop
 
 ```bash
-pytest tests/ -v --ignore=tests/test_chaos.py
-# Expected: 148 passed, 1 skipped (~60s on CPU)
+# Make changes to pkg/
+make test-cpu                # must pass before any PR
+make smoke                   # must pass
+make validate-config         # if you changed configs/ or pkg/utils/config.py
+make lint                    # ruff + mypy
 ```
 
-### 4. Validate Triton numerics
+### Before opening a PR
 
 ```bash
-python tests/run_numerics_tests.py
-# Expected: 30/30 passed
+make format                  # auto-fix formatting
+make test-cpu                # 235 tests
+make lint                    # zero ruff errors
+make validate-config         # configs valid
+python scripts/cli.py info   # environment summary for PR description
 ```
 
-### 5. Run the benchmark suite to establish your baseline
+### If you modified Triton kernels
 
-```bash
-python benchmarks/run_benchmark.py --json /tmp/baseline.json
-```
+Run the T4 Colab notebook (minimum Sections 0–4):
+`moe-engine/notebooks/moe_engine_v032_T4_validation.ipynb`
 
----
-
-## Contribution Workflow
-
-1. **Open an issue** if the bug or feature is not already tracked. Include:
-   - Failing test or assertion if it's a bug.
-   - Motivation and design sketch if it's a feature.
-
-2. **Branch from `main`** with a descriptive name:
-   ```bash
-   git checkout -b fix/row-parallel-collective-correctness
-   git checkout -b feat/pp-inter-stage-send-recv
-   git checkout -b docs/update-v03-system-design
-   ```
-
-3. **Implement with minimal scope.** One logical change per PR. Don't bundle
-   a bug fix with a refactor.
-
-4. **Add or update tests.** Every change to runtime behaviour must include
-   a test that fails before the fix and passes after. For distributed changes,
-   use `mp.spawn` or Gloo multi-process tests — single-process tests at
-   `tp_size=1` do not exercise actual collectives.
-
-5. **Run the full suite before submitting:**
-   ```bash
-   pytest tests/ -v --ignore=tests/test_chaos.py
-   python benchmarks/run_benchmark.py --json /tmp/bench.json
-   ```
-
-6. **Submit a pull request** with:
-   - Concise description of the change.
-   - Reasoning for the design (especially if it differs from DESIGN.md).
-   - The exact commands used to verify correctness.
-   - Updated documentation if you changed runtime behaviour.
+Attach the output of Section 2 (codebase verification) and Section 4 (smoke test) to the PR.
 
 ---
 
-## Test Coverage Requirements
+## What to work on
 
-| Change type | Required tests |
-|---|---|
-| New kernel op or collective | Numerics test vs fp64 reference (`atol=rtol=1e-5`) |
-| New distributed primitive | `mp.spawn` multi-process test firing real collectives |
-| New telemetry field | `test_telemetry.py` REQUIRED_KEYS addition + round-trip test |
-| New config key | `test_smoke_e2e.py` consumption test |
-| New elastic behaviour | File-I/O round-trip in `test_elastic_v02.py` |
-| Bug fix | Test that reproduces the bug before the fix |
-| Documentation only | No code test required; verify links are accurate |
+### P0 — Complete ✅
 
-### Test file ownership
+- Monolith split (6 focused distributed modules)
+- Pydantic MoEConfig with 34 tests
+- Model extracted from train.py
+- `__all__` on all packages
+- Markers (`@pytest.mark.cpu/gpu/chaos`)
+- Makefile, CLI, validate_config.py
+- Real GPU numbers in all docs
 
-| Area | Primary test file |
-|---|---|
-| Router kernel numerics | `test_kernels_numerics.py` |
-| Router kernel correctness | `test_kernels.py` |
-| Routing quality metrics | `test_routing_quality.py` |
-| Tensor parallelism | `test_tensor_parallel.py` |
-| Pipeline parallelism | `test_pipeline_parallel.py` |
-| EP / MoE layer | `test_distributed.py`, `test_distributed_invariants.py` |
-| Elastic checkpointing | `test_elastic.py`, `test_elastic_v02.py` |
-| MFU accounting | `test_mfu.py`, `test_mfu_v02.py` |
-| Telemetry | `test_telemetry.py` |
-| End-to-end | `test_smoke_e2e.py` |
-| Chaos / TorchElastic | `test_chaos.py` |
+### P1 — In progress
+
+- `sequence_parallel.py` extracted ✅
+- ADRs (001–004) ✅
+- Mocked collective backend ✅
+- Pre-commit hooks ✅
+- Limited Hardware Guide ✅
+- CI updated to use `-m cpu` ✅
+- Property-based tests (Hypothesis) — **open**
+- Model registry/factory pattern — **open**
+
+### P2 — Planned
+
+- Fix Chaos Scenario A (replace Gloo with NCCL in chaos harness)
+- Real 8-GPU benchmark data
+- Nsight/CUPTI roofline integration
+- Expert capacity overflow re-routing
+- Non-divisible sequence lengths in SP
+
+See [`roadmap.md`](../roadmap.md) for the full plan.
 
 ---
 
-## Code Standards
+## Code standards
 
-### Correctness over cleverness
+### Python style
 
-Prefer explicit, readable code over terse cleverness. The test suite is the
-safety net, not type annotations or assertions alone.
+- `ruff` for linting and formatting (line length 100)
+- Type hints on all public functions
+- Docstrings on all public classes and functions (NumPy style)
+- No `print()` in library code — use `logging.getLogger(__name__)`
 
-### Every new public function needs a docstring
+### Test requirements
+
+Every PR that adds functionality must include tests:
 
 ```python
-def _compute_load_imbalance(dispatch_cnt: torch.Tensor) -> float:
-    """Compute expert load imbalance ratio.
+import pytest
+pytestmark = pytest.mark.cpu   # module-level, after all imports
 
-    Parameters
-    ----------
-    dispatch_cnt : Tensor [E]
-        Number of tokens dispatched to each expert.
-
-    Returns
-    -------
-    float
-        max_load / mean_load.  1.0 = perfect balance.
-        Returns 1.0 when all counts are zero (no division by zero).
-    """
+def test_my_feature():
+    from pkg.distributed.mesh import build_topology
+    topo = build_topology(dp_size=1, ep_size=1)
+    # ... assert something meaningful
 ```
 
-### Assert with informative messages
+Minimum coverage expectations:
+- New config fields: add to `tests/test_config.py`
+- New distributed primitives: add to relevant test file, test at `ep_size=1`
+- New CLI commands: test via `scripts/cli.py` import + function call
+- New Triton kernel changes: T4 notebook Section 2 check + smoke test
+
+### Invariant checking
+
+All critical mathematical properties must be asserted in the forward path,
+not just in tests:
 
 ```python
-assert total_dispatched == expected_total, (
-    f"Token conservation violation: dispatched={total_dispatched} "
-    f"expected={expected_total} (N={N}, K={self.top_k})"
-)
+# In production code:
+assert not torch.isnan(output).any(), "NaN in output — check gate weight init"
+assert int(dispatch_cnt.sum()) == N * K, f"Token conservation violated: {dispatch_cnt.sum()} != {N*K}"
 ```
 
-### No magic numbers without explanation
+This makes errors fire immediately at the layer where they occur, not
+mysteriously downstream.
 
-```python
-BLOCK_N = 64   # 64 tokens per Triton block — fits in L1 cache with BLOCK_E=64
-BLOCK_E = 64   # 64 experts per block — 64×64 float32 = 16 KiB < L1 32 KiB
+### Documentation
+
+- Update `docs/ARCHITECTURE.md` if you add a new module or change a design decision
+- Add an ADR (`docs/adr/ADR-NNN-title.md`) for any significant architectural choice
+- Update `RESULTS.md` if your change affects benchmark numbers
+- Update `docs/testing.md` if you add new test categories or fixtures
+
+---
+
+## Commit message format
+
+```
+<type>(<scope>): <short description>
+
+[Optional body — explain WHY, not WHAT]
+
+[Optional footer — references, breaking changes]
 ```
 
-### Collective correctness rules (critical)
+Types: `feat`, `fix`, `perf`, `test`, `docs`, `refactor`, `chore`
 
-When writing distributed code, use the correct collective for each pattern:
+Examples:
+```
+feat(distributed): extract sequence_parallel.py as own module
 
-| Pattern | Correct collective | Wrong |
-|---|---|---|
-| Sum partial matmul outputs (RowParallel) | `all_reduce(SUM)` | `reduce_scatter + all_gather` |
-| Replicate sharded output (ColumnParallel) | `all_gather_into_tensor` | `broadcast` |
-| Shard sequence across TP group | `scatter` + `all_gather` | n/a |
-| EP token dispatch | `all_to_all_single` | `all_gather` |
+P1.1 per MOE instructions v2.1. SP functions remain importable from
+tensor_parallel.py (backward-compat re-exports) and pkg.distributed.
 
-Include a comment explaining *why* the specific collective was chosen.
-The `test_row_parallel_uses_all_reduce_not_reduce_scatter` test enforces
-the RowParallel rule structurally — add similar structural tests for new collectives.
+fix(kernels): declare K as tl.constexpr in both Triton kernels
 
-### Documentation alignment
+Without constexpr, tl.static_range fails at compile time on real GPU
+hardware. Not reproducible on CPU, which masked it until T4 validation.
 
-If you change runtime behaviour, update the corresponding doc in `docs/`.
-If you add a new config key, add it to `docs/SETUP_AND_OPERATIONS.md`.
-If you add a new telemetry field, add it to the telemetry table in
-`docs/SYSTEM_DESIGN.md` and the `StepRecord` docstring.
+test(mock_dist): add MockDistEnv for multi-rank simulation
+
+Allows testing ep_size>1 dispatch/combine logic without spawning
+multiple processes. See tests/test_mock_dist.py for examples.
+```
 
 ---
 
-## Known Open Areas (Good First Contributions)
+## Pull request checklist
 
-| Area | Difficulty | File | Roadmap |
-|---|---|---|---|
-| Chaos Scenario A NCCL backend | Medium | `tests/test_chaos.py`, `tests/_chaos_worker.py` | v0.4 |
-| Real 8-GPU benchmark numbers | Medium (needs hardware) | `benchmarks/BENCHMARKS.md` | v0.4 |
-| Expert capacity overflow re-routing | Medium | `pkg/distributed/parallel_mesh.py` | v0.4 |
-| SP non-divisible sequence padding | Medium | `pkg/distributed/parallel_mesh.py` | v0.4 |
-| PP in chaos worker | Hard | `tests/_chaos_worker.py` | v0.4 |
-| WandBSink: real integration test (non-mock) | Medium | `tests/test_telemetry.py` | v0.4 |
-| Expert capacity overflow re-routing | Medium | `pkg/distributed/parallel_mesh.py` | v0.4 |
-| Nsight/CUPTI kernel profiling | Hard | new: `pkg/profiling/` | v0.4 |
-
----
-
-## Security and Secrets
-
-- Never commit credentials, tokens, or keys to source.
-- Use environment variables for `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`,
-  `S3_ENDPOINT_URL`.
-- If you find a security issue, open a GitHub issue without including secret
-  material. Describe the behaviour and reproduction steps only.
+```
+- [ ] make test-cpu passes (235+ tests)
+- [ ] make lint passes (zero ruff errors)
+- [ ] make validate-config passes
+- [ ] make smoke passes
+- [ ] New tests added (with pytestmark = pytest.mark.cpu)
+- [ ] Docstrings on new public functions/classes
+- [ ] ARCHITECTURE.md updated if new module added
+- [ ] ADR added if significant design decision made
+- [ ] RESULTS.md updated if numbers changed
+- [ ] T4 notebook run if Triton/GPU paths modified
+- [ ] Commit message follows format above
+```
 
 ---
 
-## CI Requirements
+## Architecture Decision Records
 
-All PRs must pass:
+Before making a significant design change, check `docs/adr/` to understand
+why existing decisions were made. If your change reverses or supersedes an
+ADR, create a new ADR explaining why.
 
-1. `lint` — ruff + mypy (non-fatal for mypy until type coverage improves)
-2. `unit` — full non-chaos suite on Python 3.10 and 3.11
-3. `benchmark` — CPU benchmark smoke (no regressions)
-
-Push to `main` additionally runs:
-
-4. `docker` — Docker build smoke
-5. `chaos` — Scenario B (blocking), Scenario A (non-blocking)
+See [`docs/adr/README.md`](adr/README.md) for the ADR index and template.
 
 ---
 
-## License
+## Getting help
 
-Apache 2.0. See `LICENSE`. By submitting a PR you agree to license your
-contribution under the same terms.
+- Open an issue on GitHub describing the problem, your environment (`python scripts/cli.py info`), and the exact error.
+- For Triton/GPU issues, attach the output of `python scripts/cli.py info` and the T4 notebook Section 2 (codebase verification).
+- For test failures, attach the full `pytest --tb=long` output.
