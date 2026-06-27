@@ -66,3 +66,5 @@ __all__ = [
     "apply_fsdp2",
     "DistributedMoELayer",
 ]
+
+from pkg.distributed.router import MoERouterInterface, RouterStats  # noqa: F401
