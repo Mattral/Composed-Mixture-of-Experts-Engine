@@ -39,7 +39,6 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -116,12 +115,16 @@ def compute_mfu(
         log.debug(
             "MFU=%.2f%% is low; check batch size / model config "
             "(world_size=%d, step_ms=%.1f, batch_tokens=%d)",
-            mfu_clamped * 100, world_size, step_time_sec * 1000, batch_tokens,
+            mfu_clamped * 100,
+            world_size,
+            step_time_sec * 1000,
+            batch_tokens,
         )
     if mfu_clamped > 0.87:
         log.debug(
             "MFU=%.2f%% is suspiciously high; verify hardware_peak_tflops=%.0f",
-            mfu_clamped * 100, hardware_peak_tflops,
+            mfu_clamped * 100,
+            hardware_peak_tflops,
         )
 
     return mfu_clamped
@@ -190,12 +193,13 @@ def compute_moe_flops(
 
     flops_attn_per_token = 4 * H * H + 4 * H * S
     flops_router_per_token = H * E
-    flops_expert_per_token = K * 6 * H * F          # SwiGLU: gate + up + down
+    flops_expert_per_token = K * 6 * H * F  # SwiGLU: gate + up + down
     flops_lm_head_per_token = 2 * H * vocab_size if vocab_size else 0
 
-    flops_per_token_fwd = num_layers * (
-        flops_attn_per_token + flops_router_per_token + flops_expert_per_token
-    ) + flops_lm_head_per_token
+    flops_per_token_fwd = (
+        num_layers * (flops_attn_per_token + flops_router_per_token + flops_expert_per_token)
+        + flops_lm_head_per_token
+    )
     flops_per_token_total = 3 * flops_per_token_fwd
     return flops_per_token_total * batch_tokens
 
@@ -244,7 +248,7 @@ class MFUAccountant:
             mfu=mfu,
             step_ms=dt * 1000.0,
             tokens_per_sec=tps,
-            flops_dense=0.0,   # not decomposed in streaming path
+            flops_dense=0.0,  # not decomposed in streaming path
             flops_sparse=0.0,
         )
         self.history.append(res)

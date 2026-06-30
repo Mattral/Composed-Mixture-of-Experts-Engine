@@ -17,10 +17,10 @@ moe.py  — RMSNorm, ToyMoEBlock, ToyMoEModel
 
 from pkg.models.moe import RMSNorm, ToyMoEBlock, ToyMoEModel
 from pkg.models.registry import (
-    register_model,
+    ModelRegistry,
     build_model_from_config,
     list_registered_models,
-    ModelRegistry,
+    register_model,
 )
 
 __all__ = [

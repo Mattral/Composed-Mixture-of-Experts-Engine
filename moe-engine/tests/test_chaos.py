@@ -65,7 +65,7 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKER = Path(__file__).resolve().parent / "_chaos_worker.py"
 
 # Module-level skip: chaos suite requires torchrun on $PATH.
-if shutil.which("torchrun") is None:                             # pragma: no cover
+if shutil.which("torchrun") is None:  # pragma: no cover
     pytest.skip("torchrun not available on $PATH", allow_module_level=True)
 
 
@@ -108,9 +108,13 @@ def _torchrun_session(
     # don't accidentally rendezvous with somebody else's run.
     full_env = dict(os.environ)
     for var in (
-        "RANK", "LOCAL_RANK", "WORLD_SIZE",
-        "MASTER_ADDR", "MASTER_PORT",
-        "TORCHELASTIC_RESTART_COUNT", "TORCHELASTIC_RUN_ID",
+        "RANK",
+        "LOCAL_RANK",
+        "WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "TORCHELASTIC_RESTART_COUNT",
+        "TORCHELASTIC_RUN_ID",
         "TORCHELASTIC_USE_AGENT_STORE",
     ):
         full_env.pop(var, None)
@@ -131,7 +135,7 @@ def _torchrun_session(
     full_env.setdefault("TORCHELASTIC_USE_AGENT_STORE", "0")
     # Make sure the worker can `import pkg.*`.
     pp = full_env.get("PYTHONPATH", "")
-    full_env["PYTHONPATH"] = (str(ROOT) + (os.pathsep + pp if pp else ""))
+    full_env["PYTHONPATH"] = str(ROOT) + (os.pathsep + pp if pp else "")
 
     proc = subprocess.Popen(
         cmd,
@@ -178,7 +182,7 @@ def _torchrun_session(
             pass
         try:
             proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:                       # pragma: no cover
+        except subprocess.TimeoutExpired:  # pragma: no cover
             try:
                 proc.kill()
             except ProcessLookupError:
@@ -288,9 +292,8 @@ def _no_zombie_workers_after_test() -> Iterator[None]:
         except Exception:
             pass
         leftovers = [ln for ln in out.splitlines() if ln.strip()]
-    assert not leftovers, (
-        "zombie chaos worker processes detected after test:\n  "
-        + "\n  ".join(leftovers)
+    assert not leftovers, "zombie chaos worker processes detected after test:\n  " + "\n  ".join(
+        leftovers
     )
 
 
@@ -308,16 +311,18 @@ def test_chaos_baseline_no_fault(tmp_path: Path) -> None:
         "CHAOS_SCENARIO": "A",
         "CHAOS_TOTAL_STEPS": str(total_steps),
         "CHAOS_TOKENS_PER_STEP": str(tokens_per_step),
-        "CHAOS_KILL_STEP": "9999",   # unreachable: no kill happens
+        "CHAOS_KILL_STEP": "9999",  # unreachable: no kill happens
         "CHAOS_KILL_RANK": "999",
     }
     with _torchrun_session(
-        nproc=world, max_restarts=0, env=env, timeout=120,
+        nproc=world,
+        max_restarts=0,
+        env=env,
+        timeout=120,
     ) as (proc, log):
         pass
     assert proc.returncode == 0, (
-        f"baseline torchrun nonzero exit (rc={proc.returncode}):\n"
-        f"{log[-4000:]}"
+        f"baseline torchrun nonzero exit (rc={proc.returncode}):\n{log[-4000:]}"
     )
 
     tele = _load_telemetry(tmp_path)
@@ -327,9 +332,7 @@ def test_chaos_baseline_no_fault(tmp_path: Path) -> None:
     )
     for r in range(world):
         # Exactly one generation in baseline (no restarts).
-        assert list(tele[r].keys()) == [0], (
-            f"rank {r}: expected only gen 0, got {list(tele[r])}"
-        )
+        assert list(tele[r].keys()) == [0], f"rank {r}: expected only gen 0, got {list(tele[r])}"
         events = tele[r][0]
         _assert_monotonic_steps(events, where=f"baseline rank={r} gen=0")
         # Token conservation.
@@ -339,9 +342,7 @@ def test_chaos_baseline_no_fault(tmp_path: Path) -> None:
             f"{total_steps * tokens_per_step} (token conservation broken)"
         )
         # Finish-event sidecar.
-        assert r in finals and 0 in finals[r], (
-            f"rank {r}: missing final/rank-{r:02d}-gen-00.json"
-        )
+        assert r in finals and 0 in finals[r], f"rank {r}: missing final/rank-{r:02d}-gen-00.json"
         assert finals[r][0]["final_step"] == total_steps - 1
         assert finals[r][0]["cum_tokens"] == total_steps * tokens_per_step
 
@@ -365,12 +366,14 @@ def test_chaos_scenario_a_sudden_node_failure(tmp_path: Path) -> None:
         "CHAOS_KILL_RANK": str(kill_rank),
     }
     with _torchrun_session(
-        nproc=world, max_restarts=2, env=env, timeout=240,
+        nproc=world,
+        max_restarts=2,
+        env=env,
+        timeout=240,
     ) as (proc, log):
         pass
     assert proc.returncode == 0, (
-        f"scenario A torchrun nonzero exit (rc={proc.returncode}):\n"
-        f"{log[-6000:]}"
+        f"scenario A torchrun nonzero exit (rc={proc.returncode}):\n{log[-6000:]}"
     )
 
     tele = _load_telemetry(tmp_path)
@@ -384,20 +387,16 @@ def test_chaos_scenario_a_sudden_node_failure(tmp_path: Path) -> None:
     # and gen 1 (post-recovery).
     target_gens = sorted(tele[kill_rank].keys())
     assert len(target_gens) >= 2 and target_gens[0] == 0, (
-        f"rank {kill_rank}: expected ≥2 generations starting at 0, "
-        f"got {target_gens}"
+        f"rank {kill_rank}: expected ≥2 generations starting at 0, got {target_gens}"
     )
 
     # Gen 0 of the targeted rank MUST contain a self_sigkill event at the
     # configured step.
     g0 = tele[kill_rank][0]
     sigkill_evs = [
-        ev for ev in g0
-        if ev.get("event") == "self_sigkill" and ev.get("step") == kill_step
+        ev for ev in g0 if ev.get("event") == "self_sigkill" and ev.get("step") == kill_step
     ]
-    assert sigkill_evs, (
-        f"rank {kill_rank}: no self_sigkill event at step {kill_step} in gen 0"
-    )
+    assert sigkill_evs, f"rank {kill_rank}: no self_sigkill event at step {kill_step} in gen 0"
 
     # Checksum identity: every checksum_verify event across all ranks/gens
     # must report match=true. Worker also asserts via assert_close at load
@@ -433,8 +432,7 @@ def test_chaos_scenario_a_sudden_node_failure(tmp_path: Path) -> None:
         )
         finish = finish_evs[-1]
         assert finish["final_step"] == total_steps - 1, (
-            f"rank {r} gen {last_gen}: final_step={finish['final_step']} "
-            f"!= {total_steps - 1}"
+            f"rank {r} gen {last_gen}: final_step={finish['final_step']} != {total_steps - 1}"
         )
         assert finish["cum_tokens"] == total_steps * tokens_per_step, (
             f"rank {r} gen {last_gen}: cum_tokens={finish['cum_tokens']} "
@@ -464,18 +462,20 @@ def test_chaos_scenario_b_storage_stall(tmp_path: Path) -> None:
         "CHAOS_TOKENS_PER_STEP": str(tokens_per_step),
         "CHAOS_LATENCY_STEP": str(latency_step),
         "CHAOS_LATENCY_SECONDS": str(latency_seconds),
-        "CHAOS_KILL_STEP": "9999",   # unreachable
+        "CHAOS_KILL_STEP": "9999",  # unreachable
         "CHAOS_KILL_RANK": "999",
     }
     t0 = time.perf_counter()
     with _torchrun_session(
-        nproc=world, max_restarts=0, env=env, timeout=180,
+        nproc=world,
+        max_restarts=0,
+        env=env,
+        timeout=180,
     ) as (proc, log):
         pass
     elapsed = time.perf_counter() - t0
     assert proc.returncode == 0, (
-        f"scenario B torchrun nonzero exit (rc={proc.returncode}):\n"
-        f"{log[-6000:]}"
+        f"scenario B torchrun nonzero exit (rc={proc.returncode}):\n{log[-6000:]}"
     )
     # Sanity: stall actually fired (run cannot have finished faster than
     # the injected stall, modulo a small slack for timer skew).

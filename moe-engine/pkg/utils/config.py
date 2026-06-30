@@ -41,13 +41,14 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict
 
 import yaml
 
 try:
     from pydantic import BaseModel, Field, field_validator, model_validator
     from pydantic import ValidationError as _PydanticValidationError
+
     _HAS_PYDANTIC = True
 except ImportError:
     _HAS_PYDANTIC = False
@@ -58,6 +59,7 @@ except ImportError:
         def __init__(self, **kwargs):
             for k, v in kwargs.items():
                 setattr(self, k, v)
+
         def model_dump(self):
             return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
 
@@ -67,11 +69,13 @@ except ImportError:
     def field_validator(*args, **kwargs):  # type: ignore
         def decorator(fn):
             return fn
+
         return decorator
 
     def model_validator(**kwargs):  # type: ignore
         def decorator(fn):
             return fn
+
         return decorator
 
 
@@ -100,8 +104,10 @@ class ConfigValidationError(ValueError):
 # Sub-config models
 # ===========================================================================
 
+
 class ModelConfig(BaseModel):
     """Architecture hyperparameters."""
+
     hidden_dim: int = Field(4096, description="Token embedding / hidden dimension (H).")
     num_layers: int = Field(32, description="Number of Transformer + MoE blocks.")
     num_experts: int = Field(64, description="Total number of experts (E).")
@@ -113,6 +119,7 @@ class ModelConfig(BaseModel):
     dtype: str = Field("bfloat16", description="Training precision.")
 
     if _HAS_PYDANTIC:
+
         @model_validator(mode="after")
         def _cross_validate(self) -> "ModelConfig":
             if self.top_k > self.num_experts:
@@ -129,14 +136,13 @@ class ModelConfig(BaseModel):
                 )
             valid_dtypes = {"float32", "bfloat16", "float16"}
             if self.dtype not in valid_dtypes:
-                raise ValueError(
-                    f"dtype must be one of {valid_dtypes}, got {self.dtype!r}"
-                )
+                raise ValueError(f"dtype must be one of {valid_dtypes}, got {self.dtype!r}")
             return self
 
 
 class TrainingConfig(BaseModel):
     """Optimizer and learning-rate schedule parameters."""
+
     global_batch_size: int = Field(4096)
     micro_batch_size: int = Field(4)
     learning_rate: float = Field(3e-4)
@@ -147,8 +153,17 @@ class TrainingConfig(BaseModel):
     ckpt_interval: int = Field(500)
     warmup_steps: int = Field(2000)
     gradient_accumulation_steps: int = Field(4)
+    z_loss_weight: float = Field(
+        0.0,
+        description=(
+            "Auxiliary router z-loss weight (Switch Transformer style). "
+            "0.0 = disabled. Typical value: 1e-3. "
+            "Override via MOE_TRAINING__Z_LOSS_WEIGHT=1e-3."
+        ),
+    )
 
     if _HAS_PYDANTIC:
+
         @model_validator(mode="after")
         def _warmup_le_max_steps(self) -> "TrainingConfig":
             if self.warmup_steps >= self.max_steps:
@@ -160,6 +175,7 @@ class TrainingConfig(BaseModel):
 
 class ParallelismConfig(BaseModel):
     """4D parallelism sizing."""
+
     data_parallel: int = Field(8, description="Data parallel degree (DP).")
     expert_parallel: int = Field(8, description="Expert parallel degree (EP).")
     tensor_parallel: int = Field(1, description="Tensor parallel degree (TP).")
@@ -178,24 +194,25 @@ class ParallelismConfig(BaseModel):
 
 class CheckpointConfig(BaseModel):
     """Two-tier async checkpointing config."""
+
     local_dir: str = Field("/mnt/nvme/moe-engine/ckpts")
     remote_uri: str = Field("s3://moe-engine-ckpts/run-001/")
     async_workers: int = Field(4)
     retention: int = Field(8)
 
     if _HAS_PYDANTIC:
+
         @field_validator("remote_uri")
         @classmethod
         def _valid_uri(cls, v: str) -> str:
             if not (v.startswith("s3://") or v.startswith("file://")):
-                raise ValueError(
-                    f"remote_uri must start with 's3://' or 'file://', got: {v!r}"
-                )
+                raise ValueError(f"remote_uri must start with 's3://' or 'file://', got: {v!r}")
             return v
 
 
 class ElasticConfig(BaseModel):
     """TorchElastic / fault-tolerance parameters."""
+
     min_nodes: int = Field(8)
     max_nodes: int = Field(256)
     rdzv_backend: str = Field("c10d")
@@ -204,6 +221,7 @@ class ElasticConfig(BaseModel):
     drop_grace_period_s: float = Field(30.0)
 
     if _HAS_PYDANTIC:
+
         @model_validator(mode="after")
         def _min_le_max(self) -> "ElasticConfig":
             if self.min_nodes > self.max_nodes:
@@ -215,6 +233,7 @@ class ElasticConfig(BaseModel):
 
 class TelemetryConfig(BaseModel):
     """Logging, metrics, and MFU accounting."""
+
     log_dir: str = Field("/var/log/moe-engine")
     tensorboard_dir: str = Field("/var/log/moe-engine/tb")
     json_path: str = Field("/var/log/moe-engine/step.jsonl")
@@ -228,6 +247,7 @@ class TelemetryConfig(BaseModel):
 # ===========================================================================
 # Root config
 # ===========================================================================
+
 
 class MoEConfig(BaseModel):
     """Root configuration for moe-engine.
@@ -356,6 +376,7 @@ class MoEConfig(BaseModel):
            Access fields directly: ``cfg.model.hidden_dim``
         """
         import warnings
+
         warnings.warn(
             "MoEConfig.raw is deprecated; access fields directly: cfg.model.hidden_dim",
             DeprecationWarning,
@@ -368,12 +389,14 @@ class MoEConfig(BaseModel):
 # Legacy load_config shim - keeps old train.py call sites working
 # ===========================================================================
 
+
 class _LegacyConfig:
     """Wrapper that makes MoEConfig look like the old Config dataclass.
 
     Old: cfg = load_config(path); cfg.raw["model"]["hidden_dim"]
     New: cfg = MoEConfig.from_yaml(path); cfg.model.hidden_dim
     """
+
     def __init__(self, moe_cfg: MoEConfig):
         self._cfg = moe_cfg
         d = moe_cfg.to_dict()
@@ -402,6 +425,7 @@ def load_config(path: str | Path) -> _LegacyConfig:
 # Environment variable override helper
 # ===========================================================================
 
+
 def _apply_env_overrides(d: Dict[str, Any]) -> Dict[str, Any]:
     """Apply ``MOE_<SECTION>__<KEY>=value`` overrides from the environment.
 
@@ -415,12 +439,13 @@ def _apply_env_overrides(d: Dict[str, Any]) -> Dict[str, Any]:
     are converted from their string representations correctly.
     """
     import copy
+
     d = copy.deepcopy(d)
     prefix = "MOE_"
     for key, val in os.environ.items():
         if not key.startswith(prefix):
             continue
-        rest = key[len(prefix):].lower()
+        rest = key[len(prefix) :].lower()
         if "__" not in rest:
             continue
         section, _, field_name = rest.partition("__")

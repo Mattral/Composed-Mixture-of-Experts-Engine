@@ -26,16 +26,13 @@ from __future__ import annotations
 
 import os
 import pathlib
-import tempfile
 
 import pytest
 
 from pkg.utils.config import (
     ConfigValidationError,
     MoEConfig,
-    ModelConfig,
     ParallelismConfig,
-    TrainingConfig,
     load_config,
 )
 
@@ -53,26 +50,55 @@ def _minimal_dict(**overrides) -> dict:
     """Return the smallest valid raw dict, optionally overriding model fields."""
     d = {
         "model": {
-            "hidden_dim": 64, "num_layers": 2, "num_experts": 8, "top_k": 2,
-            "capacity_factor": 1.25, "ffn_dim": 128, "vocab_size": 256,
-            "sequence_length": 16, "dtype": "float32",
+            "hidden_dim": 64,
+            "num_layers": 2,
+            "num_experts": 8,
+            "top_k": 2,
+            "capacity_factor": 1.25,
+            "ffn_dim": 128,
+            "vocab_size": 256,
+            "sequence_length": 16,
+            "dtype": "float32",
         },
         "training": {
-            "global_batch_size": 8, "micro_batch_size": 2, "learning_rate": 3e-4,
-            "weight_decay": 0.1, "grad_clip": 1.0, "max_steps": 10,
-            "log_interval": 1, "ckpt_interval": 5, "warmup_steps": 2,
+            "global_batch_size": 8,
+            "micro_batch_size": 2,
+            "learning_rate": 3e-4,
+            "weight_decay": 0.1,
+            "grad_clip": 1.0,
+            "max_steps": 10,
+            "log_interval": 1,
+            "ckpt_interval": 5,
+            "warmup_steps": 2,
             "gradient_accumulation_steps": 1,
         },
-        "parallelism": {"data_parallel": 1, "expert_parallel": 1,
-                        "tensor_parallel": 1, "pipeline_parallel": 1},
-        "checkpoint": {"local_dir": "/tmp/test", "remote_uri": "file:///tmp/remote",
-                       "async_workers": 1, "retention": 2},
-        "elastic": {"min_nodes": 1, "max_nodes": 4, "rdzv_backend": "c10d",
-                    "rdzv_endpoint": "localhost:29400",
-                    "health_check_interval_s": 1.0, "drop_grace_period_s": 5.0},
-        "telemetry": {"log_dir": "/tmp/logs", "tensorboard_dir": "/tmp/logs/tb",
-                      "json_path": "/tmp/logs/step.jsonl",
-                      "mfu_target": 0.55, "hardware_peak_tflops": 989.0},
+        "parallelism": {
+            "data_parallel": 1,
+            "expert_parallel": 1,
+            "tensor_parallel": 1,
+            "pipeline_parallel": 1,
+        },
+        "checkpoint": {
+            "local_dir": "/tmp/test",
+            "remote_uri": "file:///tmp/remote",
+            "async_workers": 1,
+            "retention": 2,
+        },
+        "elastic": {
+            "min_nodes": 1,
+            "max_nodes": 4,
+            "rdzv_backend": "c10d",
+            "rdzv_endpoint": "localhost:29400",
+            "health_check_interval_s": 1.0,
+            "drop_grace_period_s": 5.0,
+        },
+        "telemetry": {
+            "log_dir": "/tmp/logs",
+            "tensorboard_dir": "/tmp/logs/tb",
+            "json_path": "/tmp/logs/step.jsonl",
+            "mfu_target": 0.55,
+            "hardware_peak_tflops": 989.0,
+        },
     }
     d["model"].update(overrides)
     return d
@@ -81,6 +107,7 @@ def _minimal_dict(**overrides) -> dict:
 # ===========================================================================
 # From-file loading
 # ===========================================================================
+
 
 class TestFromYaml:
     def test_smoke_yaml_loads(self):
@@ -112,6 +139,7 @@ class TestFromYaml:
 # ===========================================================================
 # From-dict loading and validation
 # ===========================================================================
+
 
 class TestFromDict:
     def test_valid_minimal_dict(self):
@@ -180,21 +208,25 @@ class TestFromDict:
 # Sub-config properties
 # ===========================================================================
 
+
 class TestParallelismConfig:
     def test_world_size_product(self):
-        p = ParallelismConfig(data_parallel=4, expert_parallel=8,
-                               tensor_parallel=2, pipeline_parallel=2)
+        p = ParallelismConfig(
+            data_parallel=4, expert_parallel=8, tensor_parallel=2, pipeline_parallel=2
+        )
         assert p.world_size == 4 * 8 * 2 * 2
 
     def test_single_rank(self):
-        p = ParallelismConfig(data_parallel=1, expert_parallel=1,
-                               tensor_parallel=1, pipeline_parallel=1)
+        p = ParallelismConfig(
+            data_parallel=1, expert_parallel=1, tensor_parallel=1, pipeline_parallel=1
+        )
         assert p.world_size == 1
 
 
 # ===========================================================================
 # Environment variable overrides
 # ===========================================================================
+
 
 class TestEnvOverrides:
     def test_hidden_dim_override(self):
@@ -245,6 +277,7 @@ class TestEnvOverrides:
 # Serialisation round-trip
 # ===========================================================================
 
+
 class TestSerialisationRoundTrip:
     def test_to_dict_from_dict_roundtrip(self):
         cfg = MoEConfig.from_yaml(_DEFAULT)
@@ -280,6 +313,7 @@ class TestSerialisationRoundTrip:
 # Legacy load_config shim
 # ===========================================================================
 
+
 class TestLegacyShim:
     def test_raw_dict_access(self):
         legacy = load_config(_SMOKE)
@@ -308,6 +342,7 @@ class TestLegacyShim:
 # ===========================================================================
 # Defaults are sensible for production
 # ===========================================================================
+
 
 class TestDefaultsAreSane:
     def test_default_yaml_capacity_factor_ge_1(self):

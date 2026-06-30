@@ -36,6 +36,7 @@ sys.path.insert(0, str(_ROOT))
 
 try:
     import typer
+
     _HAS_TYPER = True
 except ImportError:
     _HAS_TYPER = False
@@ -56,8 +57,8 @@ if not _HAS_TYPER:
     sys.exit(1)
 
 
-from typing import Optional
-import subprocess
+import subprocess  # noqa: E402
+from typing import Optional  # noqa: E402
 
 app = typer.Typer(
     name="moe",
@@ -74,28 +75,47 @@ app = typer.Typer(
 # moe train
 # ===========================================================================
 
+
 @app.command("train")
 def train(
-    config: Path = typer.Option(..., "--config", "-c",
+    config: Path = typer.Option(
+        ...,
+        "--config",
+        "-c",
         help="Path to YAML config file (e.g. configs/smoke.yaml).",
-        exists=True, file_okay=True, dir_okay=False, readable=True,
+        exists=True,
+        file_okay=True,
+        dir_okay=False,
+        readable=True,
     ),
-    max_steps: Optional[int] = typer.Option(None, "--max-steps",
+    max_steps: Optional[int] = typer.Option(
+        None,
+        "--max-steps",
         help="Override max_steps from config.",
     ),
-    smoke: bool = typer.Option(False, "--smoke",
+    smoke: bool = typer.Option(
+        False,
+        "--smoke",
         help="Minimal smoke run: toy model, 5 steps, no GPU required.",
     ),
-    profile: bool = typer.Option(False, "--profile",
+    profile: bool = typer.Option(
+        False,
+        "--profile",
         help="Write a benchmark JSON to benchmarks/ on exit.",
     ),
-    wandb_project: Optional[str] = typer.Option(None, "--wandb-project",
+    wandb_project: Optional[str] = typer.Option(
+        None,
+        "--wandb-project",
         help="WandB project name (requires WANDB_API_KEY env var).",
     ),
-    no_wandb: bool = typer.Option(False, "--no-wandb",
+    no_wandb: bool = typer.Option(
+        False,
+        "--no-wandb",
         help="Disable WandB logging even if WANDB_API_KEY is set.",
     ),
-    nproc: int = typer.Option(1, "--nproc",
+    nproc: int = typer.Option(
+        1,
+        "--nproc",
         help="Number of processes (uses torchrun when nproc > 1).",
     ),
 ) -> None:
@@ -114,7 +134,15 @@ def train(
     local multi-GPU only).
     """
     # Validate config before launching anything
-    _validate_one(config)
+    # Validate config before launching
+    from pkg.utils.config import ConfigValidationError, MoEConfig
+
+    try:
+        MoEConfig.from_yaml(config)
+        typer.echo(f"Config {config} validated OK.")
+    except (ConfigValidationError, FileNotFoundError) as exc:
+        typer.echo(f"Config validation failed: {exc}", err=True)
+        raise typer.Exit(1)
 
     cmd: list[str] = []
 
@@ -128,7 +156,8 @@ def train(
     cmd += [
         sys.executable,
         str(_ROOT / "train.py"),
-        "--config", str(config),
+        "--config",
+        str(config),
     ]
 
     if max_steps is not None:
@@ -145,7 +174,8 @@ def train(
     # For single-process, replace the process entirely (no subprocess overhead).
     if nproc == 1:
         import train as _train_module  # noqa: F401
-        sys.argv = ["train.py"] + cmd[cmd.index(str(_ROOT / "train.py")) + 1:]
+
+        sys.argv = ["train.py"] + cmd[cmd.index(str(_ROOT / "train.py")) + 1 :]
         _train_module.main()
     else:
         typer.echo(f"Launching: {' '.join(cmd)}")
@@ -157,16 +187,22 @@ def train(
 # moe benchmark
 # ===========================================================================
 
+
 @app.command("benchmark")
 def benchmark(
-    cuda: bool = typer.Option(False, "--cuda",
+    cuda: bool = typer.Option(
+        False,
+        "--cuda",
         help="Run GPU benchmark (requires CUDA + Triton).",
     ),
     json_out: Path = typer.Option(
-        Path("/tmp/moe_bench.json"), "--json",
+        Path("/tmp/moe_bench.json"),
+        "--json",
         help="Output path for JSON results.",
     ),
-    csv_out: Optional[Path] = typer.Option(None, "--csv",
+    csv_out: Optional[Path] = typer.Option(
+        None,
+        "--csv",
         help="Output path for CSV results (optional).",
     ),
 ) -> None:
@@ -185,7 +221,8 @@ def benchmark(
     cmd = [
         sys.executable,
         str(_ROOT / "benchmarks" / "run_benchmark.py"),
-        "--json", str(json_out),
+        "--json",
+        str(json_out),
     ]
     if cuda:
         cmd.append("--cuda")
@@ -202,6 +239,7 @@ def benchmark(
 # ===========================================================================
 # moe validate
 # ===========================================================================
+
 
 @app.command("validate")
 def validate(
@@ -223,7 +261,7 @@ def validate(
 
         moe validate configs/smoke.yaml configs/default.yaml
     """
-    from pkg.utils.config import MoEConfig, ConfigValidationError
+    from pkg.utils.config import ConfigValidationError, MoEConfig
 
     all_paths: list[Path] = []
     for p in paths:
@@ -264,8 +302,7 @@ def validate(
         typer.echo(f"\033[92mAll {len(all_paths)} config(s) valid.\033[0m")
     else:
         typer.echo(
-            f"\033[91m{failed} config(s) failed, "
-            f"{len(all_paths) - failed} passed.\033[0m",
+            f"\033[91m{failed} config(s) failed, {len(all_paths) - failed} passed.\033[0m",
             err=True,
         )
         raise typer.Exit(1)
@@ -275,6 +312,7 @@ def validate(
 # moe info
 # ===========================================================================
 
+
 @app.command("info")
 def info() -> None:
     """Print moe-engine environment information.
@@ -283,7 +321,6 @@ def info() -> None:
     Python version, PyTorch version, CUDA availability, Triton version,
     and the moe-engine package version.
     """
-    import importlib
 
     typer.echo("\n=== moe-engine environment ===\n")
 
@@ -293,10 +330,12 @@ def info() -> None:
     # PyTorch
     try:
         import torch
+
         typer.echo(f"  PyTorch:   {torch.__version__}")
         if torch.cuda.is_available():
-            typer.echo(f"  CUDA:      {torch.version.cuda}  "
-                       f"(device: {torch.cuda.get_device_name(0)})")
+            typer.echo(
+                f"  CUDA:      {torch.version.cuda}  (device: {torch.cuda.get_device_name(0)})"
+            )
         else:
             typer.echo("  CUDA:      not available")
     except ImportError:
@@ -305,6 +344,7 @@ def info() -> None:
     # Triton
     try:
         import triton
+
         typer.echo(f"  Triton:    {triton.__version__}")
     except ImportError:
         typer.echo("  Triton:    not installed (GPU path unavailable)")
@@ -312,6 +352,7 @@ def info() -> None:
     # Pydantic
     try:
         import pydantic
+
         typer.echo(f"  Pydantic:  {pydantic.__version__}")
     except ImportError:
         typer.echo("  Pydantic:  not installed (config validation unavailable)")
@@ -319,6 +360,7 @@ def info() -> None:
     # moe-engine
     try:
         import pkg as _pkg
+
         typer.echo(f"  moe-engine: {_pkg.__version__}")
     except (ImportError, AttributeError):
         typer.echo("  moe-engine: (version unknown)")
@@ -329,6 +371,7 @@ def info() -> None:
     for yaml_path in sorted((_ROOT / "configs").glob("*.yaml")):
         try:
             from pkg.utils.config import MoEConfig
+
             cfg = MoEConfig.from_yaml(yaml_path)
             typer.echo(
                 f"    \033[92m[OK]\033[0m {yaml_path.name}: "

@@ -28,11 +28,12 @@ __all__ = ["apply_fsdp2"]
 # Optional FSDP2 import — gracefully degrade to identity on older PyTorch.
 # ---------------------------------------------------------------------------
 try:
-    from torch.distributed._composable.fsdp import fully_shard, MixedPrecisionPolicy
+    from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
+
     _HAS_FSDP2 = True
-except Exception:                                                        # pragma: no cover
-    fully_shard = None                                                   # type: ignore
-    MixedPrecisionPolicy = None                                          # type: ignore
+except Exception:  # pragma: no cover
+    fully_shard = None  # type: ignore
+    MixedPrecisionPolicy = None  # type: ignore
     _HAS_FSDP2 = False
 
 
@@ -70,11 +71,7 @@ def apply_fsdp2(
     if not _HAS_FSDP2 or topology.dp_size == 1 or topology.mesh is None:
         return model
 
-    dp_mesh = (
-        topology.mesh["dp"]
-        if "dp" in topology.mesh.mesh_dim_names
-        else topology.mesh
-    )
+    dp_mesh = topology.mesh["dp"] if "dp" in topology.mesh.mesh_dim_names else topology.mesh
     mp_policy = (
         MixedPrecisionPolicy(
             param_dtype=mixed_precision_dtype,

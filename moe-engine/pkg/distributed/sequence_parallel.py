@@ -120,7 +120,7 @@ def scatter_to_sequence_parallel(
         )
     chunk = S // topology.tp_size
     tp_rank = topology.tp_rank
-    shard = x[:, tp_rank * chunk:(tp_rank + 1) * chunk, :].contiguous()
+    shard = x[:, tp_rank * chunk : (tp_rank + 1) * chunk, :].contiguous()
 
     if next_weight is None:
         return shard

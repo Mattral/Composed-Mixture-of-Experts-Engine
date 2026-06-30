@@ -22,7 +22,6 @@ Public API
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -30,11 +29,12 @@ import torch
 import torch.distributed as dist
 
 try:
-    from torch.distributed.device_mesh import init_device_mesh, DeviceMesh
+    from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
+
     _HAS_DEVICE_MESH = True
-except Exception:                                                        # pragma: no cover
-    init_device_mesh = None                                              # type: ignore
-    DeviceMesh = object                                                  # type: ignore
+except Exception:  # pragma: no cover
+    init_device_mesh = None  # type: ignore
+    DeviceMesh = object  # type: ignore
     _HAS_DEVICE_MESH = False
 
 __all__ = [
@@ -55,6 +55,7 @@ _PP_GROUPS: Dict[Tuple[int, int], dist.ProcessGroup] = {}
 # ===========================================================================
 # Topology descriptor
 # ===========================================================================
+
 
 @dataclass(frozen=True)
 class ParallelTopology:
@@ -165,6 +166,7 @@ class ParallelTopology:
 # Process group helpers
 # ===========================================================================
 
+
 def tp_process_group(topology: ParallelTopology) -> "Optional[dist.ProcessGroup]":
     """Return (or lazily create) the TP process group for this rank.
 
@@ -183,10 +185,7 @@ def tp_process_group(topology: ParallelTopology) -> "Optional[dist.ProcessGroup]
         except Exception:
             pass
 
-    assert (
-        topology.world_size
-        == topology.dp_size * topology.tp_size * topology.ep_size
-    )
+    assert topology.world_size == topology.dp_size * topology.tp_size * topology.ep_size
     key = (topology.dp_rank, topology.ep_rank, topology.tp_size)
     if key in _TP_GROUPS:
         return _TP_GROUPS[key]
@@ -238,6 +237,7 @@ def pp_process_group(topology: ParallelTopology) -> "Optional[dist.ProcessGroup]
 # Topology constructor
 # ===========================================================================
 
+
 def build_topology(
     dp_size: int,
     ep_size: int,
@@ -277,9 +277,14 @@ def build_topology(
         )
         dev = torch.device(device_type_actual)
         return ParallelTopology(
-            world_size=1, rank=0,
-            dp_size=1, ep_size=1, tp_size=1, pp_size=1,
-            mesh=None, device=dev,
+            world_size=1,
+            rank=0,
+            dp_size=1,
+            ep_size=1,
+            tp_size=1,
+            pp_size=1,
+            mesh=None,
+            device=dev,
         )
 
     # Multi-rank: validate and build the mesh.
@@ -310,7 +315,12 @@ def build_topology(
     local_device_idx = rank % max(torch.cuda.device_count(), 1)
     dev = torch.device(f"{device_type}:{local_device_idx}")
     return ParallelTopology(
-        world_size=world_size, rank=rank,
-        dp_size=dp_size, ep_size=ep_size, tp_size=tp_size, pp_size=pp_size,
-        mesh=mesh, device=dev,
+        world_size=world_size,
+        rank=rank,
+        dp_size=dp_size,
+        ep_size=ep_size,
+        tp_size=tp_size,
+        pp_size=pp_size,
+        mesh=mesh,
+        device=dev,
     )

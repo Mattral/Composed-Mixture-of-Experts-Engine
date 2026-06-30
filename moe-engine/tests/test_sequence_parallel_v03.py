@@ -36,20 +36,18 @@ import torch.multiprocessing as mp
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pkg.distributed.parallel_mesh import (
-
-
+from pkg.distributed.parallel_mesh import (  # noqa: E402
     build_topology,
     gather_from_sequence_parallel,
     scatter_to_sequence_parallel,
 )
-
 
 pytestmark = pytest.mark.cpu
 
 # ---------------------------------------------------------------------------
 # Single-process tests (tp_size=1, no dist)
 # ---------------------------------------------------------------------------
+
 
 def test_scatter_fused_shape_tp1():
     """Fused path returns [B, S, out_features] at tp=1 (no shard)."""
@@ -59,6 +57,7 @@ def test_scatter_fused_shape_tp1():
     w = torch.randn(F, H)
     out = scatter_to_sequence_parallel(x, topo, next_weight=w)
     assert out.shape == (B, S, F), f"Expected ({B},{S},{F}), got {out.shape}"
+
 
 def test_scatter_fused_matches_linear_tp1():
     """Fused path output must equal nn.functional.linear(x, w) at tp=1."""
@@ -70,8 +69,9 @@ def test_scatter_fused_matches_linear_tp1():
     fused = scatter_to_sequence_parallel(x, topo, next_weight=w)
     ref = torch.nn.functional.linear(x, w)
     assert torch.allclose(fused, ref, atol=1e-6), (
-        f"Fused SP output diverges from reference at tp=1. max_diff={abs(fused-ref).max():.2e}"
+        f"Fused SP output diverges from reference at tp=1. max_diff={abs(fused - ref).max():.2e}"
     )
+
 
 def test_scatter_identity_tp1():
     """Without next_weight, scatter returns the original tensor at tp=1."""
@@ -80,10 +80,12 @@ def test_scatter_identity_tp1():
     out = scatter_to_sequence_parallel(x, topo, next_weight=None)
     assert torch.equal(out, x)
 
+
 def test_gather_identity_tp1():
     topo = build_topology(dp_size=1, tp_size=1, ep_size=1, device_type="cpu")
     x = torch.randn(4, 64, 32)
     assert torch.equal(gather_from_sequence_parallel(x, topo), x)
+
 
 def test_scatter_gather_round_trip_tp1():
     topo = build_topology(dp_size=1, tp_size=1, ep_size=1, device_type="cpu")
@@ -93,6 +95,7 @@ def test_scatter_gather_round_trip_tp1():
     )
     assert torch.equal(recovered, x)
 
+
 def test_scatter_fused_no_nan():
     """Fused path must never produce NaN."""
     topo = build_topology(dp_size=1, tp_size=1, ep_size=1, device_type="cpu")
@@ -101,11 +104,15 @@ def test_scatter_fused_no_nan():
     out = scatter_to_sequence_parallel(x, topo, next_weight=w)
     assert not torch.isnan(out).any()
 
-@pytest.mark.parametrize("B,S,H,F", [
-    (1, 4, 16, 32),
-    (2, 8, 64, 128),
-    (4, 16, 32, 64),
-])
+
+@pytest.mark.parametrize(
+    "B,S,H,F",
+    [
+        (1, 4, 16, 32),
+        (2, 8, 64, 128),
+        (4, 16, 32, 64),
+    ],
+)
 def test_scatter_fused_parametrised(B, S, H, F):
     topo = build_topology(dp_size=1, tp_size=1, ep_size=1, device_type="cpu")
     x = torch.randn(B, S, H)
@@ -115,9 +122,11 @@ def test_scatter_fused_parametrised(B, S, H, F):
     assert torch.allclose(out, ref, atol=1e-6)
     assert out.shape == (B, S, F)
 
+
 # ---------------------------------------------------------------------------
 # Multi-rank SP fused path (2-rank mp.spawn)
 # ---------------------------------------------------------------------------
+
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -125,7 +134,10 @@ def _free_port() -> int:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
-def _sp_fused_worker(rank: int, world_size: int, port: int, result_queue, B: int, S: int, H: int, F: int, seed: int):
+
+def _sp_fused_worker(
+    rank: int, world_size: int, port: int, result_queue, B: int, S: int, H: int, F: int, seed: int
+):
     """
     Each rank holds a shard of the sequence [B, S//tp, H].
     Fused path: scatter_to_sequence_parallel(x_full, topo, next_weight=w)
@@ -152,6 +164,7 @@ def _sp_fused_worker(rank: int, world_size: int, port: int, result_queue, B: int
     max_diff = float((fused_out - ref_out).abs().max().item())
     result_queue.put({"rank": rank, "max_diff": max_diff, "error": None})
     dist.destroy_process_group()
+
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="mp.spawn fork-safety on macOS CI")
 def test_sp_fused_2rank_numerically_correct():
@@ -181,6 +194,7 @@ def test_sp_fused_2rank_numerically_correct():
         assert res["max_diff"] < 1e-5, (
             f"rank {rank}: fused SP diverges from reference by {res['max_diff']:.2e}"
         )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

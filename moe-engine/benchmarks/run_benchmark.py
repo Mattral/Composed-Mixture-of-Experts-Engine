@@ -33,11 +33,15 @@ from typing import List, Optional
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-import torch
+import torch  # noqa: E402
 
-from pkg.kernels.moe_router import MoERouter, moe_topk_route
-from pkg.distributed.parallel_mesh import DistributedMoELayer, _SwiGLUExpert, build_topology
-from pkg.utils.mfu import compute_mfu_detailed
+from pkg.distributed.parallel_mesh import (  # noqa: E402
+    DistributedMoELayer,
+    _SwiGLUExpert,
+    build_topology,
+)
+from pkg.kernels.moe_router import MoERouter, moe_topk_route  # noqa: E402
+from pkg.utils.mfu import compute_mfu_detailed  # noqa: E402
 
 
 @dataclass
@@ -51,7 +55,7 @@ class BenchResult:
     batch_ms_mean: float
     batch_ms_std: float
     tokens_per_sec: float
-    mfu_estimate: float          # rough MFU vs H100 peak
+    mfu_estimate: float  # rough MFU vs H100 peak
     passed: bool
     notes: str = ""
 
@@ -71,7 +75,7 @@ def _time_fn(fn, warmup: int = 3, iters: int = 20, sync_cuda: bool = False):
         times.append((time.perf_counter() - t0) * 1000)
     mean = sum(times) / len(times)
     variance = sum((t - mean) ** 2 for t in times) / len(times)
-    std = variance ** 0.5
+    std = variance**0.5
     return mean, std
 
 
@@ -80,27 +84,38 @@ def bench_router_forward(
 ) -> BenchResult:
     """Benchmark the router forward pass throughput."""
     tokens = torch.randn(N, H, device=device)
-    gate_w = torch.randn(H, E, device=device) * (H ** -0.5)
+    gate_w = torch.randn(H, E, device=device) * (H**-0.5)
 
     def fwd():
         return moe_topk_route(tokens, gate_w, K, force_reference=(device == "cpu"))
 
     mean_ms, std_ms = _time_fn(fwd, sync_cuda=(device != "cpu"))
-    tps = (N / (mean_ms / 1000))
+    tps = N / (mean_ms / 1000)
 
     # Rough MFU: router is ~N*H*E FLOPs (matmul only), divide by H100 peak
-    router_flops = 2 * N * H * E
     mfu = compute_mfu_detailed(
-        batch_tokens=N, param_dense=H * E, param_expert=0,
-        num_experts=E, top_k=K, world_size=1,
+        batch_tokens=N,
+        param_dense=H * E,
+        param_expert=0,
+        num_experts=E,
+        top_k=K,
+        world_size=1,
         hardware_peak_tflops=989.0,
         step_time_sec=mean_ms / 1000,
     ).mfu
 
     return BenchResult(
-        name="router_fwd", device=device, N=N, H=H, E=E, K=K,
-        batch_ms_mean=mean_ms, batch_ms_std=std_ms,
-        tokens_per_sec=tps, mfu_estimate=mfu, passed=True,
+        name="router_fwd",
+        device=device,
+        N=N,
+        H=H,
+        E=E,
+        K=K,
+        batch_ms_mean=mean_ms,
+        batch_ms_std=std_ms,
+        tokens_per_sec=tps,
+        mfu_estimate=mfu,
+        passed=True,
     )
 
 
@@ -110,7 +125,7 @@ def bench_router_fwd_bwd(
     """Benchmark router forward + backward combined."""
     tokens = torch.randn(N, H, device=device, requires_grad=True)
     gate_w = torch.randn(H, E, device=device, requires_grad=True)
-    gate_w.data *= H ** -0.5
+    gate_w.data *= H**-0.5
 
     def fwd_bwd():
         idx, w = moe_topk_route(tokens, gate_w, K, force_reference=(device == "cpu"))
@@ -124,16 +139,28 @@ def bench_router_fwd_bwd(
     mean_ms, std_ms = _time_fn(fwd_bwd, sync_cuda=(device != "cpu"))
     tps = N / (mean_ms / 1000)
     mfu = compute_mfu_detailed(
-        batch_tokens=N, param_dense=H * E * 3, param_expert=0,
-        num_experts=E, top_k=K, world_size=1,
+        batch_tokens=N,
+        param_dense=H * E * 3,
+        param_expert=0,
+        num_experts=E,
+        top_k=K,
+        world_size=1,
         hardware_peak_tflops=989.0,
         step_time_sec=mean_ms / 1000,
     ).mfu
 
     return BenchResult(
-        name="router_fwd_bwd", device=device, N=N, H=H, E=E, K=K,
-        batch_ms_mean=mean_ms, batch_ms_std=std_ms,
-        tokens_per_sec=tps, mfu_estimate=mfu, passed=True,
+        name="router_fwd_bwd",
+        device=device,
+        N=N,
+        H=H,
+        E=E,
+        K=K,
+        batch_ms_mean=mean_ms,
+        batch_ms_std=std_ms,
+        tokens_per_sec=tps,
+        mfu_estimate=mfu,
+        passed=True,
     )
 
 
@@ -142,9 +169,9 @@ def bench_moe_layer(
 ) -> BenchResult:
     """Benchmark a full DistributedMoELayer (single-process, no collectives)."""
     topo = build_topology(dp_size=1, ep_size=1, device_type=device)
-    layer = DistributedMoELayer(
-        hidden_dim=H, ffn_dim=F, num_experts=E, top_k=K, topology=topo
-    ).to(device)
+    layer = DistributedMoELayer(hidden_dim=H, ffn_dim=F, num_experts=E, top_k=K, topology=topo).to(
+        device
+    )
 
     x = torch.randn(B, S, H, device=device)
 
@@ -157,19 +184,29 @@ def bench_moe_layer(
     tps = N / (mean_ms / 1000)
 
     # Expert FFN FLOPs per active token: 3 GEMMs of size H*F (SwiGLU)
-    expert_flops_per_token = K * 6 * H * F
     mfu = compute_mfu_detailed(
-        batch_tokens=N, param_dense=0,
+        batch_tokens=N,
+        param_dense=0,
         param_expert=3 * H * F,  # SwiGLU: gate + up + down
-        num_experts=E, top_k=K, world_size=1,
+        num_experts=E,
+        top_k=K,
+        world_size=1,
         hardware_peak_tflops=989.0,
         step_time_sec=mean_ms / 1000,
     ).mfu
 
     return BenchResult(
-        name="moe_layer_fwd", device=device, N=N, H=H, E=E, K=K,
-        batch_ms_mean=mean_ms, batch_ms_std=std_ms,
-        tokens_per_sec=tps, mfu_estimate=mfu, passed=True,
+        name="moe_layer_fwd",
+        device=device,
+        N=N,
+        H=H,
+        E=E,
+        K=K,
+        batch_ms_mean=mean_ms,
+        batch_ms_std=std_ms,
+        tokens_per_sec=tps,
+        mfu_estimate=mfu,
+        passed=True,
         notes=f"B={B} S={S} F={F}",
     )
 
@@ -207,23 +244,33 @@ def bench_dense_baseline(
     tps = N / (mean_ms / 1000)
 
     mfu = compute_mfu_detailed(
-        batch_tokens=N, param_dense=3 * H * F, param_expert=0,
-        num_experts=1, top_k=1, world_size=1,
+        batch_tokens=N,
+        param_dense=3 * H * F,
+        param_expert=0,
+        num_experts=1,
+        top_k=1,
+        world_size=1,
         hardware_peak_tflops=989.0,
         step_time_sec=mean_ms / 1000,
     ).mfu
 
     return BenchResult(
-        name="dense_baseline_fwd", device=device, N=N, H=H, E=1, K=1,
-        batch_ms_mean=mean_ms, batch_ms_std=std_ms,
-        tokens_per_sec=tps, mfu_estimate=mfu, passed=True,
+        name="dense_baseline_fwd",
+        device=device,
+        N=N,
+        H=H,
+        E=1,
+        K=1,
+        batch_ms_mean=mean_ms,
+        batch_ms_std=std_ms,
+        tokens_per_sec=tps,
+        mfu_estimate=mfu,
+        passed=True,
         notes=f"B={B} S={S} F={F} (single SwiGLU FFN, no router/dispatch)",
     )
 
 
-def bench_token_conservation(
-    N: int, H: int, E: int, K: int, device: str
-) -> BenchResult:
+def bench_token_conservation(N: int, H: int, E: int, K: int, device: str) -> BenchResult:
     """Validate token conservation invariant holds across 100 random seeds."""
     violations = 0
     for seed in range(100):
@@ -235,9 +282,16 @@ def bench_token_conservation(
             violations += 1
 
     return BenchResult(
-        name="token_conservation_sweep", device=device, N=N, H=H, E=E, K=K,
-        batch_ms_mean=0.0, batch_ms_std=0.0,
-        tokens_per_sec=0.0, mfu_estimate=0.0,
+        name="token_conservation_sweep",
+        device=device,
+        N=N,
+        H=H,
+        E=E,
+        K=K,
+        batch_ms_mean=0.0,
+        batch_ms_std=0.0,
+        tokens_per_sec=0.0,
+        mfu_estimate=0.0,
         passed=(violations == 0),
         notes=f"violations={violations}/100",
     )
@@ -245,14 +299,14 @@ def bench_token_conservation(
 
 def run_suite(device: str) -> List[BenchResult]:
     results = []
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print(f"  moe-engine benchmark suite  |  device={device}")
-    print(f"{'='*60}\n")
+    print(f"{'=' * 60}\n")
 
     configs = [
         # (N,    H,   E,  K)  — varied scale
-        (512,  256,  16, 2),
-        (1024, 512,  32, 2),
+        (512, 256, 16, 2),
+        (1024, 512, 32, 2),
         (2048, 1024, 64, 2),
         (4096, 2048, 64, 4),
     ]
@@ -261,30 +315,36 @@ def run_suite(device: str) -> List[BenchResult]:
         tag = f"N={N} H={H} E={E} K={K}"
         try:
             r = bench_router_forward(N, H, E, K, device)
-            print(f"  router_fwd   {tag}  {r.batch_ms_mean:.2f}±{r.batch_ms_std:.2f}ms  "
-                  f"{r.tokens_per_sec/1e6:.2f}M tok/s")
+            print(
+                f"  router_fwd   {tag}  {r.batch_ms_mean:.2f}±{r.batch_ms_std:.2f}ms  "
+                f"{r.tokens_per_sec / 1e6:.2f}M tok/s"
+            )
             results.append(r)
         except Exception as exc:
             print(f"  router_fwd   {tag}  FAILED: {exc}")
-            results.append(BenchResult("router_fwd", device, N, H, E, K,
-                                        0, 0, 0, 0, False, str(exc)))
+            results.append(
+                BenchResult("router_fwd", device, N, H, E, K, 0, 0, 0, 0, False, str(exc))
+            )
 
         try:
             r = bench_router_fwd_bwd(N, H, E, K, device)
-            print(f"  router_fwd_bwd {tag}  {r.batch_ms_mean:.2f}±{r.batch_ms_std:.2f}ms  "
-                  f"{r.tokens_per_sec/1e6:.2f}M tok/s")
+            print(
+                f"  router_fwd_bwd {tag}  {r.batch_ms_mean:.2f}±{r.batch_ms_std:.2f}ms  "
+                f"{r.tokens_per_sec / 1e6:.2f}M tok/s"
+            )
             results.append(r)
         except Exception as exc:
             print(f"  router_fwd_bwd {tag}  FAILED: {exc}")
-            results.append(BenchResult("router_fwd_bwd", device, N, H, E, K,
-                                        0, 0, 0, 0, False, str(exc)))
+            results.append(
+                BenchResult("router_fwd_bwd", device, N, H, E, K, 0, 0, 0, 0, False, str(exc))
+            )
 
     # MoE layer benchmarks
     moe_configs = [
         # (B, S, H,   F,    E,  K)
-        (2,  16, 128, 256,  8,  2),
-        (2,  32, 256, 512,  16, 2),
-        (4,  16, 512, 1024, 32, 2),
+        (2, 16, 128, 256, 8, 2),
+        (2, 32, 256, 512, 16, 2),
+        (4, 16, 512, 1024, 32, 2),
     ]
     for B, S, H, F, E, K in moe_configs:
         tag = f"B={B} S={S} H={H} F={F} E={E} K={K}"
@@ -292,13 +352,16 @@ def run_suite(device: str) -> List[BenchResult]:
         try:
             r = bench_moe_layer(B, S, H, F, E, K, device)
             moe_result = r
-            print(f"  moe_layer    {tag}  {r.batch_ms_mean:.2f}±{r.batch_ms_std:.2f}ms  "
-                  f"{r.tokens_per_sec/1e3:.1f}k tok/s")
+            print(
+                f"  moe_layer    {tag}  {r.batch_ms_mean:.2f}±{r.batch_ms_std:.2f}ms  "
+                f"{r.tokens_per_sec / 1e3:.1f}k tok/s"
+            )
             results.append(r)
         except Exception as exc:
             print(f"  moe_layer    {tag}  FAILED: {exc}")
-            results.append(BenchResult("moe_layer_fwd", device, B * S, H, E, K,
-                                        0, 0, 0, 0, False, str(exc)))
+            results.append(
+                BenchResult("moe_layer_fwd", device, B * S, H, E, K, 0, 0, 0, 0, False, str(exc))
+            )
 
         # Dense baseline: same (B,S,H,F), E=1/K=1, no router/dispatch (v0.3.1)
         try:
@@ -307,14 +370,18 @@ def run_suite(device: str) -> List[BenchResult]:
             if moe_result is not None and moe_result.passed and d.batch_ms_mean > 0:
                 ratio = moe_result.batch_ms_mean / d.batch_ms_mean
                 ratio_str = f"  ({ratio:.2f}x dense; MoE holds {E}x the params)"
-            print(f"  dense_base   {tag}  {d.batch_ms_mean:.2f}±{d.batch_ms_std:.2f}ms  "
-                  f"{d.tokens_per_sec/1e3:.1f}k tok/s{ratio_str}")
+            print(
+                f"  dense_base   {tag}  {d.batch_ms_mean:.2f}±{d.batch_ms_std:.2f}ms  "
+                f"{d.tokens_per_sec / 1e3:.1f}k tok/s{ratio_str}"
+            )
             results.append(d)
         except Exception as exc:
             print(f"  dense_base   {tag}  FAILED: {exc}")
-            results.append(BenchResult("dense_baseline_fwd", device, B * S, H, 1, 1,
-                                        0, 0, 0, 0, False, str(exc)))
-
+            results.append(
+                BenchResult(
+                    "dense_baseline_fwd", device, B * S, H, 1, 1, 0, 0, 0, 0, False, str(exc)
+                )
+            )
 
     # Token conservation
     r = bench_token_conservation(512, 128, 32, 2, device)
@@ -328,12 +395,9 @@ def run_suite(device: str) -> List[BenchResult]:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cuda", action="store_true",
-                        help="Run GPU benchmarks (requires CUDA)")
-    parser.add_argument("--csv", type=str, default=None,
-                        help="Save results to CSV file")
-    parser.add_argument("--json", type=str, default=None,
-                        help="Save results to JSON file")
+    parser.add_argument("--cuda", action="store_true", help="Run GPU benchmarks (requires CUDA)")
+    parser.add_argument("--csv", type=str, default=None, help="Save results to CSV file")
+    parser.add_argument("--json", type=str, default=None, help="Save results to JSON file")
     args = parser.parse_args()
 
     all_results: List[BenchResult] = []

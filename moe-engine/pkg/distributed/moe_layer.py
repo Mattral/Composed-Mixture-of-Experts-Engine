@@ -49,14 +49,14 @@ Public API
 from __future__ import annotations
 
 import time
-from typing import List, Optional
+from typing import List
 
 import torch
 import torch.nn as nn
 
+from pkg.distributed.expert_parallel import all_to_all_combine, all_to_all_dispatch
 from pkg.distributed.mesh import ParallelTopology
 from pkg.distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
-from pkg.distributed.expert_parallel import all_to_all_dispatch, all_to_all_combine
 from pkg.kernels.moe_router import MoERouter
 
 __all__ = ["DistributedMoELayer"]
@@ -65,6 +65,7 @@ __all__ = ["DistributedMoELayer"]
 # ===========================================================================
 # SwiGLU Expert FFN
 # ===========================================================================
+
 
 class _SwiGLUExpert(nn.Module):
     """Two-layer SwiGLU FFN: ``w_down(silu(w_gate(x)) * w_up(x))``.
@@ -105,6 +106,7 @@ class _SwiGLUExpert(nn.Module):
 # DistributedMoELayer
 # ===========================================================================
 
+
 class DistributedMoELayer(nn.Module):
     """Full MoE block: router + EP all-to-all + expert FFN + weighted combine.
 
@@ -142,10 +144,9 @@ class DistributedMoELayer(nn.Module):
         self.capacity_factor = capacity_factor
 
         self.local_expert_ids: List[int] = topology.experts_on_this_rank(num_experts)
-        self.experts = nn.ModuleList([
-            _SwiGLUExpert(hidden_dim, ffn_dim, topology, dtype)
-            for _ in self.local_expert_ids
-        ])
+        self.experts = nn.ModuleList(
+            [_SwiGLUExpert(hidden_dim, ffn_dim, topology, dtype) for _ in self.local_expert_ids]
+        )
         self.router = MoERouter(hidden_dim, num_experts, top_k, dtype=dtype)
 
         # Telemetry attributes — updated every forward pass.
@@ -175,9 +176,9 @@ class DistributedMoELayer(nn.Module):
         # ---- Flatten to [N, H] ----
         original_shape = tokens.shape
         if tokens.dim() == 3:
-            B, S, H = tokens.shape
+            _, _, H = tokens.shape  # noqa: F841
         elif tokens.dim() == 2:
-            B, S = 1, tokens.shape[0]
+            B, S = 1, tokens.shape[0]  # noqa: F841 (kept for readability; H below is what's used)
             H = tokens.shape[1]
         else:
             raise ValueError(f"tokens must be rank 2 or 3, got {tokens.dim()}")
@@ -189,9 +190,7 @@ class DistributedMoELayer(nn.Module):
 
         # ---- Build per-EP-rank send counts ----
         experts_per_rank = self.num_experts // self.topology.ep_size
-        send_counts = torch.zeros(
-            self.topology.ep_size, dtype=torch.long, device=flat.device
-        )
+        send_counts = torch.zeros(self.topology.ep_size, dtype=torch.long, device=flat.device)
         for ep_r in range(self.topology.ep_size):
             lo = ep_r * experts_per_rank
             hi = lo + experts_per_rank
@@ -203,8 +202,9 @@ class DistributedMoELayer(nn.Module):
         tokens_sorted = flat[sort_order].repeat_interleave(self.top_k, dim=0)
 
         # ---- EP dispatch ----
-        received, recv_counts, dispatch_event, self.last_dispatch_ms = \
-            all_to_all_dispatch(tokens_sorted, send_counts, self.topology)
+        received, recv_counts, dispatch_event, self.last_dispatch_ms = all_to_all_dispatch(
+            tokens_sorted, send_counts, self.topology
+        )
 
         # ---- Expert FFN compute (default stream, overlaps with dispatch) ----
         t_expert_start = time.perf_counter()
@@ -232,8 +232,8 @@ class DistributedMoELayer(nn.Module):
         combined = torch.zeros_like(flat)
         w_flat = weights[sort_order].reshape(-1)
         for k in range(self.top_k):
-            slot = combined_sorted[k::self.top_k]
-            combined[sort_order] += w_flat[k::self.top_k].unsqueeze(-1) * slot[:N]
+            slot = combined_sorted[k :: self.top_k]
+            combined[sort_order] += w_flat[k :: self.top_k].unsqueeze(-1) * slot[:N]
 
         assert not torch.isnan(combined).any(), (
             "NaN detected in DistributedMoELayer output after combine step. "
@@ -266,7 +266,7 @@ class DistributedMoELayer(nn.Module):
         idx = 0
         for r in range(ep_size):
             count = per_rank + (1 if r < rem else 0)
-            lookup[idx: idx + count] = r
+            lookup[idx : idx + count] = r
             idx += count
 
         return lookup[expert_ids.long()]

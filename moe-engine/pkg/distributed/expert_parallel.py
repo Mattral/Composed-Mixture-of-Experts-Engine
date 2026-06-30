@@ -41,6 +41,7 @@ __all__ = [
 # Dedicated CUDA stream for EP collectives
 # ===========================================================================
 
+
 class _CommStream:
     """Module-level singleton: one high-priority CUDA stream per device index.
 
@@ -48,6 +49,7 @@ class _CommStream:
     FFN compute on the default stream.  The overlap ratio is measured by
     comparing the stream's event elapsed time against the expert compute time.
     """
+
     _streams: dict = {}
 
     @classmethod
@@ -63,6 +65,7 @@ class _CommStream:
 # ===========================================================================
 # All-to-all helpers
 # ===========================================================================
+
 
 def all_to_all_dispatch(
     tokens_sorted: torch.Tensor,
@@ -94,9 +97,7 @@ def all_to_all_dispatch(
     if topology.ep_size == 1 or not dist.is_initialized():
         return tokens_sorted, send_counts.clone(), None, 0.0
 
-    ep_group = (
-        topology.mesh["ep"].get_group() if topology.mesh is not None else None
-    )
+    ep_group = topology.mesh["ep"].get_group() if topology.mesh is not None else None
     stream = _CommStream.get(topology.device)
 
     # Exchange send counts so every rank knows how many tokens it will receive.
@@ -106,7 +107,9 @@ def all_to_all_dispatch(
     total_recv = int(recv_counts.sum().item())
     H = tokens_sorted.shape[1]
     received = torch.empty(
-        (total_recv, H), dtype=tokens_sorted.dtype, device=tokens_sorted.device,
+        (total_recv, H),
+        dtype=tokens_sorted.dtype,
+        device=tokens_sorted.device,
     )
 
     if stream is not None and torch.cuda.is_available():
@@ -115,7 +118,8 @@ def all_to_all_dispatch(
         start_evt.record(stream)
         with torch.cuda.stream(stream):
             dist.all_to_all_single(
-                received, tokens_sorted,
+                received,
+                tokens_sorted,
                 output_split_sizes=recv_counts.tolist(),
                 input_split_sizes=send_counts.tolist(),
                 group=ep_group,
@@ -129,7 +133,8 @@ def all_to_all_dispatch(
 
     # CPU path
     dist.all_to_all_single(
-        received, tokens_sorted,
+        received,
+        tokens_sorted,
         output_split_sizes=recv_counts.tolist(),
         input_split_sizes=send_counts.tolist(),
         group=ep_group,
@@ -173,14 +178,14 @@ def all_to_all_combine(
     if topology.ep_size == 1 or not dist.is_initialized():
         return expert_out, 0.0
 
-    ep_group = (
-        topology.mesh["ep"].get_group() if topology.mesh is not None else None
-    )
+    ep_group = topology.mesh["ep"].get_group() if topology.mesh is not None else None
     stream = _CommStream.get(topology.device)
     total_send = int(send_counts.sum().item())
     H = expert_out.shape[1]
     combined = torch.empty(
-        (total_send, H), dtype=expert_out.dtype, device=expert_out.device,
+        (total_send, H),
+        dtype=expert_out.dtype,
+        device=expert_out.device,
     )
 
     if stream is not None and torch.cuda.is_available():
@@ -191,7 +196,8 @@ def all_to_all_combine(
         start_evt.record(stream)
         with torch.cuda.stream(stream):
             dist.all_to_all_single(
-                combined, expert_out,
+                combined,
+                expert_out,
                 output_split_sizes=send_counts.tolist(),
                 input_split_sizes=recv_counts.tolist(),
                 group=ep_group,
@@ -204,7 +210,8 @@ def all_to_all_combine(
 
     # CPU path
     dist.all_to_all_single(
-        combined, expert_out,
+        combined,
+        expert_out,
         output_split_sizes=send_counts.tolist(),
         input_split_sizes=recv_counts.tolist(),
         group=ep_group,
@@ -215,6 +222,7 @@ def all_to_all_combine(
 # ---------------------------------------------------------------------------
 # Internal helper
 # ---------------------------------------------------------------------------
+
 
 def _all_to_all_single_on_stream(
     output: torch.Tensor,

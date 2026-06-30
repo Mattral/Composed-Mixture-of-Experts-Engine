@@ -26,7 +26,6 @@ All multi-process tests are marked ``@pytest.mark.skipif`` unless
 
 from __future__ import annotations
 
-import math
 import os
 import sys
 from pathlib import Path
@@ -40,8 +39,7 @@ import torch.nn as nn
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pkg.distributed.parallel_mesh import (
-
+from pkg.distributed.parallel_mesh import (  # noqa: E402
     ColumnParallelLinear,
     RowParallelLinear,
     _SwiGLUExpert,
@@ -56,11 +54,13 @@ pytestmark = pytest.mark.cpu
 # ColumnParallelLinear — single-process (tp_size=1)
 # ---------------------------------------------------------------------------
 
+
 def test_column_parallel_forward_shape():
     layer = ColumnParallelLinear(128, 256, bias=True)
     y = layer(torch.randn(32, 128))
     assert y.shape == (32, 256)
     assert not torch.isnan(y).any()
+
 
 def test_column_parallel_backward():
     layer = ColumnParallelLinear(64, 128, bias=True)
@@ -70,16 +70,19 @@ def test_column_parallel_backward():
     assert layer.weight.grad is not None and layer.weight.grad.shape == layer.weight.shape
     assert layer.bias.grad is not None and layer.bias.grad.shape == layer.bias.shape
 
+
 def test_column_parallel_no_bias():
     layer = ColumnParallelLinear(128, 256, bias=False)
     assert layer.bias is None
     assert layer(torch.randn(4, 128)).shape == (4, 256)
+
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_column_parallel_dtype(dtype):
     layer = ColumnParallelLinear(32, 64, dtype=dtype)
     y = layer(torch.randn(4, 32, dtype=dtype))
     assert y.dtype == dtype
+
 
 def test_column_parallel_numerically_correct_tp1():
     """At tp_size=1, ColumnParallel must be identical to nn.Linear."""
@@ -91,18 +94,22 @@ def test_column_parallel_numerically_correct_tp1():
     col.bias.data.copy_(ref.bias.data)
     x = torch.randn(B, H)
     with torch.no_grad():
-        assert torch.allclose(col(x), ref(x), atol=1e-6), \
+        assert torch.allclose(col(x), ref(x), atol=1e-6), (
             "ColumnParallel@tp=1 diverges from nn.Linear"
+        )
+
 
 # ---------------------------------------------------------------------------
 # RowParallelLinear — single-process (tp_size=1)
 # ---------------------------------------------------------------------------
+
 
 def test_row_parallel_forward_shape():
     layer = RowParallelLinear(128, 256, bias=True)
     y = layer(torch.randn(32, 128))
     assert y.shape == (32, 256)
     assert not torch.isnan(y).any()
+
 
 def test_row_parallel_backward():
     layer = RowParallelLinear(64, 128, bias=True)
@@ -112,16 +119,19 @@ def test_row_parallel_backward():
     assert layer.weight.grad is not None
     assert layer.bias.grad is not None
 
+
 def test_row_parallel_no_bias():
     layer = RowParallelLinear(128, 256, bias=False)
     assert layer.bias is None
     assert layer(torch.randn(4, 128)).shape == (4, 256)
+
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_row_parallel_dtype(dtype):
     layer = RowParallelLinear(32, 64, dtype=dtype)
     y = layer(torch.randn(4, 32, dtype=dtype))
     assert y.dtype == dtype
+
 
 def test_row_parallel_numerically_correct_tp1():
     """At tp_size=1, RowParallel must be identical to nn.Linear."""
@@ -133,8 +143,8 @@ def test_row_parallel_numerically_correct_tp1():
     row.bias.data.copy_(ref.bias.data)
     x = torch.randn(B, H)
     with torch.no_grad():
-        assert torch.allclose(row(x), ref(x), atol=1e-6), \
-            "RowParallel@tp=1 diverges from nn.Linear"
+        assert torch.allclose(row(x), ref(x), atol=1e-6), "RowParallel@tp=1 diverges from nn.Linear"
+
 
 def test_row_parallel_uses_all_reduce_not_reduce_scatter():
     """Verify the correct collective is used: RowParallel must call all_reduce,
@@ -142,14 +152,18 @@ def test_row_parallel_uses_all_reduce_not_reduce_scatter():
     import inspect
 
     src = inspect.getsource(RowParallelLinear.forward)
-    assert "all_reduce" in src, \
+    assert "all_reduce" in src, (
         "RowParallelLinear.forward must use dist.all_reduce for sum-reduction"
-    assert "reduce_scatter_tensor" not in src, \
+    )
+    assert "reduce_scatter_tensor" not in src, (
         "RowParallelLinear.forward must NOT use reduce_scatter_tensor (wrong collective)"
+    )
+
 
 # ---------------------------------------------------------------------------
 # _SwiGLUExpert — both gate and up must be ColumnParallel
 # ---------------------------------------------------------------------------
+
 
 def test_swiglu_expert_shape():
     topo = build_topology(dp_size=1, ep_size=1, tp_size=1, device_type="cpu")
@@ -158,6 +172,7 @@ def test_swiglu_expert_shape():
     y = expert(x)
     assert y.shape == (8, 64), f"SwiGLU output shape wrong: {y.shape}"
     assert not torch.isnan(y).any()
+
 
 def test_swiglu_expert_w_gate_is_column_parallel():
     """w_gate must be ColumnParallelLinear, not nn.Linear.
@@ -176,6 +191,7 @@ def test_swiglu_expert_w_gate_is_column_parallel():
     assert isinstance(expert.w_up, ColumnParallelLinear)
     assert isinstance(expert.w_down, RowParallelLinear)
 
+
 def test_swiglu_expert_backward():
     topo = build_topology(dp_size=1, ep_size=1, tp_size=1, device_type="cpu")
     expert = _SwiGLUExpert(hidden_dim=32, ffn_dim=64, topology=topo)
@@ -184,6 +200,7 @@ def test_swiglu_expert_backward():
     assert x.grad is not None and x.grad.shape == x.shape
     for name, p in expert.named_parameters():
         assert p.grad is not None, f"No gradient for {name}"
+
 
 def test_swiglu_expert_numerically_correct_tp1():
     """At tp_size=1, SwiGLU output must equal manual reference computation."""
@@ -197,27 +214,32 @@ def test_swiglu_expert_numerically_correct_tp1():
         # Manual SwiGLU: down( silu(gate(x)) * up(x) )
         # Since tp_size=1, ColumnParallel and RowParallel are identity wraps
         gate_out = torch.nn.functional.linear(x, expert.w_gate.weight)
-        up_out   = torch.nn.functional.linear(x, expert.w_up.weight)
-        hidden   = torch.nn.functional.silu(gate_out) * up_out
-        ref_out  = torch.nn.functional.linear(hidden, expert.w_down.weight)
-        got_out  = expert(x)
+        up_out = torch.nn.functional.linear(x, expert.w_up.weight)
+        hidden = torch.nn.functional.silu(gate_out) * up_out
+        ref_out = torch.nn.functional.linear(hidden, expert.w_down.weight)
+        got_out = expert(x)
 
-    assert torch.allclose(got_out, ref_out, atol=1e-5), \
-        f"SwiGLU output diverges from reference: max_diff={abs(got_out-ref_out).max():.2e}"
+    assert torch.allclose(got_out, ref_out, atol=1e-5), (
+        f"SwiGLU output diverges from reference: max_diff={abs(got_out - ref_out).max():.2e}"
+    )
+
 
 # ---------------------------------------------------------------------------
 # Sequence parallelism helpers — single-rank no-op
 # ---------------------------------------------------------------------------
+
 
 def test_scatter_sequence_parallel_identity_tp1():
     topo = build_topology(dp_size=1, tp_size=1, ep_size=1, device_type="cpu")
     x = torch.randn(4, 128, 64)
     assert torch.equal(scatter_to_sequence_parallel(x, topo), x)
 
+
 def test_gather_sequence_parallel_identity_tp1():
     topo = build_topology(dp_size=1, tp_size=1, ep_size=1, device_type="cpu")
     x = torch.randn(4, 128, 64)
     assert torch.equal(gather_from_sequence_parallel(x, topo), x)
+
 
 def test_scatter_gather_round_trip_tp1():
     """scatter then gather must recover the original tensor at tp_size=1."""
@@ -226,9 +248,11 @@ def test_scatter_gather_round_trip_tp1():
     recovered = gather_from_sequence_parallel(scatter_to_sequence_parallel(x, topo), topo)
     assert torch.equal(recovered, x)
 
+
 # ---------------------------------------------------------------------------
 # Multi-rank TP correctness (2-rank CPU, mp.spawn)
 # ---------------------------------------------------------------------------
+
 
 def _tp2_worker(rank: int, world_size: int, result_queue, H: int, F: int, seed: int):
     """Worker: builds a 2-rank TP group, runs ColumnParallel→RowParallel,
@@ -262,16 +286,17 @@ def _tp2_worker(rank: int, world_size: int, result_queue, H: int, F: int, seed: 
 
     with torch.no_grad():
         # Sharded path (ColumnParallel all-gathers internally, RowParallel all_reduces)
-        mid = col(x)      # [4, F] — all-gathered by ColumnParallel
-        out_sharded = row(mid)   # [4, H] — all_reduced by RowParallel
+        mid = col(x)  # [4, F] — all-gathered by ColumnParallel
+        out_sharded = row(mid)  # [4, H] — all_reduced by RowParallel
 
         # Reference path (full matmul on every rank with reconstructed weight)
-        ref_mid = torch.nn.functional.linear(x, col_full_w)   # [4, F]
-        out_ref  = torch.nn.functional.linear(ref_mid, row_full_w)  # [4, H]
+        ref_mid = torch.nn.functional.linear(x, col_full_w)  # [4, F]
+        out_ref = torch.nn.functional.linear(ref_mid, row_full_w)  # [4, H]
 
     max_diff = float((out_sharded - out_ref).abs().max().item())
     result_queue.put((rank, max_diff))
     dist.destroy_process_group()
+
 
 @pytest.mark.skipif(
     sys.platform == "darwin",
@@ -314,6 +339,7 @@ def test_column_row_parallel_2rank_numerically_correct():
             f"Rank {rank}: TP output diverges from reference by {diff:.2e} "
             f"(tolerance 1e-5). Check ColumnParallel all-gather and RowParallel all_reduce."
         )
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

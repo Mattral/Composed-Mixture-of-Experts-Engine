@@ -26,7 +26,6 @@ import torch.nn as nn
 
 from pkg.distributed.parallel_mesh import build_topology
 from pkg.elastic.fault_monitor import (
-
     AsyncCheckpointer,
     ClusterStateMachine,
     ElasticConfig,
@@ -40,6 +39,7 @@ pytestmark = pytest.mark.cpu
 # ---------------------------------------------------------------------------
 # ElasticConfig construction
 # ---------------------------------------------------------------------------
+
 
 def test_elastic_config_fields():
     cfg = ElasticConfig(
@@ -56,18 +56,23 @@ def test_elastic_config_fields():
     assert cfg.retention == 4
     assert cfg.min_nodes == 2
 
+
 # ---------------------------------------------------------------------------
 # Reshard plan completeness
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("num_experts,ep_size", [
-    (64, 8),
-    (10, 4),    # remainder case
-    (7, 3),     # prime / non-divisible
-    (1, 1),
-    (128, 16),
-    (100, 7),   # large remainder
-])
+
+@pytest.mark.parametrize(
+    "num_experts,ep_size",
+    [
+        (64, 8),
+        (10, 4),  # remainder case
+        (7, 3),  # prime / non-divisible
+        (1, 1),
+        (128, 16),
+        (100, 7),  # large remainder
+    ],
+)
 def test_reshard_covers_all_experts(num_experts, ep_size, tmp_path):
     """Reshard plan must partition experts with no gaps and no duplicates."""
     # Use ep_size as effective world
@@ -83,9 +88,9 @@ def test_reshard_covers_all_experts(num_experts, ep_size, tmp_path):
         all_assigned.extend(ids)
 
     assert sorted(all_assigned) == list(range(num_experts)), (
-        f"ep={ep_size} E={num_experts}: plan {plan} does not cover exactly "
-        f"{{0..{num_experts-1}}}"
+        f"ep={ep_size} E={num_experts}: plan {plan} does not cover exactly {{0..{num_experts - 1}}}"
     )
+
 
 def test_reshard_marks_recovering_phase(tmp_path):
     topo = build_topology(dp_size=1, ep_size=1, device_type="cpu")
@@ -99,32 +104,39 @@ def test_reshard_marks_recovering_phase(tmp_path):
     csm.mark_resumed()
     assert csm.phase == ClusterStateMachine.PHASE_RESUMED
 
+
 # ---------------------------------------------------------------------------
 # Largest-divisor helper — exhaustive edge cases
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("n,k,expected", [
-    (64, 8, 8),
-    (64, 9, 8),
-    (60, 9, 6),
-    (7, 8, 7),
-    (1, 8, 1),
-    (100, 7, 5),
-    (13, 13, 13),   # prime == k
-    (13, 14, 13),   # prime < k
-    (13, 6, 1),     # no divisor <=6 except 1 for prime 13
-    (16, 4, 4),
-    (16, 16, 16),
-    (128, 9, 8),
-])
+
+@pytest.mark.parametrize(
+    "n,k,expected",
+    [
+        (64, 8, 8),
+        (64, 9, 8),
+        (60, 9, 6),
+        (7, 8, 7),
+        (1, 8, 1),
+        (100, 7, 5),
+        (13, 13, 13),  # prime == k
+        (13, 14, 13),  # prime < k
+        (13, 6, 1),  # no divisor <=6 except 1 for prime 13
+        (16, 4, 4),
+        (16, 16, 16),
+        (128, 9, 8),
+    ],
+)
 def test_largest_divisor_le(n, k, expected):
     assert _largest_divisor_le(n, k) == expected, (
         f"_largest_divisor_le({n}, {k}) = {_largest_divisor_le(n, k)} != {expected}"
     )
 
+
 # ---------------------------------------------------------------------------
 # File-URI two-tier round-trip
 # ---------------------------------------------------------------------------
+
 
 def test_file_uri_remote_tier(tmp_path: Path):
     local_dir = tmp_path / "nvme"
@@ -132,9 +144,7 @@ def test_file_uri_remote_tier(tmp_path: Path):
     local = LocalNVMeAdapter(str(local_dir))
     remote = LocalNVMeAdapter(str(remote_dir))
 
-    ckpt = AsyncCheckpointer(
-        local_adapter=local, remote_adapter=remote, retention=4, workers=1
-    )
+    ckpt = AsyncCheckpointer(local_adapter=local, remote_adapter=remote, retention=4, workers=1)
     model = nn.Linear(4, 4)
     ckpt.save(model, None, step=5, rank=0)
     ckpt.shutdown(drain=True)
@@ -152,24 +162,29 @@ def test_file_uri_remote_tier(tmp_path: Path):
     assert "ts" in meta_local
     assert "hostname" in meta_local
 
+
 # ---------------------------------------------------------------------------
 # Health check no-op (single-rank, no dist)
 # ---------------------------------------------------------------------------
+
 
 def test_health_check_single_rank_no_op():
     topo = build_topology(dp_size=1, ep_size=1, device_type="cpu")
     csm = ClusterStateMachine(topology=topo, min_nodes=1)
     dead = csm.heartbeat()
-    assert dead == []   # no dist → always empty
+    assert dead == []  # no dist → always empty
+
 
 def test_alive_ranks_all_present():
     topo = build_topology(dp_size=1, ep_size=1, device_type="cpu")
     csm = ClusterStateMachine(topology=topo, min_nodes=1)
     assert csm.alive_ranks() == [0]
 
+
 # ---------------------------------------------------------------------------
 # Checkpoint retention — only latest N survive
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize("retention", [1, 2, 3])
 def test_checkpoint_retention(tmp_path: Path, retention: int):
@@ -180,7 +195,7 @@ def test_checkpoint_retention(tmp_path: Path, retention: int):
     model = nn.Linear(2, 2)
     for step in range(1, 7):
         ckpt.save(model, None, step=step, rank=0)
-        time.sleep(0.02)   # let worker commit between saves
+        time.sleep(0.02)  # let worker commit between saves
 
     ckpt.shutdown(drain=True)
 
@@ -200,9 +215,11 @@ def test_checkpoint_retention(tmp_path: Path, retention: int):
     # Latest step must always survive
     assert 6 in surviving, "Latest step must survive pruning"
 
+
 # ---------------------------------------------------------------------------
 # Harness: checkpoint and resume via ElasticTrainerHarness
 # ---------------------------------------------------------------------------
+
 
 def test_harness_checkpoint_and_resume(tmp_path: Path):
     cfg = ElasticConfig(
@@ -228,11 +245,10 @@ def test_harness_checkpoint_and_resume(tmp_path: Path):
     latest = harness.async_ckpt.latest_step()
     assert latest == 10
 
+
 def test_harness_no_signal_handler_in_thread(tmp_path: Path):
     """install_signal_handlers must not raise when called from a non-main thread."""
-    cfg = ElasticConfig(
-        local_ckpt_dir=str(tmp_path), remote_uri=None, min_nodes=1
-    )
+    cfg = ElasticConfig(local_ckpt_dir=str(tmp_path), remote_uri=None, min_nodes=1)
     topo = build_topology(dp_size=1, ep_size=1, device_type="cpu")
 
     errors: list[Exception] = []
@@ -240,7 +256,7 @@ def test_harness_no_signal_handler_in_thread(tmp_path: Path):
     def _install():
         try:
             h = ElasticTrainerHarness(cfg, topo)
-            h.install_signal_handlers()   # must not raise ValueError
+            h.install_signal_handlers()  # must not raise ValueError
             h.shutdown()
         except Exception as exc:
             errors.append(exc)
@@ -251,6 +267,7 @@ def test_harness_no_signal_handler_in_thread(tmp_path: Path):
     t.start()
     t.join()
     assert not errors, f"install_signal_handlers raised in thread: {errors}"
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
