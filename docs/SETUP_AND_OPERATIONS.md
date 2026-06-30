@@ -1,6 +1,6 @@
 # Setup and Operations
 
-**Version:** v0.3  
+**Version:** v0.3.2  
 **Last updated:** June 2026
 
 ---
@@ -8,14 +8,17 @@
 ## Install
 
 ```bash
-git clone https://github.com/your-org/moe-engine
-cd moe-engine/moe-engine
+git clone https://github.com/Mattral/Composed-Mixture-of-Experts-Engine
+cd Composed-Mixture-of-Experts-Engine/moe-engine
 
-# Standard install (editable, with dev tools)
+# Standard install (editable, with dev tools — includes hypothesis, typer, ruff, mypy, pre-commit)
 pip install -e ".[dev]"
 
 # With Prometheus monitoring support
 pip install -e ".[all]"
+
+# Install pre-commit hooks (recommended)
+pip install pre-commit && pre-commit install
 ```
 
 **Manual install from requirements.txt:**
@@ -34,6 +37,8 @@ pip install prometheus-client
 
 ```bash
 python -c "import torch, pkg.kernels.moe_router; print('OK', torch.__version__)"
+python scripts/cli.py info          # full environment + config summary
+python scripts/cli.py validate configs/   # validate both shipped configs
 ```
 
 ---
@@ -72,6 +77,7 @@ training:
   log_interval: 10          # emit telemetry every N steps
   ckpt_interval: 500        # save checkpoint every N steps
   warmup_steps: 2000        # [v0.2] linear LR warmup steps
+  z_loss_weight: 0.0        # [v0.3.2] aux router z-loss weight; 0=disabled, typical 1e-3
 
 parallelism:
   data_parallel: 8          # FSDP2 sharding axis
@@ -141,20 +147,33 @@ python train.py --config configs/smoke.yaml --smoke
 ## Running the Full Test Suite
 
 ```bash
-# Full suite (CPU, no GPU needed), ~45s:
-pytest tests/ -v --ignore=tests/test_chaos.py
+# Tier-0 CPU suite (319 tests, ~10s), no GPU needed:
+make test-cpu
+# or: pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" -q
 
 # Single test file:
 pytest tests/test_tensor_parallel.py -v
 
+# Config system (Pydantic, 34 tests):
+pytest tests/test_config.py -v
+
+# Property-based invariant tests (Hypothesis, 9 tests × 50 examples):
+pytest tests/test_properties.py -v
+
 # Numerics-only (Triton vs fp64 reference, 30 configs):
 python tests/run_numerics_tests.py
+
+# Reproduce any number in RESULTS.md or BENCHMARKS.md:
+python scripts/reproduce.py --target all --report /tmp/repro.json
 
 # Benchmark suite (CPU sweep):
 python benchmarks/run_benchmark.py --json /tmp/bench.json
 
 # Benchmark suite (GPU sweep, requires CUDA + Triton):
 python benchmarks/run_benchmark.py --cuda --json /tmp/bench_gpu.json
+
+# Run the runnable examples (7 self-contained scripts):
+for f in examples/0*.py; do python "$f"; done
 ```
 
 ---
