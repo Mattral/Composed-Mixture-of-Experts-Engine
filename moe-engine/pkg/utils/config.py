@@ -48,35 +48,21 @@ import yaml
 try:
     from pydantic import BaseModel, Field, field_validator, model_validator
     from pydantic import ValidationError as _PydanticValidationError
+except ImportError as exc:  # pragma: no cover
+    raise ImportError(
+        "moe-engine requires pydantic>=2.0.0 for its configuration system. "
+        "Config validation is core functionality, not optional — a silently "
+        "degraded validator is more dangerous than a hard import error, "
+        "since it would let invalid configs (top_k > num_experts, bad dtypes, "
+        "negative learning rates, etc.) reach training undetected.\n\n"
+        "Install with:\n"
+        "    pip install -e '.[dev]'\n"
+        "or:\n"
+        "    pip install pydantic>=2.0.0\n\n"
+        f"Original error: {exc}"
+    ) from exc
 
-    _HAS_PYDANTIC = True
-except ImportError:
-    _HAS_PYDANTIC = False
-    _PydanticValidationError = Exception  # type: ignore
-
-    # Minimal shim so module imports without pydantic
-    class BaseModel:  # type: ignore
-        def __init__(self, **kwargs):
-            for k, v in kwargs.items():
-                setattr(self, k, v)
-
-        def model_dump(self):
-            return {k: v for k, v in self.__dict__.items() if not k.startswith("_")}
-
-    def Field(default=None, **kwargs):  # type: ignore
-        return default
-
-    def field_validator(*args, **kwargs):  # type: ignore
-        def decorator(fn):
-            return fn
-
-        return decorator
-
-    def model_validator(**kwargs):  # type: ignore
-        def decorator(fn):
-            return fn
-
-        return decorator
+_HAS_PYDANTIC = True  # retained for any external code that still checks this flag
 
 
 __all__ = [
@@ -118,26 +104,22 @@ class ModelConfig(BaseModel):
     sequence_length: int = Field(4096, description="Input sequence length (S).")
     dtype: str = Field("bfloat16", description="Training precision.")
 
-    if _HAS_PYDANTIC:
-
-        @model_validator(mode="after")
-        def _cross_validate(self) -> "ModelConfig":
-            if self.top_k > self.num_experts:
-                raise ValueError(
-                    f"top_k ({self.top_k}) must be <= num_experts ({self.num_experts})"
-                )
-            # hidden_dim divisibility: recommend multiples of 64 for Triton efficiency,
-            # but do NOT hard-error on smoke/test configs (hidden_dim=32 is valid for the
-            # fp64 reference path; Triton kernel pads to the next power-of-2 block).
-            if self.hidden_dim % 8 != 0:
-                raise ValueError(
-                    f"hidden_dim ({self.hidden_dim}) must be divisible by 8 "
-                    "(minimum alignment for mixed-precision tensor operations)."
-                )
-            valid_dtypes = {"float32", "bfloat16", "float16"}
-            if self.dtype not in valid_dtypes:
-                raise ValueError(f"dtype must be one of {valid_dtypes}, got {self.dtype!r}")
-            return self
+    @model_validator(mode="after")
+    def _cross_validate(self) -> "ModelConfig":
+        if self.top_k > self.num_experts:
+            raise ValueError(f"top_k ({self.top_k}) must be <= num_experts ({self.num_experts})")
+        # hidden_dim divisibility: recommend multiples of 64 for Triton efficiency,
+        # but do NOT hard-error on smoke/test configs (hidden_dim=32 is valid for the
+        # fp64 reference path; Triton kernel pads to the next power-of-2 block).
+        if self.hidden_dim % 8 != 0:
+            raise ValueError(
+                f"hidden_dim ({self.hidden_dim}) must be divisible by 8 "
+                "(minimum alignment for mixed-precision tensor operations)."
+            )
+        valid_dtypes = {"float32", "bfloat16", "float16"}
+        if self.dtype not in valid_dtypes:
+            raise ValueError(f"dtype must be one of {valid_dtypes}, got {self.dtype!r}")
+        return self
 
 
 class TrainingConfig(BaseModel):
@@ -162,15 +144,13 @@ class TrainingConfig(BaseModel):
         ),
     )
 
-    if _HAS_PYDANTIC:
-
-        @model_validator(mode="after")
-        def _warmup_le_max_steps(self) -> "TrainingConfig":
-            if self.warmup_steps >= self.max_steps:
-                raise ValueError(
-                    f"warmup_steps ({self.warmup_steps}) must be < max_steps ({self.max_steps})"
-                )
-            return self
+    @model_validator(mode="after")
+    def _warmup_le_max_steps(self) -> "TrainingConfig":
+        if self.warmup_steps >= self.max_steps:
+            raise ValueError(
+                f"warmup_steps ({self.warmup_steps}) must be < max_steps ({self.max_steps})"
+            )
+        return self
 
 
 class ParallelismConfig(BaseModel):
@@ -200,14 +180,12 @@ class CheckpointConfig(BaseModel):
     async_workers: int = Field(4)
     retention: int = Field(8)
 
-    if _HAS_PYDANTIC:
-
-        @field_validator("remote_uri")
-        @classmethod
-        def _valid_uri(cls, v: str) -> str:
-            if not (v.startswith("s3://") or v.startswith("file://")):
-                raise ValueError(f"remote_uri must start with 's3://' or 'file://', got: {v!r}")
-            return v
+    @field_validator("remote_uri")
+    @classmethod
+    def _valid_uri(cls, v: str) -> str:
+        if not (v.startswith("s3://") or v.startswith("file://")):
+            raise ValueError(f"remote_uri must start with 's3://' or 'file://', got: {v!r}")
+        return v
 
 
 class ElasticConfig(BaseModel):
@@ -220,15 +198,13 @@ class ElasticConfig(BaseModel):
     health_check_interval_s: float = Field(5.0)
     drop_grace_period_s: float = Field(30.0)
 
-    if _HAS_PYDANTIC:
-
-        @model_validator(mode="after")
-        def _min_le_max(self) -> "ElasticConfig":
-            if self.min_nodes > self.max_nodes:
-                raise ValueError(
-                    f"min_nodes ({self.min_nodes}) must be <= max_nodes ({self.max_nodes})"
-                )
-            return self
+    @model_validator(mode="after")
+    def _min_le_max(self) -> "ElasticConfig":
+        if self.min_nodes > self.max_nodes:
+            raise ValueError(
+                f"min_nodes ({self.min_nodes}) must be <= max_nodes ({self.max_nodes})"
+            )
+        return self
 
 
 class TelemetryConfig(BaseModel):
@@ -314,18 +290,7 @@ class MoEConfig(BaseModel):
         """
         d = _apply_env_overrides(d)
         try:
-            if _HAS_PYDANTIC:
-                return cls(**d)
-            else:
-                # Minimal non-pydantic path: construct sub-objects manually
-                return cls(
-                    model=ModelConfig(**d.get("model", {})),
-                    training=TrainingConfig(**d.get("training", {})),
-                    parallelism=ParallelismConfig(**d.get("parallelism", {})),
-                    checkpoint=CheckpointConfig(**d.get("checkpoint", {})),
-                    elastic=ElasticConfig(**d.get("elastic", {})),
-                    telemetry=TelemetryConfig(**d.get("telemetry", {})),
-                )
+            return cls(**d)
         except _PydanticValidationError as exc:
             lines = [f"Config validation failed (source: {source}):"]
             for err in exc.errors():
@@ -353,16 +318,7 @@ class MoEConfig(BaseModel):
 
     def to_dict(self) -> Dict[str, Any]:
         """Return a plain-dict representation suitable for JSON/YAML."""
-        if _HAS_PYDANTIC:
-            return self.model_dump()
-        return {
-            "model": self.model.__dict__,
-            "training": self.training.__dict__,
-            "parallelism": self.parallelism.__dict__,
-            "checkpoint": self.checkpoint.__dict__,
-            "elastic": self.elastic.__dict__,
-            "telemetry": self.telemetry.__dict__,
-        }
+        return self.model_dump()
 
     # ------------------------------------------------------------------
     # Backward-compatibility shim
@@ -435,8 +391,16 @@ def _apply_env_overrides(d: Dict[str, Any]) -> Dict[str, Any]:
         MOE_MODEL__HIDDEN_DIM=1024         -> d["model"]["hidden_dim"] = 1024
         MOE_PARALLELISM__DATA_PARALLEL=16  -> d["parallelism"]["data_parallel"] = 16
 
-    Values are parsed with ``yaml.safe_load`` so booleans, ints, and floats
-    are converted from their string representations correctly.
+    Values are parsed with :func:`_coerce_env_value`, which tries native
+    ``int``/``float`` coercion before falling back to ``yaml.safe_load`` for
+    booleans, null, and other YAML scalars. This avoids a well-known PyYAML
+    footgun: ``yaml.safe_load("1e-5")`` returns the **string** ``"1e-5"``,
+    not the float ``1e-05``, because YAML 1.1's float grammar requires a
+    decimal point or an explicit ``+``/``-`` exponent sign in certain
+    positions (``yaml.safe_load("1.0e-5")`` works fine). Since
+    ``MOE_TRAINING__LEARNING_RATE=1e-5`` is exactly the kind of value an
+    operator would set on a command line, this footgun must not bite at the
+    config layer.
     """
     import copy
 
@@ -451,5 +415,32 @@ def _apply_env_overrides(d: Dict[str, Any]) -> Dict[str, Any]:
         section, _, field_name = rest.partition("__")
         if section not in d or not isinstance(d[section], dict):
             continue
-        d[section][field_name] = yaml.safe_load(val)
+        d[section][field_name] = _coerce_env_value(val)
     return d
+
+
+def _coerce_env_value(val: str) -> Any:
+    """Coerce an environment-variable string into the most natural Python type.
+
+    Tries, in order:
+      1. ``int(val)``     — e.g. "16", "-4"
+      2. ``float(val)``   — e.g. "1e-5", "3.14", "1.0e-5", "-2.5e3"
+      3. ``yaml.safe_load(val)`` — booleans ("true"/"false"), "null", quoted
+         strings, and any other YAML scalar.
+      4. The raw string, unchanged, if all of the above fail.
+
+    This is deliberately more permissive than raw ``yaml.safe_load`` because
+    YAML 1.1's float grammar rejects exponential notation without a decimal
+    point or explicit sign (``"1e-5"`` parses as a string under
+    ``yaml.safe_load`` alone), which would silently break common
+    command-line float overrides like ``MOE_TRAINING__LEARNING_RATE=1e-5``.
+    """
+    try:
+        return int(val)
+    except ValueError:
+        pass
+    try:
+        return float(val)
+    except ValueError:
+        pass
+    return yaml.safe_load(val)
