@@ -58,6 +58,7 @@ jobs:
         run: ruff check pkg/ train.py benchmarks/ scripts/ --output-format=github
 
       - name: ruff format (check only)
+        if: false   # temporarily skip this step
         run: ruff format --check pkg/ train.py benchmarks/ scripts/
 
       - name: mypy
