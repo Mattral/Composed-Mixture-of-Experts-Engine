@@ -43,8 +43,21 @@ pytestmark = pytest.mark.cpu
 # Hypothesis settings
 # ---------------------------------------------------------------------------
 # Use a small deadline to keep CI fast; property tests should each be < 200ms.
-_FAST = settings(max_examples=50, deadline=500, suppress_health_check=[HealthCheck.too_slow])
-_THOROUGH = settings(max_examples=200, deadline=1000, suppress_health_check=[HealthCheck.too_slow])
+# deadline=None: the first Hypothesis example for any test that constructs
+# MoERouter may trigger Triton JIT compilation (~1-3s). Triton caches after the
+# first call so subsequent examples are fast, but the deadline check fires on
+# the initial slow run and produces a FlakyFailure. Since we are testing
+# mathematical correctness, not performance, disable the deadline entirely.
+_FAST = settings(
+    max_examples=50,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
+_THOROUGH = settings(
+    max_examples=200,
+    deadline=None,
+    suppress_health_check=[HealthCheck.too_slow],
+)
 
 
 # ===========================================================================
@@ -225,6 +238,8 @@ def test_config_validation_properties(
     warmup_steps: int,
 ) -> None:
     """Valid configs (top_k ≤ E, warmup < max) always load; invalid always raise."""
+    # valid_config: top_k <= num_experts AND warmup_steps < max_steps (strict)
+    # Note: warmup_steps == max_steps is INVALID (Pydantic requires strictly <)
     valid_config = top_k <= num_experts and warmup_steps < max_steps
     d = {
         "model": {
@@ -285,23 +300,29 @@ def test_config_validation_properties(
             assert cfg.model.num_experts == num_experts
         except ConfigValidationError as e:
             raise AssertionError(
-                f"Valid config raised ConfigValidationError: {e}\n"
-                f"  top_k={top_k}, num_experts={num_experts}, "
-                f"  warmup={warmup_steps}, max_steps={max_steps}"
+                f"Valid config unexpectedly raised ConfigValidationError: {e}\n"
+                f"  top_k={top_k} <= num_experts={num_experts}: {top_k <= num_experts}\n"
+                f"  warmup_steps={warmup_steps} < max_steps={max_steps}: {warmup_steps < max_steps}"
             )
     else:
         try:
             MoEConfig.from_dict(d)
-            # If we get here on an invalid config, only fail for top_k > E
-            # (warmup >= max_steps is clearly invalid, top_k > E is clearly invalid)
-            if top_k > num_experts or warmup_steps >= max_steps:
+            # If no error raised, the config must actually be valid
+            # (Hypothesis may generate edge cases we classify as invalid but
+            #  Pydantic accepts due to boundary conditions in our logic)
+            # Only fail if we are CERTAIN the config is invalid
+            if top_k > num_experts:
                 raise AssertionError(
-                    f"Invalid config should have raised ConfigValidationError: "
-                    f"top_k={top_k} > num_experts={num_experts} or "
-                    f"warmup={warmup_steps} >= max_steps={max_steps}"
+                    f"top_k={top_k} > num_experts={num_experts} must raise "
+                    f"ConfigValidationError but did not"
+                )
+            if warmup_steps >= max_steps:
+                raise AssertionError(
+                    f"warmup_steps={warmup_steps} >= max_steps={max_steps} must raise "
+                    f"ConfigValidationError but did not"
                 )
         except ConfigValidationError:
-            pass  # expected
+            pass  # expected for invalid configs
 
 
 # ===========================================================================
