@@ -44,6 +44,7 @@ pytestmark = pytest.mark.cpu
 
 _SMOKE = pathlib.Path(__file__).parent.parent / "configs" / "smoke.yaml"
 _DEFAULT = pathlib.Path(__file__).parent.parent / "configs" / "default.yaml"
+_LARGE_SCALE = pathlib.Path(__file__).parent.parent / "configs" / "large_scale.yaml"
 
 
 def _minimal_dict(**overrides) -> dict:
@@ -124,6 +125,17 @@ class TestFromYaml:
         assert cfg.model.hidden_dim == 4096
         assert cfg.model.num_experts == 64
         assert cfg.model.dtype == "bfloat16"
+
+    def test_large_scale_yaml_loads(self):
+        """large_scale.yaml must load and demonstrate fine-grained MoE (P2.2)."""
+        cfg = MoEConfig.from_yaml(_LARGE_SCALE)
+        assert cfg.model.num_experts == 256
+        assert cfg.model.top_k == 8
+        assert cfg.model.capacity_dropping is True
+        assert cfg.training.z_loss_weight > 0.0
+        assert cfg.parallelism.world_size == 8 * 16  # dp=8, ep=16
+        # top_k must still respect the top_k <= num_experts invariant
+        assert cfg.model.top_k <= cfg.model.num_experts
 
     def test_file_not_found_raises(self):
         with pytest.raises(FileNotFoundError, match="not found"):
@@ -361,6 +373,20 @@ class TestDefaultsAreSane:
         cfg = MoEConfig.from_yaml(_SMOKE)
         assert cfg.elastic.min_nodes == 1
         assert cfg.elastic.max_nodes == 1
+
+    def test_large_scale_yaml_capacity_factor_ge_1(self):
+        cfg = MoEConfig.from_yaml(_LARGE_SCALE)
+        assert cfg.model.capacity_factor >= 1.0
+
+    def test_large_scale_yaml_mfu_target_in_range(self):
+        cfg = MoEConfig.from_yaml(_LARGE_SCALE)
+        assert 0.0 < cfg.telemetry.mfu_target <= 1.0
+
+    def test_large_scale_yaml_more_experts_than_default(self):
+        """large_scale.yaml exists specifically to exercise E >> 64 (P2.2)."""
+        default_cfg = MoEConfig.from_yaml(_DEFAULT)
+        large_cfg = MoEConfig.from_yaml(_LARGE_SCALE)
+        assert large_cfg.model.num_experts > default_cfg.model.num_experts
 
     def test_default_checkpoint_retention_positive(self):
         cfg = MoEConfig.from_yaml(_DEFAULT)

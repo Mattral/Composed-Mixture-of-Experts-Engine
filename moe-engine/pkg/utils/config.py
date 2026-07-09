@@ -99,6 +99,17 @@ class ModelConfig(BaseModel):
     num_experts: int = Field(64, description="Total number of experts (E).")
     top_k: int = Field(2, description="Active experts per token (K).")
     capacity_factor: float = Field(1.25, description="Expert buffer capacity factor.")
+    capacity_dropping: bool = Field(
+        False,
+        description=(
+            "Enable Switch Transformer / GShard-style capacity dropping. "
+            "When True, each expert accepts at most "
+            "ceil(capacity_factor * N*K/E) tokens; overflow tokens are "
+            "dropped (zero combine weight for that slot). When False "
+            "(default), all tokens are always processed regardless of "
+            "load imbalance."
+        ),
+    )
     ffn_dim: int = Field(14336, description="Expert FFN intermediate dimension (F).")
     vocab_size: int = Field(128256, description="Vocabulary size.")
     sequence_length: int = Field(4096, description="Input sequence length (S).")
