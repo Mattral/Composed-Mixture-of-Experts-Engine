@@ -5,7 +5,7 @@
 [![Tests](https://img.shields.io/badge/tests-260%20passing-brightgreen)](RESULTS.md)
 [![Chaos B](https://img.shields.io/badge/Chaos%20B-10%2F10%20✅-brightgreen)](RESULTS.md#fault-tolerance--chaos-test-results)
 [![T4 validated](https://img.shields.io/badge/T4%20GPU-validated%20June%202026-blue)](notebooks/moe_engine_v032_T4_validation.ipynb)
-[![Version](https://img.shields.io/badge/version-v0.3.2-orange)](roadmap.md)
+[![Version](https://img.shields.io/badge/version-v0.3.3-orange)](roadmap.md)
 [![License](https://img.shields.io/badge/license-Apache%202.0-lightgrey)](../LICENSE)
 
 ---

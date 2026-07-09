@@ -11,7 +11,7 @@
 [![T4 Validated](https://img.shields.io/badge/T4%20GPU-validated%20June%202026-blue)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/moe-engine/notebooks/moe_engine_v032_T4_validation.ipynb)
 [![Chaos B](https://img.shields.io/badge/Chaos%20B-10%2F10%20%E2%9C%85-brightgreen)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/RESULTS.md#fault-tolerance--chaos-test-results)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/pulls)
-[![Version](https://img.shields.io/badge/version-v0.3.2-orange)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/releases)
+[![Version](https://img.shields.io/badge/version-v0.3.3-orange)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/releases)
 
 </div>
 
