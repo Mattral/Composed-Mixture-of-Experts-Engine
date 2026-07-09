@@ -387,12 +387,16 @@ def main() -> None:
                     "dead_expert_count": dead_expert_count,
                     "routing_efficiency": routing_efficiency,
                     "active_experts": active_experts,
+                    "dropped_token_fraction": getattr(
+                        first_moe, "last_dropped_token_fraction", 0.0
+                    ),
                 }
                 # Mirror into StepRecord typed fields for Prometheus / WandB
                 rec.sparse_mfu = mfu_res.mfu * (K / max(E, 1))
                 rec.dead_expert_count = dead_expert_count
                 rec.routing_efficiency = routing_efficiency
                 rec.active_experts = active_experts
+                rec.dropped_token_fraction = getattr(first_moe, "last_dropped_token_fraction", 0.0)
             rec.collective = {
                 "all_to_all_dispatch_ms": first_moe.last_dispatch_ms,
                 "all_to_all_combine_ms": first_moe.last_combine_ms,
