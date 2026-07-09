@@ -1,7 +1,7 @@
 # Testing Guide
 
-**Version:** v0.3.2  
-**Last updated:** June 2026
+**Version:** v0.3.3  
+**Last updated:** July 2026
 
 ---
 
@@ -28,7 +28,7 @@ The four-tier model matches the four-tier benchmark strategy in `docs/benchmarks
 ### Tier 0: CPU-only (must pass on every commit)
 
 ```bash
-# All 235 CPU tests
+# All 348 CPU tests
 make test-cpu
 
 # Equivalent manual command
@@ -39,7 +39,7 @@ pytest tests/ \
   -k "not (2rank or multiprocess or distributed_invariants)" \
   -q
 
-# Expected: 235 passed, 1 skipped (Triton GPU), 1 flaky (seed=2 routing, pre-existing)
+# Expected: 348 passed, 1 skipped (Triton GPU), 1 xfailed (seed=2 routing, documented statistical edge case)
 ```
 
 ### Tier 1: GPU (Triton kernel, real CUDA)
@@ -87,7 +87,7 @@ make chaos-a
 
 | File | Tier | Tests | What it covers |
 |------|------|------:|----------------|
-| `test_config.py` | 0 | 34 | Full `MoEConfig` Pydantic system |
+| `test_config.py` | 0 | 38 | Full `MoEConfig` Pydantic system, incl. `large_scale.yaml` |
 | `test_kernels.py` | 0/1 | 7 | Router invariants (conservation, NaN, bounds, constexpr) |
 | `test_kernels_numerics.py` | 0/1 | 13 | `atol=rtol=1e-5` vs fp64 ref; 30 `(H,E,K)` configs |
 | `test_routing_quality.py` | 0 | 12 | Load imbalance, z-loss; stochastic seed sweep |
@@ -104,7 +104,7 @@ make chaos-a
 | `test_smoke_e2e.py` | 0 | 3 | End-to-end smoke: config → topology → model → step |
 | `test_chaos.py` | 3 | 3 | Scenario A (node kill) + Scenario B (storage stall) |
 
-**Total Tier-0 CPU: 235 passing** (v0.3.2, June 2026)
+**Total Tier-0 CPU: 348 passing** (v0.3.3, July 2026)
 
 ---
 
@@ -124,7 +124,7 @@ markers = [
 Usage:
 
 ```bash
-pytest tests/ -m cpu          # 235 tests, ~60s
+pytest tests/ -m cpu          # 348 tests, ~20s
 pytest tests/ -m gpu          # requires CUDA + Triton
 pytest tests/ -m chaos        # requires torchrun + Gloo
 pytest tests/ -m "cpu or gpu" # both tiers
@@ -143,7 +143,7 @@ avoid splitting multi-line `from X import (...)` blocks.
 ## Running Specific Tests
 
 ```bash
-# Config system only (34 tests, ~0.3s)
+# Config system only (38 tests, ~0.3s)
 pytest tests/test_config.py -v
 
 # Router correctness (7 tests, ~2s on CPU)
@@ -177,7 +177,8 @@ than the random baseline. This is a pre-existing issue in the original
 codebase and is present in the original repo's CI. It does not reflect a bug
 in the refactored code.
 
-Status: **non-blocking**. Excluded from the 235-passing count when counting
+Status: **non-blocking**. Marked `xfail(strict=False)` with the mechanism
+documented inline; excluded from the 348-passing count when counting
 stable tests. Tracked as a known issue.
 
 ### Multi-process tests (`2rank`, `multiprocess`, `distributed_invariants`)

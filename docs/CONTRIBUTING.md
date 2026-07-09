@@ -1,7 +1,7 @@
 # Contributing to moe-engine
 
-**Version:** v0.3.2  
-**Last updated:** June 2026
+**Version:** v0.3.3  
+**Last updated:** July 2026
 
 moe-engine is a research-grade runtime for fault-tolerant MoE training at
 hyperscale. Contributions should improve correctness, observability,
@@ -23,7 +23,7 @@ pip install pre-commit && pre-commit install
 # 3. Verify setup
 python scripts/validate_config.py configs/   # both configs should pass
 make smoke                                    # ~5s smoke run
-make test-cpu                                 # ~60s, 235 tests expected
+make test-cpu                                 # ~20s, 348 tests expected
 
 # 4. Verify your environment
 python scripts/cli.py info
@@ -61,7 +61,7 @@ make lint                    # ruff + mypy
 
 ```bash
 make format                  # auto-fix formatting
-make test-cpu                # 235 tests
+make test-cpu                # 348 tests
 make lint                    # zero ruff errors
 make validate-config         # configs valid
 python scripts/cli.py info   # environment summary for PR description
@@ -81,7 +81,7 @@ Attach the output of Section 2 (codebase verification) and Section 4 (smoke test
 ### P0 — Complete ✅
 
 - Monolith split (6 focused distributed modules)
-- Pydantic MoEConfig with 34 tests
+- Pydantic MoEConfig with 38 tests
 - Model extracted from train.py
 - `__all__` on all packages
 - Markers (`@pytest.mark.cpu/gpu/chaos`)
@@ -198,7 +198,7 @@ multiple processes. See tests/test_mock_dist.py for examples.
 ## Pull request checklist
 
 ```
-- [ ] make test-cpu passes (235+ tests)
+- [ ] make test-cpu passes (348+ tests)
 - [ ] make lint passes (zero ruff errors)
 - [ ] make validate-config passes
 - [ ] make smoke passes
