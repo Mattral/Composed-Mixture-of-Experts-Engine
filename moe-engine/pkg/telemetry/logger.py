@@ -115,6 +115,14 @@ class StepRecord:
     active_experts : int
         Number of distinct experts that received at least one token this step.
         Useful for detecting routing collapse (active_experts → small number).
+
+    dropped_token_fraction : float
+        Fraction of (token, top-k slot) assignments dropped due to expert
+        capacity enforcement (only nonzero when
+        ``DistributedMoELayer.capacity_dropping=True``). 0.0 = no drops
+        (default; capacity dropping disabled or capacity never exceeded).
+        Sustained values > 0.05 suggest ``capacity_factor`` is too tight
+        for the observed routing distribution.
     """
 
     step: int
@@ -137,12 +145,15 @@ class StepRecord:
     dead_expert_count: int = 0  # experts receiving zero tokens this step
     routing_efficiency: float = 0.0  # actual_tokens / (capacity_budget * E)
     active_experts: int = 0  # distinct experts receiving ≥ 1 token
+    dropped_token_fraction: float = 0.0  # fraction dropped by capacity enforcement
 
     def __post_init__(self) -> None:
         """Inject v0.3.2 fields into routing dict for backward-compat JSON."""
         self.routing.setdefault("sparse_mfu", self.sparse_mfu)
         self.routing.setdefault("dead_expert_count", self.dead_expert_count)
         self.routing.setdefault("routing_efficiency", self.routing_efficiency)
+        self.routing.setdefault("active_experts", self.active_experts)
+        self.routing.setdefault("dropped_token_fraction", self.dropped_token_fraction)
         self.routing.setdefault("active_experts", self.active_experts)
 
 
@@ -291,6 +302,10 @@ class PrometheusExporter:
             ("moe_dead_expert_count", "Experts receiving zero tokens this step (v0.3.2)"),
             ("moe_routing_efficiency", "Fraction of expert capacity used (v0.3.2)"),
             ("moe_active_experts", "Distinct experts receiving >= 1 token (v0.3.2)"),
+            (
+                "moe_dropped_token_fraction",
+                "Fraction of tokens dropped by capacity enforcement (v0.3.2)",
+            ),
             ("moe_expert_load_imbalance", "Router load imbalance (max/mean)"),
             ("moe_router_z_loss", "Router auxiliary z-loss"),
         ]:
@@ -325,6 +340,8 @@ class PrometheusExporter:
                 self._g["moe_routing_efficiency"].set(rec.routing["routing_efficiency"])
             if "active_experts" in rec.routing:
                 self._g["moe_active_experts"].set(rec.routing["active_experts"])
+            if "dropped_token_fraction" in rec.routing:
+                self._g["moe_dropped_token_fraction"].set(rec.routing["dropped_token_fraction"])
         if rec.routing:
             self._g["moe_expert_load_imbalance"].set(rec.routing.get("expert_load_imbalance", 1.0))
             self._g["moe_router_z_loss"].set(rec.routing.get("router_z_loss", 0.0))
