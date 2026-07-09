@@ -40,7 +40,7 @@ from pkg.distributed.mesh import (
 )
 
 # -- MoE Layer --
-from pkg.distributed.moe_layer import DistributedMoELayer
+from pkg.distributed.moe_layer import DistributedMoELayer, compute_capacity_drop_mask
 
 # -- Pipeline Parallelism --
 from pkg.distributed.pipeline_parallel import PipelineStage
@@ -80,6 +80,7 @@ __all__ = [
     "apply_fsdp2",
     # MoE Layer
     "DistributedMoELayer",
+    "compute_capacity_drop_mask",
     # High-level Router Interface
     "MoERouterInterface",
     "RouterStats",

@@ -17,7 +17,7 @@ metadata:
   namespace: moe-engine
   labels:
     app.kubernetes.io/name: moe-engine
-    app.kubernetes.io/version: v0.2
+    app.kubernetes.io/version: v0.3.2
 spec:
   completions: 16        # number of worker pods
   parallelism: 16
@@ -40,7 +40,7 @@ spec:
             claimName: moe-checkpoints-pvc
       containers:
         - name: trainer
-          image: moe-engine:v0.2
+          image: moe-engine:v0.3.2
           imagePullPolicy: Always
           command:
             - torchrun

@@ -2,14 +2,31 @@
 # moe-engine CI — GitHub Actions  (v0.3.2)
 # ============================================================
 #
-# Jobs:
-#   lint      — ruff + mypy type-check
-#   test-cpu  — Tier-0 CPU suite (235 tests, -m cpu)
-#   benchmark — smoke benchmark (CPU path, correctness + regression guard)
-#   docker    — smoke docker build (no GPU required)
+# Job tiers and when they run:
 #
-# GPU jobs: guarded by `runs-on: [self-hosted, gpu]`
-# Chaos jobs: manual-dispatch only (require torchrun + Gloo)
+#   lint          every push + PR          ruff + mypy
+#   test-cpu      every push + PR          319 Tier-0 CPU tests
+#   test-config   every push + PR          34 config system tests
+#   benchmark     every push + PR          CPU benchmark + conservation
+#   docker        workflow_dispatch only   Docker CPU-stage build + smoke
+#   test-gpu      workflow_dispatch only   Tier-1 Triton kernel tests
+#   chaos-b       workflow_dispatch only   Chaos Scenario B (10/10)
+#
+# Why docker + test-gpu are workflow_dispatch only:
+#   • docker: building the GPU image (pytorch/pytorch:2.6.0-cuda12.6...)
+#     takes 10-15 min on a GitHub-hosted runner and requires pulling a
+#     multi-GB base image. Run it deliberately, not on every commit.
+#   • test-gpu: requires a self-hosted runner with a registered CUDA GPU.
+#     The job would block forever ("Waiting for a runner") if no runner
+#     is registered. Gate it behind workflow_dispatch so it never blocks
+#     the main CI pipeline.
+#
+# To run GPU tests manually:
+#   GitHub → Actions → CI → Run workflow → select branch
+#
+# To register a self-hosted GPU runner:
+#   GitHub → Settings → Actions → Runners → New self-hosted runner
+#   Label it: self-hosted, gpu, cuda
 # ============================================================
 
 name: CI
@@ -19,7 +36,16 @@ on:
     branches: [main, dev, "release/**"]
   pull_request:
     branches: [main]
-  workflow_dispatch:     # allows manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      run_docker:
+        description: "Build and test Docker image"
+        type: boolean
+        default: false
+      run_gpu:
+        description: "Run Tier-1 GPU tests (requires self-hosted GPU runner)"
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -36,7 +62,7 @@ defaults:
     working-directory: moe-engine
 
 # ---------------------------------------------------------------------------
-# Job: lint
+# Job: lint  (every push + PR)
 # ---------------------------------------------------------------------------
 jobs:
   lint:
@@ -52,24 +78,27 @@ jobs:
           cache: pip
 
       - name: Install lint dependencies
-        run: pip install ruff mypy pydantic pyyaml types-PyYAML
+        run: pip install ruff mypy pydantic>=2.0.0 pyyaml types-PyYAML hypothesis
 
       - name: ruff check
-        run: ruff check pkg/ train.py benchmarks/ scripts/ --output-format=github
+        run: |
+          ruff check pkg/ train.py benchmarks/ scripts/ tests/ examples/ \
+            --select E,F,W,I --ignore E501 --output-format=github
 
       - name: ruff format (check only)
-        if: false   # temporarily skip this step
-        run: ruff format --check pkg/ train.py benchmarks/ scripts/
+        run: |
+          ruff format --check --line-length 100 \
+            pkg/ train.py benchmarks/ scripts/ tests/ examples/
 
-      - name: mypy
+      - name: mypy (non-blocking)
         run: mypy pkg/ --ignore-missing-imports --no-error-summary
-        continue-on-error: true   # non-blocking until type coverage is higher
+        continue-on-error: true
 
 # ---------------------------------------------------------------------------
-# Job: test-cpu (Tier-0 — must pass on every commit)
+# Job: test-cpu  (every push + PR — the gate that must always be green)
 # ---------------------------------------------------------------------------
   test-cpu:
-    name: Tier-0 CPU tests (235 expected)
+    name: "Tier-0 CPU tests (319 expected)"
     runs-on: ubuntu-22.04
     needs: lint
 
@@ -84,7 +113,7 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      - name: Verify configs valid
+      - name: Validate configs
         run: python scripts/validate_config.py configs/
 
       - name: Run Tier-0 CPU suite
@@ -94,23 +123,22 @@ jobs:
             --ignore=tests/test_smoke_e2e.py \
             -m cpu \
             -k "not (2rank or multiprocess or distributed_invariants)" \
-            --tb=short \
-            -q \
+            --tb=short -q \
             --junitxml=test-results/junit.xml
 
       - name: Upload test results
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results-cpu
+          name: test-results-cpu-${{ github.run_id }}
           path: moe-engine/test-results/
           retention-days: 7
 
 # ---------------------------------------------------------------------------
-# Job: test-config (dedicated config system gate)
+# Job: test-config  (every push + PR — dedicated config validation gate)
 # ---------------------------------------------------------------------------
   test-config:
-    name: Config system (34 tests)
+    name: "Config system (34 tests)"
     runs-on: ubuntu-22.04
     needs: lint
 
@@ -129,10 +157,10 @@ jobs:
         run: pytest tests/test_config.py -v --tb=short
 
 # ---------------------------------------------------------------------------
-# Job: benchmark (smoke, CPU path, correctness + regression guard)
+# Job: benchmark  (every push + PR — correctness + regression guard)
 # ---------------------------------------------------------------------------
   benchmark:
-    name: CPU benchmark smoke
+    name: "CPU benchmark (token conservation)"
     runs-on: ubuntu-22.04
     needs: test-cpu
 
@@ -153,99 +181,141 @@ jobs:
             --json /tmp/ci_bench.json \
             --csv  /tmp/ci_bench.csv
 
-      - name: Assert token conservation
+      - name: Assert token conservation (violations=0/100)
         run: |
-          python -c "
+          python - << 'PYEOF'
           import json, sys
           results = json.load(open('/tmp/ci_bench.json'))
           conservation = [r for r in results if 'conservation' in r['name']]
+          if not conservation:
+              print('FAIL: no conservation entries found in benchmark output')
+              sys.exit(1)
           for r in conservation:
               if r['notes'] != 'violations=0/100':
-                  print(f'FAIL: {r[\"name\"]} {r[\"notes\"]}')
+                  print(f'FAIL: {r["name"]} {r["notes"]}')
                   sys.exit(1)
-          print(f'PASS: {len(conservation)} conservation checks clean')
-          all_passed = all(r['passed'] for r in results)
-          if not all_passed:
-              failed = [r['name'] for r in results if not r['passed']]
-              print(f'FAIL: {failed}')
+          failed_entries = [r['name'] for r in results if not r['passed']]
+          if failed_entries:
+              print(f'FAIL: benchmark entries with passed=False: {failed_entries}')
               sys.exit(1)
-          print(f'PASS: {len(results)} benchmark entries, all passed=True')
-          "
+          print(f'PASS: {len(conservation)} conservation checks clean')
+          print(f'PASS: {len(results)} total benchmark entries all passed')
+          PYEOF
 
       - name: Upload benchmark results
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results-cpu
+          name: benchmark-results-${{ github.run_id }}
           path: /tmp/ci_bench.json
           retention-days: 30
 
 # ---------------------------------------------------------------------------
-# Job: docker (smoke build — no GPU required)
+# Job: docker  (manual workflow_dispatch only)
+#
+# Builds the CPU-only 'runtime-cpu' stage, which uses python:3.11-slim
+# (no GPU toolkit, pulls instantly) and runs the Tier-0 CPU tests inside
+# the container to prove the installed package is self-contained.
+#
+# The full GPU image (pytorch/pytorch:2.6.0-cuda12.6-cudnn9-devel) is NOT
+# built in CI because it requires pulling a 10 GB+ base image. Build it
+# locally or in a dedicated GPU CI runner with:
+#   docker build --target runtime -t moe-engine:gpu deploy/docker/
 # ---------------------------------------------------------------------------
   docker:
-    name: Docker smoke build
+    name: "Docker CPU image build + smoke"
     runs-on: ubuntu-22.04
     needs: test-cpu
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_dispatch' && inputs.run_docker == true
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build smoke image
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build CPU-only image (runtime-cpu stage)
         run: |
           docker build \
-            --target runtime \
-            --tag moe-engine:ci-${{ github.sha }} \
+            --target runtime-cpu \
+            --tag moe-engine:ci-cpu-${{ github.sha }} \
             --file deploy/docker/Dockerfile \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
             .
+        working-directory: moe-engine
 
-      - name: Smoke run inside container
+      - name: Smoke run — validate configs inside container
         run: |
           docker run --rm \
-            -e PYTHONUNBUFFERED=1 \
-            moe-engine:ci-${{ github.sha }} \
-            python train.py --config configs/smoke.yaml --smoke
+            moe-engine:ci-cpu-${{ github.sha }} \
+            python scripts/validate_config.py configs/
+        working-directory: moe-engine
+
+      - name: Smoke run — Tier-0 CPU tests inside container
+        run: |
+          docker run --rm \
+            moe-engine:ci-cpu-${{ github.sha }} \
+            python -m pytest tests/ -m cpu \
+              -k "not (2rank or multiprocess or distributed_invariants)" \
+              --ignore=tests/test_chaos.py -q --tb=short
+        working-directory: moe-engine
 
 # ---------------------------------------------------------------------------
-# Job: test-gpu (Tier-1 — runs on self-hosted GPU runner)
+# Job: test-gpu  (manual workflow_dispatch only)
+#
+# Requires a self-hosted runner labelled: self-hosted, gpu, cuda
+# Register one at: GitHub → Settings → Actions → Runners → New runner
+#
+# Until a runner is registered this job will not start (it is gated by
+# workflow_dispatch + inputs.run_gpu), so it NEVER blocks the main CI pipeline.
 # ---------------------------------------------------------------------------
   test-gpu:
-    name: Tier-1 GPU tests (Triton kernel)
+    name: "Tier-1 GPU tests (Triton kernel)"
     runs-on: [self-hosted, gpu, cuda]
     needs: test-cpu
-    if: github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch' && inputs.run_gpu == true
 
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
       - name: Install dependencies
-        run: pip install -e ".[dev]" triton
+        run: |
+          pip install -e ".[dev]"
+          pip install "triton>=3.0.0"
+        working-directory: moe-engine
 
-      - name: GPU smoke run
+      - name: GPU smoke run (end-to-end train)
         run: python train.py --config configs/smoke.yaml --smoke
+        working-directory: moe-engine
 
-      - name: Triton kernel tests
+      - name: Triton kernel correctness tests
         run: |
           pytest tests/test_kernels.py tests/test_kernels_numerics.py \
             -v --tb=short
+        working-directory: moe-engine
 
-      - name: GPU benchmark
+      - name: GPU benchmark sweep
         run: |
           python benchmarks/run_benchmark.py \
             --cuda \
             --json /tmp/gpu_bench_ci.json
+        working-directory: moe-engine
+
+      - name: Upload GPU benchmark results
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-benchmark-${{ github.run_id }}
+          path: /tmp/gpu_bench_ci.json
+          retention-days: 30
 
 # ---------------------------------------------------------------------------
-# Job: chaos-b (manual dispatch only — requires torchrun + Gloo)
+# Job: chaos-b  (manual workflow_dispatch only)
 # ---------------------------------------------------------------------------
   chaos-b:
-    name: Chaos Scenario B (storage stall, 10/10 expected)
+    name: "Chaos Scenario B (storage stall, 10/10 expected)"
     runs-on: ubuntu-22.04
     if: github.event_name == 'workflow_dispatch'
+    needs: test-cpu
 
     steps:
       - uses: actions/checkout@v4
@@ -258,7 +328,7 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev]"
 
-      - name: Run Scenario B
+      - name: Run Chaos Scenario B
         run: |
           GLOO_SOCKET_IFNAME=lo pytest tests/test_chaos.py \
             -v -m chaos -k "scenario_b" --count=10 \
@@ -266,13 +336,23 @@ jobs:
 
       - name: Assert 10/10 pass rate
         run: |
-          python -c "
+          python - << 'PYEOF'
           import re, sys
           text = open('/tmp/chaos_b_output.txt').read()
           passed = len(re.findall('PASSED', text))
           failed = len(re.findall('FAILED', text))
-          print(f'Scenario B: {passed} passed, {failed} failed')
+          total  = passed + failed
+          print(f'Scenario B: {passed}/{total} passed')
           if failed > 0:
-              print('REGRESSION: Scenario B should be 10/10')
+              print(f'REGRESSION: Scenario B should be 10/10, got {passed}/10')
               sys.exit(1)
-          "
+          print('PASS: 10/10')
+          PYEOF
+
+      - name: Upload chaos output
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chaos-b-output-${{ github.run_id }}
+          path: /tmp/chaos_b_output.txt
+          retention-days: 14

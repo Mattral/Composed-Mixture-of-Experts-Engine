@@ -21,7 +21,11 @@ x-moe-base: &moe-base
   build:
     context: ../..
     dockerfile: deploy/docker/Dockerfile
-  image: moe-engine:v0.2
+    target: runtime
+    args:
+      PYTORCH_VERSION: "2.6.0"
+      CUDA_VERSION: "12.6"
+  image: moe-engine:v0.3.2
   ipc: host          # required for NCCL shared memory
   ulimits:
     memlock: -1
@@ -36,10 +40,21 @@ x-moe-base: &moe-base
     - moe_checkpoints:/mnt/ckpts
     - moe_logs:/var/log/moe-engine
 
+x-moe-base-cpu: &moe-base-cpu
+  build:
+    context: ../..
+    dockerfile: deploy/docker/Dockerfile
+    target: runtime-cpu
+  image: moe-engine:v0.3.2-cpu
+  environment:
+    - PYTHONUNBUFFERED=1
+  volumes:
+    - ./../../:/workspace/moe-engine:ro
+
 services:
   # ---- CPU-only smoke test (no GPU required) --------------------
   smoke:
-    <<: *moe-base
+    <<: *moe-base-cpu
     command: >
       python train.py
         --config configs/smoke.yaml
@@ -88,13 +103,14 @@ services:
     ports:
       - "9102:9102"   # Prometheus metrics
 
-  # ---- Pytest CPU test suite ------------------------------------
+  # ---- Pytest CPU test suite (Tier-0, 319 tests) -----------------
   test:
-    <<: *moe-base
+    <<: *moe-base-cpu
     command: >
-      pytest tests/ -v -x
+      pytest tests/ -v -m cpu
         --ignore=tests/test_chaos.py
-        -k "not cuda"
+        --ignore=tests/test_smoke_e2e.py
+        -k "not (2rank or multiprocess or distributed_invariants)"
     environment:
       - PYTHONUNBUFFERED=1
 
