@@ -47,6 +47,7 @@ from pkg.distributed.mesh import (  # noqa: E402
 from pkg.distributed.moe_layer import (  # noqa: E402
     DistributedMoELayer,  # noqa: F401
     _SwiGLUExpert,  # noqa: F401  (private; tests inspect it)
+    compute_capacity_drop_mask,  # noqa: F401
 )
 from pkg.distributed.pipeline_parallel import PipelineStage  # noqa: F401
 from pkg.distributed.tensor_parallel import (  # noqa: F401
