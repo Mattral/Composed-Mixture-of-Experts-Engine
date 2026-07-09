@@ -1,0 +1,76 @@
+# Large-scale training configuration for moe-engine (P2.2: larger expert counts).
+#
+# This config demonstrates a fine-grained MoE setup (DeepSeek-MoE / Mixtral-style):
+# 256 experts with top_k=8, smaller per-expert FFN dimension. Fine-grained
+# expert splitting (many small experts vs few large experts) generally
+# improves specialisation at the same total parameter count, at the cost
+# of a much larger router computation (E=256 vs E=64) and tighter EP
+# bandwidth requirements during all-to-all dispatch.
+#
+# capacity_dropping is enabled here to demonstrate the v0.3.2 capacity
+# enforcement mechanism (pkg/distributed/moe_layer.py::compute_capacity_drop_mask).
+# At E=256 with top_k=8, per-expert load variance is naturally higher than
+# at E=64/top_k=2, making capacity enforcement more relevant in practice.
+#
+# All fields are read by train.py via pkg.utils.config.MoEConfig.from_yaml.
+# Validate with: python scripts/cli.py validate configs/large_scale.yaml
+
+model:
+  hidden_dim: 4096
+  num_layers: 32
+  num_experts: 256              # 4x default.yaml — fine-grained expert splitting
+  top_k: 8                      # 4x default.yaml — proportionally more experts fire per token
+  capacity_factor: 1.5          # more head-room than default.yaml (1.25) since E=256
+                                 # increases per-expert load variance
+  capacity_dropping: true       # v0.3.2: enforce hard per-expert token budget
+  ffn_dim: 2048                 # 7x smaller than default.yaml (14336) — fine-grained experts
+                                 # are individually smaller; total expert params stays comparable:
+                                 # 256 * 2048 ≈ 64 * 14336 * 0.57 (fine-grained trades width for count)
+  vocab_size: 128256
+  sequence_length: 4096
+  dtype: bfloat16
+
+training:
+  global_batch_size: 4096
+  micro_batch_size: 4
+  learning_rate: 3.0e-4
+  weight_decay: 0.1
+  grad_clip: 1.0
+  max_steps: 100000
+  log_interval: 10
+  ckpt_interval: 500
+  warmup_steps: 2000
+  gradient_accumulation_steps: 4
+  z_loss_weight: 1.0e-3         # aux load-balancing loss recommended at this expert count;
+                                 # E=256 is far more prone to routing collapse than E=64
+
+parallelism:
+  # 2D mesh: (data_parallel x expert_parallel).
+  # EP=16 (vs 8 in default.yaml) spreads 256 experts across more ranks,
+  # keeping experts-per-rank comparable (256/16=16 vs 64/8=8).
+  data_parallel: 8
+  expert_parallel: 16
+  tensor_parallel: 1
+  pipeline_parallel: 1
+
+checkpoint:
+  local_dir: /mnt/nvme/moe-engine/ckpts
+  remote_uri: s3://moe-engine-ckpts/run-large-scale/
+  async_workers: 4
+  retention: 8
+
+elastic:
+  min_nodes: 16
+  max_nodes: 256
+  rdzv_backend: c10d
+  rdzv_endpoint: etcd-headless:2379
+  health_check_interval_s: 5
+  drop_grace_period_s: 30
+
+telemetry:
+  log_dir: /var/log/moe-engine
+  tensorboard_dir: /var/log/moe-engine/tb
+  json_path: /var/log/moe-engine/step.jsonl
+  mfu_target: 0.45              # fine-grained MoE typically achieves lower MFU than
+                                 # coarse-grained (more router overhead, smaller GEMMs)
+  hardware_peak_tflops: 989.0   # H100 SXM5 bf16 dense tensor-core peak.
