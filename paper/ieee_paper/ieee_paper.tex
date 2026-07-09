@@ -1,0 +1,475 @@
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{url}
+\usepackage{hyperref}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue,
+  citecolor=blue,
+  urlcolor=blue,
+  pdftitle={moe-engine: A Fault-Tolerant Runtime for Hyperscale Mixture-of-Experts Training},
+  pdfauthor={Min Htet Myet}
+}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+\title{moe-engine: A Fault-Tolerant Runtime for\\Hyperscale Mixture-of-Experts Training}
+
+\author{
+\IEEEauthorblockN{Min Htet Myet}
+\IEEEauthorblockA{
+\textit{Independent Researcher}\\
+\texttt{github.com/Mattral/Composed-Mixture-of-Experts-Engine}
+}
+}
+
+\maketitle
+
+\begin{abstract}
+We present moe-engine, a research-grade infrastructure runtime for training
+large Mixture-of-Experts (MoE) models under continuous node failure at
+hyperscale. The system combines a fused Triton routing kernel, composable
+4D parallelism (data, expert, tensor, pipeline), invariant-checked
+correctness, and elastic fault tolerance with automatic expert resharding.
+This paper reports two developments beyond our prior work: first, the
+system's first sustained validation on real GPU hardware (NVIDIA T4),
+which surfaced and corrected a kernel compilation defect invisible to
+CPU-only continuous integration and yielded measured throughput results
+including an 80.1$\times$ speedup over a CPU reference path and a 100\%
+pass rate on a storage-fault chaos scenario; second, a structural
+refactoring replacing a 1{,}165-line monolithic module with eight
+single-responsibility components, a migration to statically validated
+configuration, and a Switch-Transformer-style expert capacity enforcement
+mechanism. We additionally report, as a methodological contribution, a
+root-caused case study of a configuration validator that silently degraded
+to a no-op across an entire release cycle due to an undeclared dependency
+--- a failure mode we argue generalizes to any system that pairs
+safety-critical validation with an optional-dependency fallback. The test
+suite grew from 148 to 348 passing cases over this arc, incorporating
+property-based testing and a mocked collective-communication backend. We
+report multi-node GPU benchmarking and full chaos-recovery reliability as
+open work, consistent with this project's stated policy of reporting
+measured results only at the scale actually validated.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Mixture-of-Experts, distributed training, fault tolerance, GPU kernels,
+Triton, elastic training, expert parallelism, configuration validation
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+Training large Mixture-of-Experts (MoE) models at hyperscale --- tens of
+thousands of GPUs --- exposes systems challenges beyond raw throughput:
+continuous node failure, silent collective and sharding bugs, misleading
+utilization metrics under sparse activation, and the need for seamless
+recovery with expert re-ownership \cite{shoeybi2019megatron,
+rasley2020deepspeed}. moe-engine is a runtime built specifically around the
+premise that at hyperscale, node death is not an exception to be handled
+but a continuous background condition the system must remain correct
+under.
+
+This paper is the third report on the system. The first version described
+the initial Triton router kernel, 4D mesh foundations, and elastic recovery
+mechanisms. The second reported production-style multi-process pipeline
+parallelism with a full 1F1B schedule, but explicitly declined to present
+GPU throughput data, stating that sustained cluster access was not yet
+available and that the authors preferred to report no numbers rather than
+illustrative ones. This paper reports the closing of that specific gap at
+single-GPU scale, together with a substantial internal refactoring
+undertaken in parallel.
+
+Our contributions are:
+\begin{itemize}
+\item The first real-GPU validation of the system's Triton router kernel,
+  which surfaced a compilation defect (Section~\ref{sec:kernel}) invisible
+  to any CPU-only test, together with measured throughput data
+  (Section~\ref{sec:eval}).
+\item A structural decomposition of a 1{,}165-line distributed-systems
+  module into eight single-responsibility components with full backward
+  compatibility (Section~\ref{sec:arch}).
+\item An expert-capacity enforcement mechanism following Switch
+  Transformer/GShard semantics \cite{fedus2021switch, lepikhin2020gshard},
+  implemented via a vectorized group-cumulative-count primitive
+  (Section~\ref{sec:capacity}).
+\item A root-caused case study of a silent configuration-validation
+  failure with a generalizable lesson for systems pairing optional
+  dependencies with safety-critical logic (Section~\ref{sec:config}).
+\item An expanded test suite (148$\to$348 tests) incorporating
+  property-based testing and mocked collective communication
+  (Section~\ref{sec:testing}).
+\end{itemize}
+
+\section{Related Work}
+
+Megatron-LM \cite{shoeybi2019megatron} and DeepSpeed \cite{rasley2020deepspeed}
+established tensor- and pipeline-parallel training at scale for dense
+models. Switch Transformer \cite{fedus2021switch} and GShard
+\cite{lepikhin2020gshard} introduced sparse expert routing with capacity-based
+token dropping, which we adopt directly for our capacity enforcement
+mechanism (Section~\ref{sec:capacity}). Tutel \cite{hwang2023tutel}
+addressed adaptive expert parallelism at scale. Prior systems in this space
+have generally reported results at the multi-node scale their
+infrastructure was designed for; our project differs primarily in scope
+and maturity level --- it targets research-grade reproducibility on
+resources ranging from a single CPU core to, eventually, a full cluster,
+and explicitly reports which scale each result was obtained at rather than
+presenting cluster-scale projections without cluster-scale data.
+
+\section{System Architecture}
+\label{sec:arch}
+
+The system's high-level control flow --- training loop, distributed MoE
+layer, elastic training harness, telemetry --- is unchanged from prior
+versions. The principal architectural change in this work is a
+decomposition of the distributed-systems package, previously a single
+1{,}165-line file containing every parallelism primitive, into eight
+modules (Table~\ref{tab:modules}), each with one responsibility. A
+68-line backward-compatibility shim re-exports every public symbol from
+the original module path, so existing call sites require no modification.
+
+\begin{table}[t]
+\centering
+\caption{Distributed module decomposition}
+\label{tab:modules}
+\begin{tabular}{@{}p{0.32\linewidth}p{0.58\linewidth}@{}}
+\toprule
+\textbf{Module} & \textbf{Responsibility} \\
+\midrule
+\texttt{mesh.py} & Topology, device mesh, comm.\ streams \\
+\texttt{tensor\_parallel.py} & Column/Row-parallel linear layers \\
+\texttt{sequence\_parallel.py} & SP scatter/gather, fused all-gather \\
+\texttt{expert\_parallel.py} & All-to-all dispatch/combine \\
+\texttt{pipeline\_parallel.py} & 1F1B pipeline schedule \\
+\texttt{data\_parallel.py} & FSDP2 application \\
+\texttt{router.py} & High-level router interface \\
+\texttt{moe\_layer.py} & Layer orchestration \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Model definitions were additionally extracted into a separate package with
+a decorator-based registry (\texttt{register\_model},
+\texttt{build\_model\_from\_config}), following the pattern used by
+Megatron-LM and torchTitan to decouple training infrastructure from model
+research code: the training entrypoint dispatches on a configuration
+string rather than importing a specific model class.
+
+\section{Triton Router Kernel}
+\label{sec:kernel}
+
+The router kernel fuses gating matmul, softmax, top-$K$ selection, and
+combine-weight renormalization into a single Triton kernel operating in
+one HBM pass, unchanged architecturally since our first report. This
+section describes a defect surfaced only when the kernel was, for the
+first time, compiled and executed on real GPU hardware as part of this
+work.
+
+\subsection{The constexpr Defect}
+
+Both the forward and backward kernels unroll their top-$K$ selection loop
+using \texttt{tl.static\_range}, which requires the loop bound to be a
+compile-time \texttt{constexpr} value. The kernel signatures declared $K$
+as an ordinary runtime integer. On the CPU-only reference implementation
+used throughout prior continuous integration --- plain PyTorch, never
+invoking the Triton compiler --- this had no observable effect. The first
+real-GPU compilation attempt failed with a Triton
+\texttt{CompilationError}.
+
+We highlight this defect because of its generalizable failure mode:
+\emph{a CPU reference fallback for hardware-specific code is exactly what
+allows a hardware-only defect to survive an arbitrary number of CI runs},
+because CI never exercises the code path where the defect resides. The
+fix --- declaring $K$ as \texttt{constexpr} in both kernel signatures ---
+is minor; the broader lesson motivated two regression tests: a
+CPU-executable static assertion that both kernel signatures declare $K$ as
+\texttt{constexpr}, and a GPU-gated test that compiles and runs the kernel
+when CUDA is available.
+
+\section{4D Parallelism}
+
+Data, expert, tensor, and pipeline parallelism compose via a device mesh
+constructed once at startup. Tensor parallelism shards SwiGLU expert
+weights following the standard column/column/row convention (both gate and
+up projections column-parallel, down projection row-parallel), unchanged
+from prior work. Pipeline parallelism uses a three-phase 1F1B schedule
+(warmup, steady-state, drain) with real \texttt{torch.distributed.send}/
+\texttt{recv} on a dedicated process group and explicit micro-batch
+tagging, validated by 2-rank \texttt{mp.spawn} tests; this component is
+unchanged in the present work and has not yet been exercised under
+simulated node failure.
+
+\section{Expert Capacity Management}
+\label{sec:capacity}
+
+The principal functional addition in this work is an optional expert
+capacity enforcement mechanism following Switch Transformer/GShard
+semantics: each expert accepts at most
+\begin{equation}
+c_e = \left\lceil \gamma \cdot \frac{N K}{E} \right\rceil
+\end{equation}
+tokens, where $\gamma$ is a configurable capacity factor, $N$ is the token
+count, $K$ is active experts per token, and $E$ is total expert count.
+Tokens beyond this budget receive zero combine weight for the
+corresponding top-$K$ slot rather than being processed.
+
+\begin{algorithm}[t]
+\caption{\texttt{cumcount}: position of appearance within group}
+\label{alg:cumcount}
+\begin{algorithmic}[1]
+\REQUIRE groups $\in \mathbb{Z}^N$ (expert assignment per token)
+\ENSURE position $\in \mathbb{Z}^N$ (0-indexed rank within group)
+\STATE order $\gets$ \textsc{StableArgsort}(groups)
+\STATE sorted $\gets$ groups[order]
+\STATE isStart$[0] \gets$ true; isStart$[i] \gets$ sorted$[i] \ne$ sorted$[i{-}1]$
+\STATE startIdx $\gets$ \textsc{Where}(isStart, $i$, 0)
+\STATE startIdx $\gets$ \textsc{CumMax}(startIdx)
+\STATE posSorted $\gets i - $ startIdx
+\STATE position[order] $\gets$ posSorted
+\RETURN position
+\end{algorithmic}
+\end{algorithm}
+
+Algorithm~\ref{alg:cumcount} gives the core primitive, \texttt{cumcount},
+which computes each token's zero-indexed position of appearance within its
+assigned expert's queue using a stable sort followed by a cumulative
+maximum, avoiding both an explicit per-expert loop and a dependency on
+\texttt{scatter\_reduce} variants whose availability differs across
+PyTorch releases. The capacity drop mask is then
+$\text{drop}[n,k] = \texttt{cumcount}(\text{idx}[:,k])[n] \ge c_e$,
+applied independently per top-$K$ slot. The mechanism is disabled by
+default; enabling it changes no existing behavior for callers who do not
+opt in. Twenty-two dedicated tests cover the primitive, mask construction,
+and full-layer integration including gradient flow through non-dropped
+slots.
+
+A companion configuration exercising $E{=}256$, $K{=}8$ --- a fine-grained
+expert regime four times the expert count of our existing production
+configuration --- validates the mechanism's correctness at reduced
+dimensions; its throughput and memory behavior at full scale on real
+hardware has not been measured (Section~\ref{sec:limitations}).
+
+\section{Configuration Validation}
+\label{sec:config}
+
+\subsection{Schema Migration}
+
+Prior configuration handling used an unvalidated flat dictionary: an
+invalid value such as $\text{top\_k} > \text{num\_experts}$ would not
+surface until the router kernel failed with an opaque index error,
+potentially minutes into training. We replaced this with a statically
+validated hierarchical schema with cross-field validators enforcing, among
+other constraints, $\text{top\_k} \le \text{num\_experts}$ and
+$\text{warmup\_steps} < \text{max\_steps}$, reporting the offending field
+path and constraint description at load time.
+
+\subsection{A Silent-Degradation Case Study}
+
+We report the following defect in detail for its methodological interest.
+The configuration module included a fallback: if the validation library
+were unavailable, the module would degrade to an unvalidated pass-through
+rather than fail to import, intended to preserve importability in minimal
+environments. The dependency, however, was never declared in the package's
+runtime requirements. Continuous integration installed exactly what was
+declared, so the validation library was never present, and every
+configuration --- including deliberately invalid ones constructed by the
+test suite specifically to verify that validation errors fire --- silently
+passed through the unvalidated path. Eight assertions that a specific
+exception type would be raised instead observed no exception, for an
+entire release cycle, without any test reporting failure, because the
+tests never exercised the code path they were written to test.
+
+\begin{table}[t]
+\centering
+\caption{Silent-degradation defects and their fixes}
+\label{tab:bugs}
+\small
+\begin{tabular}{@{}p{0.46\linewidth}p{0.46\linewidth}@{}}
+\toprule
+\textbf{Root cause} & \textbf{Fix} \\
+\midrule
+Validation library never declared as a runtime dependency; optional-import fallback silently disabled all validation & Declared as a hard dependency; fallback path deleted entirely --- module now fails loudly on import if absent \\
+\addlinespace
+\texttt{yaml.safe\_load("1e-5")} returns a string under YAML 1.1 grammar, not a float & Native \texttt{int}/\texttt{float} coercion attempted before YAML fallback \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The general lesson (Table~\ref{tab:bugs}) we draw is that \emph{a component
+whose stated purpose is catching invalid input early should not be able to
+silently stop performing that function}; an import error is a safer
+failure mode than a silently permissive one. We deleted the fallback path
+entirely rather than fixing the dependency declaration alone.
+
+\section{Fault Tolerance and Checkpointing}
+
+Asynchronous two-tier checkpointing (pinned host memory, NVMe with
+\texttt{O\_DIRECT} and atomic rename, S3) and round-robin expert resharding
+on node loss are unchanged in core algorithm from prior work. We added
+explicit schema versioning to checkpoint metadata, embedding the runtime's
+package and PyTorch versions (read from their respective single sources of
+truth, not hardcoded) alongside a monotonically increasing schema version
+integer, with graceful field defaulting on version mismatch in either
+direction. The storage-stall chaos scenario remains fully verified and, as
+reported in Section~\ref{sec:eval}, now has real-GPU confirmation. The
+node-kill-and-recovery scenario is unchanged at approximately 85\% pass
+rate due to a Gloo process-group re-initialization race, whose fix (NCCL
+migration in the chaos harness) requires GPU hardware not available for
+this cycle.
+
+\section{Testing Infrastructure}
+\label{sec:testing}
+
+The CPU-only test tier grew from 148 to 348 passing tests over this arc.
+Three additions specifically target correctness properties that do not
+require GPU or multi-process resources: (i) nine Hypothesis-based
+property tests verifying token conservation, weight normalization,
+complete and non-overlapping expert ownership under arbitrary
+$(E, \text{ep\_size})$, and configuration invariants, each checked against
+fifty randomly generated inputs rather than fixed examples; (ii) a
+thread-based mock of \texttt{all\_to\_all\_single} enabling
+expert-parallel dispatch logic to be exercised at $\text{ep\_size}{>}1$
+within a single process, complementary to (not a replacement for) existing
+2-rank \texttt{mp.spawn} ground-truth tests; and (iii) dedicated test
+suites for the high-level router interface and model registry (33 and 20
+tests respectively), following the principle that each public interface
+boundary warrants tests that would fail if that boundary's contract were
+violated, independent of underlying-implementation coverage.
+
+\section{Evaluation}
+\label{sec:eval}
+
+\subsection{Real-GPU Validation}
+
+We report results from a single NVIDIA T4 (16~GB HBM2, 65 TFLOPS FP32),
+the first sustained GPU validation for this system. Token conservation
+held with zero violations across 100 seeds on CUDA, matching the CPU
+reference. The storage-stall chaos scenario achieved a 10-of-10 (100\%)
+pass rate under real-GPU execution.
+
+\begin{table}[t]
+\centering
+\caption{Router forward throughput: T4 GPU vs.\ CPU reference}
+\label{tab:speedup}
+\small
+\begin{tabular}{@{}rrrrrrr@{}}
+\toprule
+$N$ & $H$ & $E$ & $K$ & CPU (M/s) & GPU (M/s) & Speedup \\
+\midrule
+512  & 256  & 16 & 2 & 0.747 & 2.141 & 2.9$\times$ \\
+1024 & 512  & 32 & 2 & 0.421 & 3.644 & 8.7$\times$ \\
+2048 & 1024 & 64 & 2 & 0.236 & 4.832 & 20.4$\times$ \\
+4096 & 2048 & 64 & 4 & 0.056 & 4.454 & \textbf{80.1$\times$} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:speedup} reports forward-only router throughput at four
+configurations. Speedup increases super-linearly with problem size, from
+2.9$\times$ at $N{=}512$ to 80.1$\times$ at $N{=}4096, H{=}2048$ --- the
+configuration closest to production MoE hidden dimensions. We attribute
+this to the single-HBM-pass kernel's bandwidth utilization improving with
+working-set size, unmatched by the single-threaded, unvectorized CPU
+reference path.
+
+We emphasize scope: these results confirm kernel correctness and
+CPU/GPU scaling on real hardware for the first time, but do not constitute
+production-scale MFU. The T4 is inference-oriented, with roughly
+$15\times$ lower BF16 peak throughput than an H100 SXM5, and measured MFU
+at smoke-test batch sizes is on the order of $10^{-6}$ --- expected and
+uninformative at this scale, reported for completeness rather than as a
+substantive result.
+
+\subsection{MoE Layer Overhead}
+
+Full distributed-layer forward latency, measured against a dense
+single-expert baseline at matched $(B,S,H,F)$, showed 21.8$\times$ to
+26.1$\times$ overhead on the T4 and 9.1$\times$ to 16.2$\times$ on CPU at
+small batch sizes ($B{\le}4$). This range is dominated by kernel-launch
+latency at these sizes and by a parameter-count mismatch between the
+dense baseline and the MoE configuration compared against it; it should
+be read as a latency-floor measurement rather than a throughput-per-parameter
+comparison.
+
+\section{Limitations and Future Work}
+\label{sec:limitations}
+
+Consistent with this project's reporting policy, we state open items
+explicitly rather than eliding them. \emph{Multi-node GPU data} does not
+yet exist beyond the single-T4 results above; this remains the top
+priority for future work and requires sustained cluster access.
+\emph{Chaos Scenario A} (node kill and recovery) remains at approximately
+85\% due to the unresolved Gloo race noted in Section~VII; its fix
+requires GPU hardware to validate. The \emph{expert capacity mechanism} of
+Section~\ref{sec:capacity} is validated for correctness only at reduced
+scale; its behavior at $E{=}256$ under real dispatch bandwidth constraints
+is unmeasured, as is a next-best-expert re-routing policy as an
+alternative to outright dropping. \emph{Pipeline parallelism under
+simulated node failure} has not been exercised. \emph{Non-divisible
+sequence lengths} under sequence parallelism remain unsupported.
+
+\section{Conclusion}
+
+This paper reports closing a specific, previously stated gap: real-GPU
+validation of moe-engine's router kernel and chaos-recovery mechanism,
+with reproducible single-device measurements rather than illustrative
+estimates. That validation surfaced a genuine defect invisible to any
+CPU-only test, illustrating a general risk in systems that maintain
+hardware-specific code behind a CPU fallback. In parallel work, a
+structural refactoring surfaced a second, independent defect --- a
+configuration validator silently non-functional for a full release cycle
+due to an undeclared dependency --- which we argue generalizes beyond this
+system to any component pairing safety-critical validation with an
+optional-dependency fallback. The system's multi-node evaluation gap
+remains open for the reason it has been open throughout this project's
+reporting history: access to sustained cluster resources, not algorithmic
+readiness.
+
+\section*{Acknowledgment}
+The author thanks the PyTorch, Triton, and distributed systems
+communities, the maintainers of Pydantic and Hypothesis, and researchers
+who have openly shared large-scale training failure post-mortems.
+
+\begin{thebibliography}{9}
+
+\bibitem{shoeybi2019megatron}
+M. Shoeybi, M. Patwary, R. Puri, P. LeGresley, J. Casper, and B.
+Catanzaro, ``Megatron-LM: Training multi-billion parameter language
+models using model parallelism,'' \emph{arXiv:1909.08053}, 2019.
+
+\bibitem{rasley2020deepspeed}
+J. Rasley, S. Rajbhandari, O. Ruwase, and Y. He, ``DeepSpeed: System
+optimizations enable training deep learning models with over 100 billion
+parameters,'' in \emph{Proc. 26th ACM SIGKDD Conf.}, 2020, pp. 3505--3506.
+
+\bibitem{fedus2021switch}
+W. Fedus, B. Zoph, and N. Shazeer, ``Switch transformers: Scaling to
+trillion parameter models with simple and efficient sparsity,''
+\emph{arXiv:2101.03961}, 2021.
+
+\bibitem{lepikhin2020gshard}
+D. Lepikhin, H. Lee, Y. Xu, D. Chen, O. Firat, Y. Huang, M. Krikun, N.
+Shazeer, and Z. Chen, ``GShard: Scaling giant models with conditional
+computation and automatic sharding,'' \emph{arXiv:2006.16668}, 2020.
+
+\bibitem{hwang2023tutel}
+C. Hwang \emph{et al.}, ``Tutel: Adaptive mixture-of-experts at scale,''
+\emph{arXiv:2206.03382}, 2023.
+
+\end{thebibliography}
+
+\end{document}
