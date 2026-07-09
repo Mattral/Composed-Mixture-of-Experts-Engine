@@ -1,7 +1,7 @@
 # Quickstart
 
-**Version:** v0.3.2  
-**Last updated:** June 2026
+**Version:** v0.3.3  
+**Last updated:** July 2026
 
 Get from zero to a running MoE training step in under 5 minutes — no GPU required.
 
@@ -112,14 +112,14 @@ make test-cpu
 Expected:
 
 ```
-1 failed, 252 passed, 1 skipped in ~60s
+1 xfailed, 348 passed, 1 skipped in ~20s
 ```
 
-- **252 passed** (235 original + 17 mock_dist + property tests)
+- **348 passed**
 - **1 skipped**: Triton GPU path (no CUDA in this environment — expected)
-- **1 failed**: `test_routing_quality::test_uniform_init_lower_imbalance[2]`  
-  Pre-existing stochastic flake at seed=2. Non-blocking. Identical failure on
-  the original codebase. See `docs/testing.md` for details.
+- **1 xfailed**: `test_routing_quality::test_uniform_init_lower_imbalance[2]`  
+  Marked `xfail` — a documented statistical edge case at seed=2, not a code
+  bug. See `docs/testing.md` for the full mechanism explanation.
 
 ---
 
@@ -177,7 +177,7 @@ torchrun --standalone --nproc_per_node=4 \
 | `pkg/kernels/moe_router.py` | Triton fused router kernel |
 | `pkg/utils/config.py` | Pydantic MoEConfig (start here for config changes) |
 | `pkg/models/registry.py` | Model registry and factory |
-| `tests/test_config.py` | 34 config system tests |
+| `tests/test_config.py` | 38 config system tests |
 | `tests/test_properties.py` | Property-based invariant tests |
 | `docs/ARCHITECTURE.md` | Component map with sequence diagrams |
 | `docs/LIMITED_HARDWARE_GUIDE.md` | Developing without a GPU cluster |

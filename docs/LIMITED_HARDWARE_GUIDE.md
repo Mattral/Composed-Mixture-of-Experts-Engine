@@ -1,7 +1,7 @@
 # Limited Hardware Development Guide
 
-**Version:** v0.3.2  
-**Last updated:** June 2026
+**Version:** v0.3.3  
+**Last updated:** July 2026
 
 > **This is the realistic default.** Most contributors will not have
 > constant access to a multi-GPU cluster. This guide explains how to make
@@ -41,7 +41,7 @@ python scripts/validate_config.py configs/   # verify both configs load cleanly
 
 ```bash
 # After any change to pkg/:
-make test-cpu                     # 235 tests, ~60s
+make test-cpu                     # 348 tests, ~20s
 
 # After changing configs/:
 make validate-config              # Pydantic validation, ~0.3s
@@ -58,7 +58,7 @@ make format                       # ruff format auto-fix
 
 | Feature | CPU test coverage | Test file |
 |---------|:-----------------:|-----------|
-| Pydantic MoEConfig system | ✅ 34 tests | `test_config.py` |
+| Pydantic MoEConfig system | ✅ 38 tests | `test_config.py` |
 | Router invariants (conservation, NaN, bounds) | ✅ 7 tests | `test_kernels.py` |
 | Numerical correctness vs fp64 ref | ✅ 30 configs | `test_kernels_numerics.py` |
 | TP/PP/SP scheduling logic | ✅ 43 tests | `test_tensor_parallel.py`, `test_pipeline_parallel.py`, `test_sequence_parallel_v03.py` |
@@ -152,7 +152,7 @@ Use this checklist when developing a new feature without cluster access:
 
 **Before PR / merge:**
 - [ ] `make lint && make format`
-- [ ] `make test-cpu` passes (235+ tests)
+- [ ] `make test-cpu` passes (348+ tests)
 - [ ] `make validate-config` passes
 - [ ] `make smoke` passes
 - [ ] If Triton/GPU paths were modified: run T4 Colab notebook Sections 0–5.
