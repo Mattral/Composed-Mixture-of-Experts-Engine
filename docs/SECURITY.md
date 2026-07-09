@@ -1,7 +1,7 @@
 # Security and Secrets
 
-**Version:** v0.3  
-**Last updated:** June 2026
+**Version:** v0.3.3  
+**Last updated:** July 2026
 
 This document describes the security boundaries of moe-engine and the
 controls implemented in the codebase. All guidance is grounded in the
@@ -76,20 +76,35 @@ the adapter falls back to standard buffered I/O with a warning log.
 
 ### Checkpoint metadata integrity
 
-Every shard write produces a `.meta.json` file with:
+Every shard write produces a `.meta.json` file. As of schema version 2
+(v0.3.2+), it contains:
 
 ```json
 {
+  "schema_version": 2,
   "step": 500,
   "rank": 0,
+  "hostname": "gpu-node-07.internal",
   "ts": 1748901234.56,
-  "hostname": "gpu-node-07.internal"
+  "moe_engine_version": "0.3.3",
+  "torch_version": "2.6.0"
 }
 ```
 
+`schema_version`, `moe_engine_version`, and `torch_version` are read from
+`pkg.__version__` and `torch.__version__` at write time — never hardcoded —
+so the metadata always reflects the actual runtime that produced the
+checkpoint. `_check_schema_compatibility()` compares the loaded
+`schema_version` against `CHECKPOINT_SCHEMA_VERSION` and logs at `info`
+level for older-but-compatible checkpoints or `warning` level for
+newer-than-runtime checkpoints (missing fields default gracefully either
+way — this is a diagnostic aid, not a hard compatibility gate).
+
 This allows detection of mismatched step numbers across ranks (which would
-indicate a partial checkpoint set) and verification that a checkpoint was
-produced by the expected host.
+indicate a partial checkpoint set), verification that a checkpoint was
+produced by the expected host, and — for security purposes — a way to
+confirm a checkpoint was written by a known, trusted version of the runtime
+rather than a tampered or unexpected build.
 
 ---
 
@@ -179,10 +194,17 @@ production to suppress boto3 debug output.
 
 ## Docker Image Security
 
-The multi-stage `Dockerfile` (`deploy/docker/Dockerfile`):
+The multi-stage `Dockerfile` (`deploy/docker/Dockerfile`, 3 stages —
+`builder`, `runtime`, and `runtime-cpu` for GPU-less CI smoke testing):
 
-- Uses PyTorch official base images (from `pytorch/pytorch`).
-- Copies source as read-only in the runtime stage.
+- Uses PyTorch official base images (from `pytorch/pytorch`) for the GPU
+  stages; `python:3.11-slim` (no CUDA toolkit) for `runtime-cpu`.
+- Bakes the source into the image via `COPY . .` in each runtime stage —
+  this is a normal writable image layer, not read-only.
+- Separately, `deploy/docker/docker-compose.yml` mounts the host source
+  tree **read-only** (`:ro`) for local development containers, so a
+  container process cannot modify the host checkout even if it tries.
+  This is a docker-compose-level control, not a Dockerfile-level one.
 - Does not embed any credentials or endpoints.
 - Does not run as root (inherits the PyTorch base image user, typically `root`
   for GPU images — override with `USER` directive for hardened deployments).
@@ -190,7 +212,7 @@ The multi-stage `Dockerfile` (`deploy/docker/Dockerfile`):
 For hardened deployments, extend the Dockerfile:
 
 ```dockerfile
-FROM moe-engine:v0.3
+FROM moe-engine:v0.3.3
 RUN useradd -m -u 1000 trainer
 USER trainer
 ```

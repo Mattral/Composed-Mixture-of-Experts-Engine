@@ -1,7 +1,7 @@
 # Deployment Guide
 
-**Version:** v0.3  
-**Last updated:** June 2026
+**Version:** v0.3.3  
+**Last updated:** July 2026
 
 ---
 
@@ -135,16 +135,32 @@ torchrun \
 ### Build the image
 
 ```bash
-docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3 moe-engine/
+# GPU image (default target: runtime)
+docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.3 \
+  --build-arg PYTORCH_VERSION=2.6.0 \
+  --build-arg CUDA_VERSION=12.6 \
+  moe-engine/
+
+# CPU-only image (for CI smoke-testing without a GPU image pull)
+docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.3-cpu \
+  --target runtime-cpu \
+  moe-engine/
 ```
 
-The `Dockerfile` uses a two-stage build:
-- **Builder:** installs all Python deps including Triton.
-- **Runtime:** minimal image with only installed packages and source copied in.
+The `Dockerfile` uses a three-stage build:
+- **`builder`:** full `pytorch/pytorch:*-devel` image; installs all Python
+  deps including Triton; pre-compiles the Triton router kernel if a GPU is
+  available at build time (populates the Triton cache so the first training
+  step doesn't pay JIT compile latency).
+- **`runtime`:** minimal `pytorch/pytorch:*-runtime` image with only
+  installed packages, the pre-compiled Triton cache, and source copied in.
+- **`runtime-cpu`:** `python:3.11-slim` (no CUDA toolkit); used by CI to
+  smoke-test the installed package without pulling a multi-GB GPU image.
+  Default command runs the Tier-0 CPU test suite.
 
-Key environment variables are baked into the runtime stage (NCCL tuning, OMP,
-PYTHONUNBUFFERED). A HEALTHCHECK pings the package import to verify the image is
-functional.
+Key environment variables are baked into the `runtime` stage (NCCL tuning, OMP,
+PYTHONUNBUFFERED). A HEALTHCHECK imports the package and validates
+`configs/smoke.yaml` to verify the image is functional.
 
 ### Run with docker compose
 
@@ -306,21 +322,30 @@ GPUs with retention=10: ~1.1 TB.
 Before a production run:
 
 ```bash
-# 1. Smoke test the image / environment
+# 1. Validate config
+python scripts/cli.py validate configs/default.yaml
+
+# 2. Smoke test the image / environment
 python train.py --config configs/smoke.yaml --smoke
 
-# 2. Run the full test suite
-pytest tests/ -v --ignore=tests/test_chaos.py
+# 3. Run the Tier-0 CPU test suite (348 tests expected)
+pytest tests/ -m cpu \
+  -k "not (2rank or multiprocess or distributed_invariants)" \
+  --ignore=tests/test_chaos.py --ignore=tests/test_smoke_e2e.py -v
 
-# 3. Verify checkpoint round-trip
+# 4. Verify checkpoint round-trip (including schema versioning)
 pytest tests/test_elastic.py tests/test_elastic_v02.py -v
 
-# 4. Verify telemetry fields
+# 5. Verify capacity dropping behaves correctly if enabled
+#    (skip if model.capacity_dropping: false in your config)
+pytest tests/test_capacity_dropping.py -v
+
+# 6. Verify telemetry fields
 pytest tests/test_telemetry.py tests/test_smoke_e2e.py -v
 
-# 5. Run benchmark suite to establish baseline
+# 7. Run benchmark suite to establish baseline
 python benchmarks/run_benchmark.py --json baseline.json
 
-# 6. Chaos Scenario B (storage stall — must pass before production)
+# 8. Chaos Scenario B (storage stall — must pass before production)
 GLOO_SOCKET_IFNAME=lo pytest tests/test_chaos.py -v -k "scenario_b" -m chaos
 ```

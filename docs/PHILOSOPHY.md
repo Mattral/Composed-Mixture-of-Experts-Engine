@@ -1,7 +1,7 @@
 # Philosophy
 
-**Version:** v0.3  
-**Last updated:** June 2026
+**Version:** v0.3.3  
+**Last updated:** July 2026
 
 moe-engine is built around a single constraint: **at 10K+ GPUs, nodes die
 continuously**. Every design decision is derived from that premise.
@@ -88,9 +88,9 @@ fires real collectives and validates numerical equivalence to a reference.
 ### 6. Honest documentation
 
 We document what is actually built, not what we plan to build. The roadmap
-tracks planned features separately from completed ones. The "Known Deficiencies"
-section in `roadmap.md` is not a weakness — it is evidence that the system
-is understood and its boundaries are known.
+tracks planned features separately from completed ones. The "Honest Status
+Summary" section in `roadmap.md` is not a weakness — it is evidence that the
+system is understood and its boundaries are known.
 
 Specifically:
 - Chaos Scenario A passes at ~85%, not 100%. This is documented with its root
@@ -151,6 +151,6 @@ These principles are instantiated in the codebase today:
 | Correct collective per pattern | `all_reduce` in `RowParallelLinear`; structural test enforces it |
 | Consistent TP sharding | Both `w_gate` and `w_up` are `ColumnParallelLinear` in `_SwiGLUExpert` |
 | Real collective tests | `test_column_row_parallel_2rank_numerically_correct` (mp.spawn, Gloo) |
-| Honest documentation | `roadmap.md §Known Deficiencies`; Scenario A documented as ~85% |
+| Honest documentation | `roadmap.md §Honest Status Summary`; Scenario A documented as ~85% |
 | Observability first | `routing.expert_load_imbalance`, `router_z_loss`, `collective.expert_compute_ms`, `collective.comm_compute_overlap_ratio` in every StepRecord; WandB sink active when `WANDB_API_KEY` set |
 | Link, don't duplicate | Test names cited in `docs/testing.md`; function names in `SYSTEM_DESIGN.md` |
