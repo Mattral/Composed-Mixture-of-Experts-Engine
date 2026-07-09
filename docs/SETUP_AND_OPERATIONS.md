@@ -1,7 +1,7 @@
 # Setup and Operations
 
-**Version:** v0.3.2  
-**Last updated:** June 2026
+**Version:** v0.3.3  
+**Last updated:** July 2026
 
 ---
 
@@ -154,7 +154,7 @@ make test-cpu
 # Single test file:
 pytest tests/test_tensor_parallel.py -v
 
-# Config system (Pydantic, 34 tests):
+# Config system (Pydantic, 38 tests):
 pytest tests/test_config.py -v
 
 # Property-based invariant tests (Hypothesis, 9 tests × 50 examples):
@@ -224,8 +224,9 @@ backend automatically based on this config value.
 ## Docker
 
 ```bash
-# Build image
-docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3 .
+# Build image (GPU, default target: runtime)
+docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.3 \
+  --build-arg PYTORCH_VERSION=2.6.0 --build-arg CUDA_VERSION=12.6 .
 
 # CPU smoke test (no GPU required)
 docker compose -f deploy/docker/docker-compose.yml run --rm smoke
