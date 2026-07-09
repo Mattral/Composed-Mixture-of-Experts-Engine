@@ -1,7 +1,7 @@
 # Architecture Overview
 
-**Version:** v0.3.2  
-**Last updated:** June 2026
+**Version:** v0.3.3  
+**Last updated:** July 2026
 
 ---
 
@@ -385,7 +385,7 @@ Every invariant is asserted at runtime AND has a dedicated test:
 | Index validity: `idx ∈ [0, E)` | `MoERouterFunction.forward()` | `test_kernels.py::test_index_validity` |
 | Weight normalisation: `w.sum(-1) ≈ 1` | `MoERouterFunction.forward()` | `test_kernels_numerics.py` |
 | No NaN in MoE layer output | `DistributedMoELayer.forward()` | `test_distributed_invariants.py` |
-| Config valid at load time | `MoEConfig.from_yaml()` | `test_config.py` (34 tests) |
+| Config valid at load time | `MoEConfig.from_yaml()` | `test_config.py` (38 tests) |
 | Expert coverage after reshard | `ClusterStateMachine._reshard()` | `test_elastic_v02.py` |
 | Checkpoint retention | `AsyncCheckpointer._prune()` | `test_elastic.py` |
 

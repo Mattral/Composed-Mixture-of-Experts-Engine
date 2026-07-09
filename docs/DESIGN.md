@@ -1,7 +1,7 @@
 # Design Rationale and Trade-offs
 
-**Version:** v0.3.2  
-**Last updated:** June 2026
+**Version:** v0.3.3  
+**Last updated:** July 2026
 
 This document explains *why* each major design choice was made and what
 alternatives were considered. For *what* is implemented, see `ARCHITECTURE.md`.
@@ -283,7 +283,7 @@ not glossed over in the roadmap or README.
 | Prometheus endpoint | ❌ | ✅ v0.2 (8 gauges) | ✅ v0.3 (10 gauges) | ✅ v0.3.2 (14 gauges) |
 | Docker + Kubernetes | ❌ | ✅ v0.2 | ✅ v0.3 (unchanged) | ✅ (unchanged) |
 | Chaos A fix | ❌ | ⚠️ mitigated ~85% | ⚠️ unchanged; root fix v0.4 | ⚠️ unchanged; root fix v0.4 |
-| Config system | flat dict | flat dict | flat dict | ✅ v0.3.2 Pydantic v2, 34 tests |
+| Config system | flat dict | flat dict | flat dict | ✅ v0.3.2 Pydantic v2, 38 tests |
 | Module architecture | monolith | monolith | monolith | ✅ v0.3.2 split into 7 modules |
 | Model registry | ❌ | ❌ | ❌ | ✅ v0.3.2 `@register_model` |
 | Checkpoint versioning | unversioned | unversioned | unversioned | ✅ v0.3.2 `CHECKPOINT_SCHEMA_VERSION` |
