@@ -1,7 +1,7 @@
 # Benchmarks Guide
 
-**Version:** v0.3.2  
-**Last updated:** June 2026
+**Version:** v0.3.3  
+**Last updated:** July 2026
 
 This document explains how to measure performance using moe-engine's built-in
 tooling, what each metric means, and how to interpret results correctly.
