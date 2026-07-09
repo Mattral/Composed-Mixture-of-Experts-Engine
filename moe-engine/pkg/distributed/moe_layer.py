@@ -48,6 +48,7 @@ Public API
 
 from __future__ import annotations
 
+import math
 import time
 from typing import List
 
@@ -58,6 +59,101 @@ from pkg.distributed.expert_parallel import all_to_all_combine, all_to_all_dispa
 from pkg.distributed.mesh import ParallelTopology
 from pkg.distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
 from pkg.kernels.moe_router import MoERouter
+
+
+def _cumcount(groups: torch.Tensor) -> torch.Tensor:
+    """Return each element's 0-indexed position of appearance within its group.
+
+    This is the "first-come-first-served" ordering used by Switch Transformer
+    (Fedus et al. 2021) and GShard (Lepikhin et al. 2020) for expert capacity
+    dropping: within each expert's queue, tokens are kept in the order they
+    appear in the batch, and any token beyond the capacity limit is dropped.
+
+    Implemented with a stable sort + ``cummax`` trick — no Python loops, no
+    ``scatter_reduce`` (which has version-dependent availability), so this
+    runs identically on any PyTorch >= 2.0 on CPU or GPU.
+
+    Parameters
+    ----------
+    groups : LongTensor  ``[N]``
+        Group (expert) id for each element.
+
+    Returns
+    -------
+    LongTensor  ``[N]``
+        For each element, its 0-indexed position among prior elements
+        sharing the same group value, preserving original order.
+
+    Example
+    -------
+    >>> _cumcount(torch.tensor([2, 0, 2, 1, 0, 2]))
+    tensor([0, 0, 1, 0, 1, 2])
+    # idx0 (val=2) is the 1st token routed to expert 2   -> position 0
+    # idx1 (val=0) is the 1st token routed to expert 0   -> position 0
+    # idx2 (val=2) is the 2nd token routed to expert 2   -> position 1
+    # idx3 (val=1) is the 1st token routed to expert 1   -> position 0
+    # idx4 (val=0) is the 2nd token routed to expert 0   -> position 1
+    # idx5 (val=2) is the 3rd token routed to expert 2   -> position 2
+    """
+    n = groups.shape[0]
+    if n == 0:
+        return torch.empty(0, dtype=torch.long, device=groups.device)
+
+    order = torch.argsort(groups, stable=True)
+    sorted_groups = groups[order]
+
+    pos = torch.arange(n, device=groups.device)
+    is_start = torch.ones_like(sorted_groups, dtype=torch.bool)
+    is_start[1:] = sorted_groups[1:] != sorted_groups[:-1]
+
+    start_idx = torch.where(is_start, pos, torch.zeros_like(pos))
+    start_idx_filled = torch.cummax(start_idx, dim=0).values
+    cumcount_sorted = pos - start_idx_filled
+
+    cumcount = torch.empty_like(cumcount_sorted)
+    cumcount[order] = cumcount_sorted
+    return cumcount
+
+
+def compute_capacity_drop_mask(
+    idx: torch.Tensor,
+    num_experts: int,
+    capacity: int,
+) -> torch.Tensor:
+    """Compute the capacity-drop mask for a routing assignment.
+
+    Follows Switch Transformer / GShard semantics: each expert accepts at
+    most ``capacity`` tokens, keeping the first ``capacity`` tokens (by
+    order of appearance in the batch) that selected it and dropping the
+    remainder. Dropped (token, k) pairs receive zero combine weight — the
+    expert FFN output for that slot is simply not added, so the token's
+    output for that top-k slot falls back to its other (non-dropped) slots.
+
+    Parameters
+    ----------
+    idx : LongTensor  ``[N, K]``
+        Expert indices assigned to each token (from the router).
+    num_experts : int
+        Total number of experts ``E`` (unused directly, kept for API clarity
+        and future per-expert capacity overrides).
+    capacity : int
+        Maximum tokens any single expert accepts. Typically
+        ``ceil(capacity_factor * N * K / E)``, matching
+        :meth:`MoERouterInterface.capacity_budget`.
+
+    Returns
+    -------
+    BoolTensor  ``[N, K]``
+        ``True`` where the (token, k) assignment is dropped (exceeds
+        capacity), ``False`` where it is kept.
+    """
+    N, K = idx.shape
+    drop_mask = torch.zeros(N, K, dtype=torch.bool, device=idx.device)
+    for k in range(K):
+        position_in_queue = _cumcount(idx[:, k])
+        drop_mask[:, k] = position_in_queue >= capacity
+    return drop_mask
+
 
 __all__ = ["DistributedMoELayer"]
 
@@ -134,6 +230,7 @@ class DistributedMoELayer(nn.Module):
         top_k: int,
         topology: ParallelTopology,
         capacity_factor: float = 1.25,
+        capacity_dropping: bool = False,
         dtype: torch.dtype = torch.float32,
     ):
         super().__init__()
@@ -142,6 +239,7 @@ class DistributedMoELayer(nn.Module):
         self.top_k = top_k
         self.topology = topology
         self.capacity_factor = capacity_factor
+        self.capacity_dropping = capacity_dropping
 
         self.local_expert_ids: List[int] = topology.experts_on_this_rank(num_experts)
         self.experts = nn.ModuleList(
@@ -154,6 +252,7 @@ class DistributedMoELayer(nn.Module):
         self.last_combine_ms: float = 0.0
         self.last_expert_compute_ms: float = 0.0
         self.last_overlap_ratio: float = 0.0
+        self.last_dropped_token_fraction: float = 0.0
 
     def extra_repr(self) -> str:
         return (
@@ -187,6 +286,24 @@ class DistributedMoELayer(nn.Module):
 
         # ---- Router ----
         idx, weights, dispatch_cnt = self.router(flat)
+
+        # ---- Capacity-based token dropping (optional, off by default) ----
+        # When enabled, enforces a hard per-expert token budget following
+        # Switch Transformer / GShard semantics: each expert accepts at most
+        # `capacity_factor * (N*K/E)` tokens, keeping the first arrivals and
+        # dropping the rest. Dropped slots get zero combine weight, so their
+        # contribution to the output is silently omitted for that slot (the
+        # token still receives contributions from its non-dropped top-k
+        # slots, if any). This bounds worst-case expert compute and EP
+        # bandwidth at the cost of some tokens being under-processed under
+        # imbalanced routing — the standard MoE capacity/quality trade-off.
+        self.last_dropped_token_fraction = 0.0
+        if self.capacity_dropping:
+            capacity = math.ceil(self.capacity_factor * N * self.top_k / self.num_experts)
+            drop_mask = compute_capacity_drop_mask(idx, self.num_experts, capacity)
+            if drop_mask.any():
+                weights = weights.masked_fill(drop_mask, 0.0)
+                self.last_dropped_token_fraction = float(drop_mask.float().mean().item())
 
         # ---- Build per-EP-rank send counts ----
         experts_per_rank = self.num_experts // self.topology.ep_size
