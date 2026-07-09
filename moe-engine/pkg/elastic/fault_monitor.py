@@ -337,13 +337,15 @@ class AsyncCheckpointer:
         buf = _torch_dumps(payload_obj)
         import torch as _torch_ckpt
 
+        from pkg import __version__ as _moe_engine_version
+
         meta = {
             "schema_version": CHECKPOINT_SCHEMA_VERSION,
             "step": step,
             "rank": rank,
             "hostname": socket.gethostname(),
             "ts": time.time(),
-            "moe_engine_version": "0.3.2",
+            "moe_engine_version": _moe_engine_version,
             "torch_version": _torch_ckpt.__version__,
         }
         if extra_meta:
