@@ -650,7 +650,12 @@ class MoERouter(torch.nn.Module):
 
         # Compute routing quality metrics (no_grad, detached)
         with torch.no_grad():
-            logits_fp32 = flat.float() @ gate_w.float()
+            # Ensure gate weights are on the same device as the tokens
+            gate_w_fp32 = gate_w.to(device=flat.device, dtype=torch.float32)
+            flat_fp32 = flat.to(dtype=torch.float32)
+        
+            logits_fp32 = flat_fp32 @ gate_w_fp32
+        
             self._last_logits = logits_fp32.detach()
             z_loss = _compute_router_z_loss(logits_fp32)
             load_imbalance = _compute_load_imbalance(dispatch_cnt)
