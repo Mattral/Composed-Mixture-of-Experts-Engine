@@ -276,7 +276,7 @@ def bench_token_conservation(N: int, H: int, E: int, K: int, device: str) -> Ben
     for seed in range(100):
         torch.manual_seed(seed)
         tokens = torch.randn(N, H, device=device)
-        router = MoERouter(H, E, K)
+        router = MoERouter(H, E, K).to(device)
         idx, w, cnt = router(tokens)
         if int(cnt.sum().item()) != N * K:
             violations += 1
