@@ -400,49 +400,43 @@ class MoERouterFunction(torch.autograd.Function):
     def forward(ctx, tokens, gate_w, k, force_reference=False):
         assert tokens.dim() == 2
         assert gate_w.dim() == 2
+    
         N, H = tokens.shape
         H2, E = gate_w.shape
         assert H == H2
         assert 1 <= k <= E
-
-        # Triton requires minimum matrix sizes for tl.dot()
+    
         MIN_TRITON_DIM = 16
-        
+    
         use_triton = (
             (not force_reference)
             and TRITON_AVAILABLE
             and tokens.is_cuda
             and gate_w.is_cuda
-            and tokens.shape[0] >= MIN_TRITON_DIM      # N
-            and tokens.shape[1] >= MIN_TRITON_DIM      # H (K dimension)
-            and gate_w.shape[1] >= MIN_TRITON_DIM      # E
+            and N >= MIN_TRITON_DIM
+            and H >= MIN_TRITON_DIM
+            and E >= MIN_TRITON_DIM
         )
-
-        try:
-            topk_idx, topk_w, logits, kernel_ms, sram_bytes, achieved_bw = _triton_forward(
-                tokens, gate_w, k
-            )
-        except Exception:
-            print("Falling back to PyTorch router.")
+    
+        if use_triton:
+            try:
+                topk_idx, topk_w, logits, kernel_ms, sram_bytes, achieved_bw = \
+                    _triton_forward(tokens, gate_w, k)
+            except Exception as e:
+                print(f"Triton failed: {e}")
+                print("Falling back to reference router.")
+                use_triton = False
+    
+        if not use_triton:
             topk_idx, topk_w, logits = _reference_route_fp64(tokens, gate_w, k)
-            use_triton = False
-
-        if use_triton:  # pragma: no cover
-            topk_idx, topk_w, logits, kernel_ms, sram_bytes, achieved_bw = _triton_forward(
-                tokens, gate_w, k
-            )
-        else:
-            kernel_ms = 0.0  # noqa: F841 (placeholder; CPU path doesn't report kernel timing here)
-            sram_bytes = 0  # noqa: F841
-            achieved_bw = 0.0  # noqa: F841
-            topk_idx, topk_w, logits = _reference_route_fp64(tokens, gate_w, k)
-
-        assert topk_idx.shape == (N, k)
-        assert topk_w.shape == (N, k)
-
+            kernel_ms = 0.0
+            sram_bytes = 0
+            achieved_bw = 0.0
+    
         ctx.save_for_backward(tokens, gate_w, logits, topk_idx, topk_w)
         ctx.k = k
         ctx.use_triton = use_triton
+    
         return topk_idx, topk_w
 
     @staticmethod
