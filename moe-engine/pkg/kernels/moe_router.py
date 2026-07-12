@@ -405,9 +405,27 @@ class MoERouterFunction(torch.autograd.Function):
         assert H == H2
         assert 1 <= k <= E
 
+        # Triton requires minimum matrix sizes for tl.dot()
+        MIN_TRITON_DIM = 16
+        
         use_triton = (
-            (not force_reference) and TRITON_AVAILABLE and tokens.is_cuda and gate_w.is_cuda
+            (not force_reference)
+            and TRITON_AVAILABLE
+            and tokens.is_cuda
+            and gate_w.is_cuda
+            and tokens.shape[0] >= MIN_TRITON_DIM      # N
+            and tokens.shape[1] >= MIN_TRITON_DIM      # H (K dimension)
+            and gate_w.shape[1] >= MIN_TRITON_DIM      # E
         )
+
+        try:
+            topk_idx, topk_w, logits, kernel_ms, sram_bytes, achieved_bw = _triton_forward(
+                tokens, gate_w, k
+            )
+        except Exception:
+            print("Falling back to PyTorch router.")
+            topk_idx, topk_w, logits = _reference_route_fp64(tokens, gate_w, k)
+            use_triton = False
 
         if use_triton:  # pragma: no cover
             topk_idx, topk_w, logits, kernel_ms, sram_bytes, achieved_bw = _triton_forward(
