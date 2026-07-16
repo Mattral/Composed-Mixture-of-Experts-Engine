@@ -392,51 +392,113 @@ def _next_pow2(x: int) -> int:
     return 1 << (x - 1).bit_length()
 
 
+# Minimum tensor-core tile dimension for the Triton path. Below this, the
+# fp64 reference path is used instead of Triton, regardless of GPU
+# generation. This is an intentional, documented part of the kernel's
+# contract (see ADR-005) -- not an accidental crash-avoidance patch. It was
+# first needed on real GPU hardware (small `E` in configs/smoke.yaml, e.g.
+# E=4, is well under this threshold): on Ampere (A100, sm_80) `tl.dot`'s
+# tensor-core `mma` path enforces this minimum strictly, where on Turing
+# (T4, sm_75) undersized configs happened not to be exercised in earlier
+# validation. Toy/smoke configs below this threshold now deterministically
+# and silently use the reference path -- "silently" in the sense of no
+# crash, NOT in the sense of misreported telemetry: see
+# ``_should_use_triton`` below, which is the single source of truth both
+# the autograd Function and the profiling code read from, specifically so
+# ``RouterProfile.used_triton`` can never drift out of sync with what
+# actually ran.
+MIN_TRITON_DIM = 16
+
+
+def _should_use_triton(
+    tokens: torch.Tensor,
+    gate_w: torch.Tensor,
+    force_reference: bool,
+) -> bool:
+    """Single source of truth for "will the Triton kernel path run".
+
+    Used by both ``MoERouterFunction.forward`` (to decide which path to
+    execute) and ``MoERouter.forward`` (to report ``used_triton`` in
+    ``RouterProfile`` telemetry). Keeping this in one place is deliberate:
+    a previous version of this file computed an equivalent-looking but
+    incomplete condition separately in each location, and the profiling
+    copy did not account for ``force_reference`` or the ``MIN_TRITON_DIM``
+    guard. That meant ``used_triton=True`` could be reported even when the
+    fp64 reference path had actually run -- silently incorrect telemetry,
+    not a crash, and therefore easy to miss. See ``docs/adr/`` for the full
+    writeup of why a status flag that can silently misreport ground truth
+    is treated as a correctness bug in this codebase, not a cosmetic one.
+
+    Returns
+    -------
+    bool
+        True only if the Triton kernel is expected to be dispatched:
+        Triton is importable, both tensors are on CUDA, the caller has not
+        forced the reference path, and every routing dimension meets the
+        tensor-core minimum tile size.
+    """
+    N, H = tokens.shape
+    _, E = gate_w.shape
+    return (
+        (not force_reference)
+        and TRITON_AVAILABLE
+        and tokens.is_cuda
+        and gate_w.is_cuda
+        and N >= MIN_TRITON_DIM
+        and H >= MIN_TRITON_DIM
+        and E >= MIN_TRITON_DIM
+    )
+
+
 # ==========================================================================
 # Autograd Function
 # ==========================================================================
 class MoERouterFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, tokens, gate_w, k, force_reference=False):
+    def forward(ctx, tokens, gate_w, k, force_reference=False, report=None):
         assert tokens.dim() == 2
         assert gate_w.dim() == 2
-    
+
         N, H = tokens.shape
         H2, E = gate_w.shape
         assert H == H2
         assert 1 <= k <= E
-    
-        MIN_TRITON_DIM = 16
-    
-        use_triton = (
-            (not force_reference)
-            and TRITON_AVAILABLE
-            and tokens.is_cuda
-            and gate_w.is_cuda
-            and N >= MIN_TRITON_DIM
-            and H >= MIN_TRITON_DIM
-            and E >= MIN_TRITON_DIM
-        )
-    
+
+        use_triton = _should_use_triton(tokens, gate_w, force_reference)
+
         if use_triton:
             try:
-                topk_idx, topk_w, logits, kernel_ms, sram_bytes, achieved_bw = \
-                    _triton_forward(tokens, gate_w, k)
+                topk_idx, topk_w, logits, kernel_ms, sram_bytes, achieved_bw = _triton_forward(
+                    tokens, gate_w, k
+                )
             except Exception as e:
                 print(f"Triton failed: {e}")
                 print("Falling back to reference router.")
                 use_triton = False
-    
+
         if not use_triton:
             topk_idx, topk_w, logits = _reference_route_fp64(tokens, gate_w, k)
             kernel_ms = 0.0
             sram_bytes = 0
             achieved_bw = 0.0
-    
+
         ctx.save_for_backward(tokens, gate_w, logits, topk_idx, topk_w)
         ctx.k = k
         ctx.use_triton = use_triton
-    
+
+        # Non-differentiable side channel: lets MoERouter.forward's profiling
+        # code report the *actual* outcome (including a try/except fallback
+        # from an exception mid-compilation), not just the pre-flight
+        # eligibility check, and reuse the real profiling numbers from this
+        # single Triton launch instead of launching the kernel a second time
+        # purely to re-derive them. `report` is a plain dict, not a tensor,
+        # so it does not participate in autograd and is safe to mutate here.
+        if report is not None:
+            report["used_triton"] = use_triton
+            report["kernel_ms"] = kernel_ms
+            report["sram_bytes"] = sram_bytes
+            report["achieved_bw"] = achieved_bw
+
         return topk_idx, topk_w
 
     @staticmethod
@@ -482,7 +544,13 @@ class MoERouterFunction(torch.autograd.Function):
 
         grad_tokens = grad_logits @ gate_w.t()
         grad_gate_w = tokens.t() @ grad_logits
-        return grad_tokens, grad_gate_w, None, None
+        # 5 gradient slots for 5 forward() inputs (tokens, gate_w, k,
+        # force_reference, report). k, force_reference, and report are all
+        # non-differentiable -> None. (Previously 4 slots for a 4-input
+        # forward(); adding the `report` side-channel parameter requires a
+        # matching 5th None here, or autograd raises "incorrect number of
+        # gradients" -- PyTorch checks this count strictly.)
+        return grad_tokens, grad_gate_w, None, None, None
 
 
 MoERouterAutograd = MoERouterFunction
@@ -603,7 +671,8 @@ class MoERouter(torch.nn.Module):
         if self.bias is not None:
             force_reference = True
 
-        idx, w = MoERouterAutograd.apply(flat, gate_w, self.top_k, force_reference)
+        _router_report: dict = {}
+        idx, w = MoERouterAutograd.apply(flat, gate_w, self.top_k, force_reference, _router_report)
 
         if self.bias is not None and force_reference:
             with torch.no_grad():
@@ -631,31 +700,35 @@ class MoERouter(torch.nn.Module):
         )
 
         # ---- Profiling metadata ----
+        # kernel_ms/sram_bytes/achieved_bw default to conservative theoretical
+        # estimates (useful even on the reference path, e.g. for capacity
+        # planning telemetry). When Triton actually ran, we overwrite them
+        # with the real measured numbers already captured in _router_report
+        # by the single forward call above -- no second kernel launch needed.
+        # (Previously this block called _triton_forward(...) a second time,
+        # purely to re-derive these three numbers, silently discarding
+        # failures with `except Exception: pass`. That duplicate launch and
+        # its own silent-fallback have both been removed.)
         BLOCK_E = _next_pow2(self.num_experts)
         dtype_size = flat.element_size()
-        sram_bytes = 64 * max(BLOCK_E, 64) * dtype_size * 3
+        sram_bytes_out = 64 * max(BLOCK_E, 64) * dtype_size * 3
         bytes_moved = (flat.numel() + gate_w.numel()) * dtype_size
         kernel_ms = 0.0
-        achieved_bw = (bytes_moved / (1024**3)) / 1e-3  # conservative 1ms
-        sram_bytes_out = sram_bytes
+        achieved_bw = (bytes_moved / (1024**3)) / 1e-3  # conservative 1ms estimate
 
-        if TRITON_AVAILABLE and flat.is_cuda and not force_reference:  # pragma: no cover
-            with torch.no_grad():
-                try:
-                    _, _, _, kernel_ms, sram_bytes_out, achieved_bw = _triton_forward(
-                        flat, gate_w, self.top_k
-                    )
-                except Exception:
-                    pass
+        if _router_report.get("used_triton", False):
+            kernel_ms = _router_report.get("kernel_ms", kernel_ms)
+            sram_bytes_out = _router_report.get("sram_bytes", sram_bytes_out)
+            achieved_bw = _router_report.get("achieved_bw", achieved_bw)
 
         # Compute routing quality metrics (no_grad, detached)
         with torch.no_grad():
             # Ensure gate weights are on the same device as the tokens
             gate_w_fp32 = gate_w.to(device=flat.device, dtype=torch.float32)
             flat_fp32 = flat.to(dtype=torch.float32)
-        
+
             logits_fp32 = flat_fp32 @ gate_w_fp32
-        
+
             self._last_logits = logits_fp32.detach()
             z_loss = _compute_router_z_loss(logits_fp32)
             load_imbalance = _compute_load_imbalance(dispatch_cnt)
@@ -664,7 +737,7 @@ class MoERouter(torch.nn.Module):
             sram_bytes_per_block=int(sram_bytes_out),
             achieved_bandwidth_gbps=float(achieved_bw),
             kernel_ms=float(kernel_ms),
-            used_triton=(TRITON_AVAILABLE and flat.is_cuda),
+            used_triton=_router_report.get("used_triton", False),
             tokens_per_expert_mean=float(dispatch_cnt.float().mean().item()),
             tokens_per_expert_std=float(dispatch_cnt.float().std().item()),
             expert_load_imbalance=float(load_imbalance),
