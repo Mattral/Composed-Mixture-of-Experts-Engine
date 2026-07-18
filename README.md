@@ -128,6 +128,60 @@ Source: `gpu_results.json`, June 2026 T4 validation run.*
 *Full `DistributedMoELayer` forward (orange) vs single dense SwiGLU FFN baseline (blue) on CPU.  
 Source: `benchmarks/cpu_results_colab.json`.*
 
+
+
+---
+
+
+### A100 GPU Validation — July 2026
+
+Second real-GPU validation, on an NVIDIA A100-SXM4-80GB via Lightning AI
+Studio. This run surfaced and fixed a Turing-vs-Ampere `tl.dot` tensor-core
+minimum tile size defect invisible on T4, plus a `used_triton` telemetry
+correctness bug — both documented in
+[`docs/adr/ADR-005-gpu-architecture-portability.md`](docs/adr/ADR-005-gpu-architecture-portability.md).
+
+**Hardware:** NVIDIA A100-SXM4-80GB, 81920 MiB, driver 580.159.03
+**Software:** torch 2.8.0+cu128, CUDA 12.8
+
+![Router throughput A100](moe-engine/benchmarks/router_throughput_A100.png)
+
+*Forward-only (blue) and forward+backward (orange) throughput on A100
+(Triton kernel) vs CPU reference path (green dashed). Log scale.
+Source: `benchmarks/gpu_results_a100.json`, July 2026 validation run.*
+
+#### Router throughput — CPU vs A100
+
+| Config | CPU (M tok/s) | A100 (M tok/s) | Speedup |
+|--------|:-------------:|:--------------:|:-------:|
+| N=512, H=256, E=16, K=2 | 1.168 | 2.031 | 1.7× |
+| N=1024, H=512, E=32, K=2 | 0.826 | 4.006 | 4.8× |
+| N=2048, H=1024, E=64, K=2 | 0.776 | 5.934 | 7.6× |
+| N=4096, H=2048, E=64, K=4 | 0.175 | 10.271 | **58.7×** |
+
+#### Router forward+backward — CPU vs A100
+
+| Config | CPU (M tok/s) | A100 (M tok/s) | Speedup |
+|--------|:-------------:|:--------------:|:-------:|
+| N=512, H=256, E=16, K=2 | 0.435 | 0.572 | 1.3× |
+| N=1024, H=512, E=32, K=2 | 0.456 | 1.097 | 2.4× |
+| N=2048, H=1024, E=64, K=2 | 0.312 | 2.034 | 6.5× |
+| N=4096, H=2048, E=64, K=4 | 0.101 | 3.721 | 37.0× |
+
+Reproduce with
+[`moe-engine/notebooks/moe_engine_A100_validation.ipynb`](moe-engine/notebooks/moe_engine_A100_validation.ipynb).
+
+**GPU architecture support matrix** (full detail in ADR-005):
+
+| Architecture | Status | Validated |
+|---|---|---|
+| NVIDIA T4 (Turing, sm_75) | ✅ | June 2026 |
+| NVIDIA A100-SXM4-80GB (Ampere, sm_80) | ✅ | July 2026 |
+| NVIDIA H100 (Hopper, sm_90) | ❌ Not yet tested | — |
+
+
+---
+
 ### Chaos resilience
 
 | Scenario              | Description                        | Runs | Pass Rate    |
