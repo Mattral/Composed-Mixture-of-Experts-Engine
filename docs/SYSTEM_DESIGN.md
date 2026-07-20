@@ -471,7 +471,7 @@ CUDA in this environment), 1 `xfail` (documented statistical edge case in
 | Limitation | Root Cause | Planned Fix |
 |---|---|---|
 | Chaos Scenario A ~85% pass rate | Gloo `connectFullMesh` socket race after SIGKILL | v0.4 (NCCL, needs GPU) |
-| No real multi-node benchmark data | Requires sustained cluster access | v0.4 |
+| No multi-node banchmark data yet | Two single-GPU architectures now validated (T4, A100); no multi-node/multi-GPU cluster data yet | v0.4 |
 | SP `sequence_length % tp_size == 0` required | No padding for non-divisible lengths | v0.4 |
 | PP `run_1f1b_distributed` not in chaos tests | `_chaos_worker.py` uses a dense model | v0.4 |
 | No Nsight/CUPTI roofline | Requires GPU hardware | v0.4 |
