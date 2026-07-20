@@ -15,6 +15,7 @@ ADR create a new ADR referencing the old one.
 | [ADR-002](ADR-002-async-two-tier-checkpointing.md) | Async Two-Tier Checkpointing | Accepted |
 | [ADR-003](ADR-003-pydantic-config.md) | Pydantic v2 Configuration System | Accepted |
 | [ADR-004](ADR-004-4d-parallelism-composition.md) | 4D Parallelism Composition | Accepted |
+| [ADR-005](ADR-005-gpu-architecture-portability.md) | GPU Architecture Portability (Turing vs. Ampere) and Honest Fallback Telemetry | Accepted |
 
 ## Template
 
