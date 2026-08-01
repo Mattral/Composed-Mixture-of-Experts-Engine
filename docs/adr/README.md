@@ -16,6 +16,9 @@ ADR create a new ADR referencing the old one.
 | [ADR-003](ADR-003-pydantic-config.md) | Pydantic v2 Configuration System | Accepted |
 | [ADR-004](ADR-004-4d-parallelism-composition.md) | 4D Parallelism Composition | Accepted |
 | [ADR-005](ADR-005-gpu-architecture-portability.md) | GPU Architecture Portability (Turing vs. Ampere) and Honest Fallback Telemetry | Accepted |
+| [ADR-006](ADR-006-device-coercion-correction.md) | Correction — Device Coercion Belongs in `_reference_route_fp64`, Not Only the Telemetry Block | Accepted |
+| [ADR-007](ADR-007-sequence-parallel-correctness-and-nondivisible-length.md) | Sequence Parallelism Correctness Fixes, Non-Divisible Sequence Length Support, and the 2-Rank CI Blind Spot | Accepted |
+| [ADR-008](ADR-008-column-parallel-gather-fix.md) | `ColumnParallelLinear` Gather-Dimension Bug and the Missing `gather_output` Mode | Accepted |
 
 ## Template
 
