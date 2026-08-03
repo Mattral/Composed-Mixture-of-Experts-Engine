@@ -184,11 +184,30 @@ class _SwiGLUExpert(nn.Module):
     ):
         super().__init__()
         dev = topology.device
+        # gather_output=False: w_gate/w_up hand their sharded [.., F//tp]
+        # output straight to the element-wise silu*up multiply, which stays
+        # in sharded space -- exactly what this class's docstring already
+        # claimed. Before ADR-008, ColumnParallelLinear had no way to skip
+        # its gather, so this composition would silently break (a shape
+        # mismatch feeding w_down) at any tp_size > 1; only ever tested at
+        # tp_size=1, where the gather is a no-op and the bug is invisible.
         self.w_gate = ColumnParallelLinear(
-            hidden_dim, ffn_dim, bias=False, topology=topology, device=dev, dtype=dtype
+            hidden_dim,
+            ffn_dim,
+            bias=False,
+            topology=topology,
+            gather_output=False,
+            device=dev,
+            dtype=dtype,
         )
         self.w_up = ColumnParallelLinear(
-            hidden_dim, ffn_dim, bias=False, topology=topology, device=dev, dtype=dtype
+            hidden_dim,
+            ffn_dim,
+            bias=False,
+            topology=topology,
+            gather_output=False,
+            device=dev,
+            dtype=dtype,
         )
         self.w_down = RowParallelLinear(
             ffn_dim, hidden_dim, bias=False, topology=topology, device=dev, dtype=dtype

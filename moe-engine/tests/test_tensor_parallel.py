@@ -265,7 +265,10 @@ def _tp2_worker(rank: int, world_size: int, result_queue, H: int, F: int, seed: 
     topo = build_topology(dp_size=1, tp_size=world_size, ep_size=1, device_type="cpu")
 
     # ---- Build sharded layers ----
-    col = ColumnParallelLinear(H, F, bias=False, topology=topo)
+    # gather_output=False on col: feeding directly into row needs the
+    # sharded [.., F//tp] output, not the gathered full-width one -- see
+    # ADR-008 and _SwiGLUExpert (the real model code this mirrors).
+    col = ColumnParallelLinear(H, F, bias=False, topology=topo, gather_output=False)
     row = RowParallelLinear(F, H, bias=False, topology=topo)
 
     # ---- Build single-rank reference (same weight) ----
@@ -285,8 +288,9 @@ def _tp2_worker(rank: int, world_size: int, result_queue, H: int, F: int, seed: 
     x = torch.randn(4, H)
 
     with torch.no_grad():
-        # Sharded path (ColumnParallel all-gathers internally, RowParallel all_reduces)
-        mid = col(x)  # [4, F] — all-gathered by ColumnParallel
+        # Sharded path: col produces the local [.., F//tp] shard directly
+        # (gather_output=False), row all_reduces it into the full result.
+        mid = col(x)  # [4, F//tp] — local shard, no collective
         out_sharded = row(mid)  # [4, H] — all_reduced by RowParallel
 
         # Reference path (full matmul on every rank with reconstructed weight)
@@ -343,3 +347,265 @@ def test_column_row_parallel_2rank_numerically_correct():
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+# ---------------------------------------------------------------------------
+# ADR-008 regression coverage: gather_output modes, standalone, at 2-rank
+# ---------------------------------------------------------------------------
+#
+# The composed Column->Row test above only exercises gather_output=False
+# (the composition path). Nothing else in this file exercised
+# gather_output=True (the default, and the only behavior that existed
+# before ADR-008) at real multi-rank -- confirmed by temporarily reverting
+# just the gather-dimension fix and re-running this file's non-2-rank
+# tests: they all still passed, because none of them reach real
+# multi-rank collectives at all. These tests close that gap directly.
+
+
+def _column_gather_true_worker(rank, world_size, port, q, H, F, seed):
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    torch.manual_seed(seed)
+    from pkg.distributed.parallel_mesh import build_topology as _bt
+
+    topo = _bt(dp_size=1, tp_size=world_size, ep_size=1, device_type="cpu")
+    col = ColumnParallelLinear(H, F, bias=False, topology=topo, gather_output=True)
+
+    gathered_w = [torch.empty_like(col.weight) for _ in range(world_size)]
+    dist.all_gather(gathered_w, col.weight)
+    full_w = torch.cat(gathered_w, dim=0)  # [F, H]
+
+    torch.manual_seed(seed + 1)
+    x = torch.randn(4, H)
+    with torch.no_grad():
+        out = col(x)  # [4, F] -- gathered
+        ref = torch.nn.functional.linear(x, full_w)  # [4, F]
+    max_diff = float((out - ref).abs().max().item())
+    q.put({"rank": rank, "shape_ok": out.shape == ref.shape, "max_diff": max_diff, "error": None})
+    dist.destroy_process_group()
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="mp.spawn fork-safety on macOS CI")
+def test_column_parallel_gather_output_true_2rank():
+    """Standalone ColumnParallelLinear(gather_output=True) at 2-rank: every
+    rank's gathered output must equal the full reference linear. This is
+    the exact path ADR-008 fixed (dist.all_gather_into_tensor was
+    concatenating along the wrong dimension) and the one path not
+    otherwise exercised at real multi-rank by any other test in this file."""
+    port = _free_port_tp()
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    procs = [
+        ctx.Process(target=_column_gather_true_worker, args=(r, 2, port, q, 32, 64, 5))
+        for r in range(2)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+        assert p.exitcode == 0, f"Worker exited {p.exitcode}"
+    results = {}
+    while not q.empty():
+        r = q.get_nowait()
+        results[r["rank"]] = r
+    assert len(results) == 2
+    for rank, res in results.items():
+        assert res["error"] is None, f"rank {rank}: {res['error']}"
+        assert res["shape_ok"], f"rank {rank}: shape mismatch"
+        assert res["max_diff"] < 1e-5, f"rank {rank}: diverged by {res['max_diff']:.2e}"
+
+
+def _column_gather_false_worker(rank, world_size, port, q, H, F, seed):
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    torch.manual_seed(seed)
+    from pkg.distributed.parallel_mesh import build_topology as _bt
+
+    topo = _bt(dp_size=1, tp_size=world_size, ep_size=1, device_type="cpu")
+    col = ColumnParallelLinear(H, F, bias=False, topology=topo, gather_output=False)
+
+    gathered_w = [torch.empty_like(col.weight) for _ in range(world_size)]
+    dist.all_gather(gathered_w, col.weight)
+    full_w = torch.cat(gathered_w, dim=0)  # [F, H]
+    local_f = F // world_size
+
+    torch.manual_seed(seed + 1)
+    x = torch.randn(4, H)
+    with torch.no_grad():
+        out = col(x)  # [4, F//tp] -- local shard, no gather
+        ref_full = torch.nn.functional.linear(x, full_w)  # [4, F]
+        ref_shard = ref_full[:, rank * local_f : (rank + 1) * local_f]
+    max_diff = float((out - ref_shard).abs().max().item())
+    q.put(
+        {
+            "rank": rank,
+            "shape_ok": out.shape == ref_shard.shape,
+            "max_diff": max_diff,
+            "error": None,
+        }
+    )
+    dist.destroy_process_group()
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="mp.spawn fork-safety on macOS CI")
+def test_column_parallel_gather_output_false_2rank():
+    """Standalone ColumnParallelLinear(gather_output=False) at 2-rank: each
+    rank's local (ungathered) output must equal the matching slice of the
+    full reference, with zero collectives used (nothing to verify here via
+    a spy since the function returns before any dist call when
+    gather_output=False -- the shape/value check is the real test)."""
+    port = _free_port_tp()
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    procs = [
+        ctx.Process(target=_column_gather_false_worker, args=(r, 2, port, q, 32, 64, 9))
+        for r in range(2)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+        assert p.exitcode == 0, f"Worker exited {p.exitcode}"
+    results = {}
+    while not q.empty():
+        r = q.get_nowait()
+        results[r["rank"]] = r
+    assert len(results) == 2
+    for rank, res in results.items():
+        assert res["error"] is None, f"rank {rank}: {res['error']}"
+        assert res["shape_ok"], f"rank {rank}: shape mismatch"
+        assert res["max_diff"] < 1e-5, f"rank {rank}: diverged by {res['max_diff']:.2e}"
+
+
+def _column_gather_false_bias_raises_worker(rank, world_size, port, q):
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    from pkg.distributed.parallel_mesh import build_topology as _bt
+
+    topo = _bt(dp_size=1, tp_size=world_size, ep_size=1, device_type="cpu")
+    col = ColumnParallelLinear(16, 32, bias=True, topology=topo, gather_output=False)
+    x = torch.randn(4, 16)
+    raised = False
+    try:
+        col(x)
+    except NotImplementedError:
+        raised = True
+    q.put({"rank": rank, "raised": raised})
+    dist.destroy_process_group()
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="mp.spawn fork-safety on macOS CI")
+def test_column_parallel_gather_output_false_bias_true_raises_2rank():
+    """bias=True + gather_output=False must raise NotImplementedError at
+    real tp_size>1 (at tp_size=1 the early-identity-return makes the
+    combination harmless, since local_out is already full-width -- this
+    test is specifically about the multi-rank case, where a full-width
+    bias silently added to a shard would be wrong)."""
+    port = _free_port_tp()
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    procs = [
+        ctx.Process(target=_column_gather_false_bias_raises_worker, args=(r, 2, port, q))
+        for r in range(2)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+    results = {}
+    while not q.empty():
+        r = q.get_nowait()
+        results[r["rank"]] = r
+    assert len(results) == 2
+    for rank, res in results.items():
+        assert res["raised"], f"rank {rank}: expected NotImplementedError, none raised"
+
+
+def _swiglu_2rank_worker(rank, world_size, port, q, H, F, seed):
+    """The test that would have caught the original _SwiGLUExpert bug: the
+    class's own docstring claims the gate/up outputs stay in sharded
+    [F//tp] space, but before ADR-008, ColumnParallelLinear always
+    gathered -- this only worked by coincidence at tp_size=1 (the only
+    configuration test_swiglu_expert_numerically_correct_tp1 exercised)."""
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    from pkg.distributed.parallel_mesh import _SwiGLUExpert as _SGE
+    from pkg.distributed.parallel_mesh import build_topology as _bt
+
+    torch.manual_seed(seed)
+    topo = _bt(dp_size=1, tp_size=world_size, ep_size=1, device_type="cpu")
+    expert = _SGE(hidden_dim=H, ffn_dim=F, topology=topo)
+
+    # Reconstruct full weights from every rank's shard to build a reference.
+    def _full(param, dim):
+        parts = [torch.empty_like(param) for _ in range(world_size)]
+        dist.all_gather(parts, param)
+        return torch.cat(parts, dim=dim)
+
+    full_gate_w = _full(expert.w_gate.weight, 0)  # [F, H]
+    full_up_w = _full(expert.w_up.weight, 0)  # [F, H]
+    full_down_w = _full(expert.w_down.weight, 1)  # [H, F]
+
+    torch.manual_seed(seed + 1)
+    x = torch.randn(4, H)
+    with torch.no_grad():
+        out_sharded = expert(x)
+        gate_ref = torch.nn.functional.linear(x, full_gate_w)
+        up_ref = torch.nn.functional.linear(x, full_up_w)
+        hidden_ref = torch.nn.functional.silu(gate_ref) * up_ref
+        out_ref = torch.nn.functional.linear(hidden_ref, full_down_w)
+
+    max_diff = float((out_sharded - out_ref).abs().max().item())
+    q.put(
+        {
+            "rank": rank,
+            "shape_ok": out_sharded.shape == out_ref.shape,
+            "max_diff": max_diff,
+            "error": None,
+        }
+    )
+    dist.destroy_process_group()
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="mp.spawn fork-safety on macOS CI")
+def test_swiglu_expert_2rank_numerically_correct():
+    """_SwiGLUExpert (the real expert FFN, not just the underlying
+    primitives) at genuine 2-rank TP: output must match a full-weight
+    single-rank reference to atol=1e-5. Closes the gap that let the
+    Column->Row composition bug ship undetected -- previously the only
+    numerical-correctness test for this class ran at tp_size=1, where
+    ColumnParallelLinear's (then-mandatory) gather is a no-op and the bug
+    is invisible."""
+    port = _free_port_tp()
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    procs = [
+        ctx.Process(target=_swiglu_2rank_worker, args=(r, 2, port, q, 32, 64, 17)) for r in range(2)
+    ]
+    for p in procs:
+        p.start()
+    for p in procs:
+        p.join(timeout=60)
+        assert p.exitcode == 0, f"Worker exited {p.exitcode}"
+    results = {}
+    while not q.empty():
+        r = q.get_nowait()
+        results[r["rank"]] = r
+    assert len(results) == 2
+    for rank, res in results.items():
+        assert res["error"] is None, f"rank {rank}: {res['error']}"
+        assert res["shape_ok"], f"rank {rank}: output shape mismatch"
+        assert res["max_diff"] < 1e-5, f"rank {rank}: SwiGLU diverged by {res['max_diff']:.2e}"
+
+
+def _free_port_tp() -> int:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
