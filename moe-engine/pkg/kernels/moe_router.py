@@ -259,10 +259,21 @@ def _reference_route_fp64(
     gate_w: torch.Tensor,
     k: int,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Pure-PyTorch fp64 reference.  Returns (topk_idx, topk_w, logits)."""
+    """Pure-PyTorch fp64 reference.  Returns (topk_idx, topk_w, logits).
+
+    ADR-005 Fix 2 / ADR-006: explicitly coerce ``gate_w`` onto ``tokens``'s
+    device before computing logits. This path is unreachable-by-construction
+    on CPU-only runs (everything is already on the same device), but becomes
+    live on CUDA whenever the reference path is taken instead of Triton --
+    which, after the ``MIN_TRITON_DIM`` guard (Fix 1), now includes every
+    undersized-config forward pass on every GPU generation, not just
+    ``force_reference=True`` calls. Without this coercion, a caller whose
+    ``tokens`` and ``gate_w`` happen to live on different devices hits a
+    device-mismatch ``RuntimeError`` here rather than a silent fallback.
+    """
     orig_dtype = tokens.dtype
     t64 = tokens.to(torch.float64)
-    g64 = gate_w.to(torch.float64)
+    g64 = gate_w.to(device=tokens.device, dtype=torch.float64)
     logits = t64 @ g64
     probs = torch.softmax(logits, dim=-1)
     topk_vals, topk_idx = torch.topk(probs, k=k, dim=-1, largest=True)
