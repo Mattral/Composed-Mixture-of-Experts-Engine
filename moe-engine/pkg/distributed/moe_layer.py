@@ -324,35 +324,68 @@ class DistributedMoELayer(nn.Module):
                 weights = weights.masked_fill(drop_mask, 0.0)
                 self.last_dropped_token_fraction = float(drop_mask.float().mean().item())
 
-        # ---- Build per-EP-rank send counts ----
+        # ---- Flatten (token, k) pairs into independently-routable dispatch
+        #      items. Each of a token's top_k expert assignments can land on
+        #      a DIFFERENT EP rank -- the common case whenever top_k>1 and
+        #      ep_size>1 -- so dispatch construction must operate per-slot,
+        #      not per-token. See ADR-009. ----
+        expert_ids_flat = idx.reshape(-1)  # [N*top_k]
+        tokens_expanded = flat.repeat_interleave(self.top_k, dim=0)  # [N*top_k, H]
+        # tokens_expanded[i*top_k + k] is token i's embedding, independently
+        # paired with expert_ids_flat[i*top_k + k] = idx[i, k].
+
+        # ---- Build per-EP-rank send counts (per dispatch ITEM, not per
+        #      token) ----
         experts_per_rank = self.num_experts // self.topology.ep_size
         send_counts = torch.zeros(self.topology.ep_size, dtype=torch.long, device=flat.device)
         for ep_r in range(self.topology.ep_size):
             lo = ep_r * experts_per_rank
             hi = lo + experts_per_rank
-            mask = ((idx >= lo) & (idx < hi)).any(dim=-1)
-            send_counts[ep_r] = int(mask.sum().item()) * self.top_k
+            send_counts[ep_r] = int(((expert_ids_flat >= lo) & (expert_ids_flat < hi)).sum().item())
+        # send_counts.sum() == N * top_k always, by construction: every
+        # dispatch item has exactly one expert, hence contributes to exactly
+        # one rank's count. (The previous per-token "any slot in range"
+        # check double-counted tokens whose top_k experts spanned multiple
+        # ranks, so send_counts.sum() could exceed N*top_k -- the exact
+        # mismatch behind the "Split sizes doesn't match total dim 0 size"
+        # failure in test_distributed_invariants.py.)
 
-        # ---- Sort tokens by assigned expert for contiguous dispatch ----
-        sort_order = idx[:, 0].argsort(stable=True)
-        tokens_sorted = flat[sort_order].repeat_interleave(self.top_k, dim=0)
+        # ---- Sort dispatch items by target expert id for contiguous
+        #      per-rank blocks (contiguous experts share an EP rank, so
+        #      sorting by global expert id also groups by destination rank)
+        #      ----
+        sort_order = expert_ids_flat.argsort(stable=True)  # [N*top_k]
+        tokens_sorted = tokens_expanded[sort_order]
+        expert_ids_sorted = expert_ids_flat[sort_order]
 
-        # ---- EP dispatch ----
+        # ---- EP dispatch: tokens AND their expert ids. The tag is required
+        #      for correctness -- each sender's block is internally sorted
+        #      by expert id, but all_to_all_single concatenates senders'
+        #      blocks in SENDER RANK order, not globally by expert id, so
+        #      `received` as a whole is not guaranteed expert-sorted. ----
         received, recv_counts, dispatch_event, self.last_dispatch_ms = all_to_all_dispatch(
             tokens_sorted, send_counts, self.topology
         )
+        received_expert_ids, _, _, _ = all_to_all_dispatch(
+            expert_ids_sorted.unsqueeze(-1), send_counts, self.topology
+        )
+        received_expert_ids = received_expert_ids.squeeze(-1)
 
-        # ---- Expert FFN compute (default stream, overlaps with dispatch) ----
+        # ---- Expert FFN compute (default stream, overlaps with dispatch)
+        #      Selects each row by its actual received expert id (boolean
+        #      mask), not an equal-division chunk assumption -- routing is
+        #      essentially never perfectly balanced in practice, and the
+        #      previous equal-chunk slicing applied the wrong expert to
+        #      many tokens whenever it wasn't (reproducible even at
+        #      ep_size=1; see ADR-009). ----
         t_expert_start = time.perf_counter()
         expert_out = torch.zeros_like(received)
         num_local = len(self.local_expert_ids)
         if num_local > 0 and received.shape[0] > 0:
-            chunk = max(1, received.shape[0] // max(num_local, 1))
-            for i, _eid in enumerate(self.local_expert_ids):
-                lo_e = i * chunk
-                hi_e = min(lo_e + chunk, received.shape[0])
-                if lo_e < hi_e:
-                    expert_out[lo_e:hi_e] = self.experts[i](received[lo_e:hi_e])
+            for i, eid in enumerate(self.local_expert_ids):
+                sel = received_expert_ids == eid
+                if sel.any():
+                    expert_out[sel] = self.experts[i](received[sel])
         self.last_expert_compute_ms = (time.perf_counter() - t_expert_start) * 1000
 
         # ---- Comm/compute overlap ratio (v0.3) ----
@@ -365,11 +398,12 @@ class DistributedMoELayer(nn.Module):
         )
 
         # ---- Weighted scatter back to original token positions ----
-        combined = torch.zeros_like(flat)
-        w_flat = weights[sort_order].reshape(-1)
-        for k in range(self.top_k):
-            slot = combined_sorted[k :: self.top_k]
-            combined[sort_order] += w_flat[k :: self.top_k].unsqueeze(-1) * slot[:N]
+        # combined_sorted is in `sort_order`'s order; invert the permutation
+        # to place each dispatch item's result back at its (token, k) flat
+        # position, then apply combine weights and sum over k per token.
+        combined_flat = torch.empty_like(tokens_expanded)  # [N*top_k, H]
+        combined_flat[sort_order] = combined_sorted
+        combined = (combined_flat.reshape(N, self.top_k, H) * weights.unsqueeze(-1)).sum(dim=1)
 
         assert not torch.isnan(combined).any(), (
             "NaN detected in DistributedMoELayer output after combine step. "
