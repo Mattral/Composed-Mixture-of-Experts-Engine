@@ -19,6 +19,7 @@ ADR create a new ADR referencing the old one.
 | [ADR-006](ADR-006-device-coercion-correction.md) | Correction — Device Coercion Belongs in `_reference_route_fp64`, Not Only the Telemetry Block | Accepted |
 | [ADR-007](ADR-007-sequence-parallel-correctness-and-nondivisible-length.md) | Sequence Parallelism Correctness Fixes, Non-Divisible Sequence Length Support, and the 2-Rank CI Blind Spot | Accepted |
 | [ADR-008](ADR-008-column-parallel-gather-fix.md) | `ColumnParallelLinear` Gather-Dimension Bug and the Missing `gather_output` Mode | Accepted |
+| [ADR-009](ADR-009-moe-dispatch-correctness.md) | `DistributedMoELayer` Dispatch Correctness — Three Compounding Bugs | Accepted |
 
 ## Template
 
