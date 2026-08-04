@@ -214,7 +214,7 @@ until the NCCL migration is complete.
 ```bash
 pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" \
   --ignore=tests/test_chaos.py --ignore=tests/test_smoke_e2e.py
-# → 380 passed, 3 skipped (1 GPU Triton; 2 more in test_gpu_portability.py — see ADR-006), 1 xfailed (documented statistical edge case)
+# → 393 passed, 3 skipped (1 GPU Triton; 2 more in test_gpu_portability.py — see ADR-006), 1 xfailed (documented statistical edge case)
 ```
 
 | File | Tests | Tier | Result |
@@ -233,7 +233,8 @@ pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" 
 | `test_pipeline_parallel.py` | 27 | Tier-0 CPU / Tier-2 2-rank | ✅ |
 | `test_sequence_parallel_v03.py` | 26 | Tier-0 CPU / Tier-2 2-rank | ✅ ADR-007: fixed a broken fused-path algorithm + a batch-corrupting gather bug, added non-divisible sequence length support |
 | `test_distributed.py` | 5 | Tier-0 CPU | ✅ |
-| `test_distributed_invariants.py` | 2 | Tier-2 4-process Gloo | ✅ |
+| `test_distributed_invariants.py` | 2 | Tier-2 4-process Gloo | ✅ ADR-009: fixed three compounding DistributedMoELayer dispatch bugs |
+| `test_moe_layer.py` | 14 | Tier-0 CPU / Tier-2 2-rank | ✅ ADR-009, new file — first per-token numerical correctness coverage for DistributedMoELayer |
 | `test_elastic.py` | 7 | Tier-0 CPU | ✅ |
 | `test_elastic_v02.py` | 28 | Tier-0 CPU | ✅ Now includes schema-version checks |
 | `test_mfu.py` | 6 | Tier-0 CPU | ✅ |
@@ -244,7 +245,7 @@ pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" 
 
 Per-file counts above are full `pytest --collect-only` totals (including
 2-rank `mp.spawn` tests and GPU-only tests skipped without CUDA).
-The headline **380 passed** figure at the top of this document excludes
+The headline **393 passed** figure at the top of this document excludes
 `test_chaos.py`, `test_smoke_e2e.py`, and the 2-rank/multiprocess/
 distributed-invariants tests via `-k` filtering — this is the fast
 Tier-0-only subset, not the full collection sum shown per-file here.
@@ -405,3 +406,14 @@ algorithm and a batch-corrupting `gather_from_sequence_parallel` bug, plus
 non-divisible sequence length support. See ADR-007 and `roadmap.md`'s
 "2-Rank CI Blind Spot" section for the four still-open failures this pass
 surfaced but did not fix.
+
+**Post-release addition (August 2026, ADR-008 + ADR-009):** 380 → 393.
+ADR-008 (4 new tests in `test_tensor_parallel.py`) fixed
+`ColumnParallelLinear`'s gather-dimension bug and `_SwiGLUExpert`'s
+composition bug. ADR-009 (new file, `tests/test_moe_layer.py`, 14 tests)
+fixed three compounding bugs in `DistributedMoELayer`'s dispatch — the most
+severe of which (equal-chunk local expert selection under imbalanced
+routing) affected every forward pass regardless of parallelism
+configuration, not just the distributed cases that surfaced this
+investigation. Two "2-Rank CI Blind Spot" items remain open
+(`test_pipeline_parallel.py`'s pair) — see `roadmap.md`.

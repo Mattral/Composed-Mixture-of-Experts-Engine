@@ -55,7 +55,7 @@ This release addressed all P0 and P1 items from MOE instructions v2.1.
 
 | Item | Status | Detail |
 |---|---|---|
-| Split `parallel_mesh.py` monolith (1,165 lines) | ✅ | 7 focused modules (≤380 lines each) + backward-compat shim |
+| Split `parallel_mesh.py` monolith (1,165 lines) | ✅ | 7 focused modules (≤393 lines each) + backward-compat shim |
 | `mesh.py` | ✅ | `ParallelTopology`, `build_topology`, process group cache |
 | `tensor_parallel.py` | ✅ | `Column/RowParallelLinear`, SP scatter/gather |
 | `sequence_parallel.py` | ✅ | SP extracted to own module; re-exported for backward compat |
@@ -162,7 +162,7 @@ the remaining CPU-doable P2.2 gap (advanced load balancing).
 
 | Item | Priority | Status |
 |---|---|---|
-| **2-rank/multiprocess tests are excluded from every CI job — 1 of 4 pre-existing failures fixed (ADR-008), 3 remain** | **P0** | **⚠️ See "2-Rank CI Blind Spot" below** |
+| **2-rank/multiprocess tests are excluded from every CI job — 3 of 5 pre-existing failures fixed (ADR-008, ADR-009), 2 remain (pipeline-parallel)** | **P0** | **⚠️ See "2-Rank CI Blind Spot" below** |
 | Fix Chaos Scenario A (Gloo → NCCL in chaos harness) | P0 | ❌ Needs GPU |
 | Real 8-GPU+ benchmark data + MFU validation | P0 | ⚠️ Two single-GPU architectures validated (T4 June 2026, A100 July 2026 — see ADR-005); real multi-GPU/multi-node data still ❌, needs 2+ GPUs in one job |
 | Nsight/CUPTI roofline integration | P1 | ❌ Needs GPU |
@@ -176,28 +176,29 @@ the remaining CPU-doable P2.2 gap (advanced load balancing).
 
 ---
 
-### 2-Rank CI Blind Spot (found August 2026, see ADR-007, ADR-008)
+### 2-Rank CI Blind Spot (found August 2026, see ADR-007, ADR-008, ADR-009)
 
 Every job in `.github/workflows/ci.yml` filters `2rank or multiprocess or
 distributed_invariants` out of its pytest invocation, and no other job —
 scheduled or otherwise — runs them. This tier has never actually executed
 in CI. Fixing the Sequence Parallelism bugs in ADR-007 required running it
-directly, which surfaced these failures. One is now fixed (ADR-008); three
-remain open:
+directly, which surfaced these failures. Three of five are now fixed
+(ADR-008, ADR-009); two remain open:
 
 | Test | File | Symptom | Status |
 |---|---|---|---|
 | `test_column_row_parallel_2rank_numerically_correct` | `test_tensor_parallel.py` | `ColumnParallelLinear`'s `all_gather_into_tensor` concatenated along the wrong dimension, and had no way to skip gathering before feeding a `RowParallelLinear` — the latter also broke `_SwiGLUExpert`, the real expert FFN, at any `tp_size>1` | ✅ Fixed, ADR-008 |
-| `test_pp_multiprocess_2stage_activation_flow` | `test_pipeline_parallel.py` | Worker crash (`Connection closed by peer`, secondary symptom of a rank-0 failure not yet root-caused) | ❌ Open |
+| `test_pp_multiprocess_2stage_activation_flow` | `test_pipeline_parallel.py` | Worker crash. Observed symptom: an IPv6/IPv4 `localhost` socket addressing error (`Address family not supported by protocol`) — looks different in kind from anything found in ADR-007/008/009, not assumed to share a root cause | ❌ Open |
 | `test_pp_multiprocess_correct_micro_batch_count` | `test_pipeline_parallel.py` | Expected 6 micro-batch outputs, got 0 | ❌ Open |
-| `test_token_conservation_distributed` | `test_distributed_invariants.py` | `RuntimeError: Split sizes doesn't match total dim 0 size` | ❌ Open |
-| `test_distributed_backward_no_nan` | `test_distributed_invariants.py` | Same `Split sizes` error as above | ❌ Open |
+| `test_token_conservation_distributed` | `test_distributed_invariants.py` | `RuntimeError: Split sizes doesn't match total dim 0 size` — traced to `DistributedMoELayer`'s EP dispatch: `send_counts` overcounted whenever a token's `top_k` experts spanned multiple EP ranks, dispatch items weren't grouped by their actual destination, and local expert selection assumed perfectly balanced routing (this last part reproduces even at `ep_size=1`, no distributed setup at all — the most severe of the three) | ✅ Fixed, ADR-009 |
+| `test_distributed_backward_no_nan` | `test_distributed_invariants.py` | Same root cause as above | ✅ Fixed, ADR-009 |
 
 ADR-004's claim of *"✅ 2-rank PP mp.spawn verified"* is not currently true
 of the code as it stands (the TP claim, also false, is now corrected by
-ADR-008). This table is deliberately just the error signatures for the
-three still-open items, not root-cause fixes — each is plausibly its own
-investigation. **Recommended next priority.**
+ADR-008). This table is deliberately just the error signatures for the two
+still-open items, not root-cause fixes — the pipeline-parallel pair is
+plausibly its own investigation, comparable in scope to ADR-007/008/009.
+**Recommended next priority.**
 
 ---
 
@@ -208,7 +209,7 @@ investigation. **Recommended next priority.**
 - All parallelism scheduling logic (1F1B, TP/EP/PP/SP)
 - Config validation, async checkpointing, telemetry, fault state machine
 - Expert capacity dropping (`_cumcount`, `compute_capacity_drop_mask`) — 25 tests
-- 380 passing tests, 0 lint errors, 0 format violations (CI-verified)
+- 393 passing tests, 0 lint errors, 0 format violations (CI-verified)
 
 **Proven at 2-rank `mp.spawn` on CPU:**
 - TP numerical correctness (Column/RowParallel)

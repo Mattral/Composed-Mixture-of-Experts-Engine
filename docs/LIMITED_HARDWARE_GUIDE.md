@@ -41,7 +41,7 @@ python scripts/validate_config.py configs/   # verify both configs load cleanly
 
 ```bash
 # After any change to pkg/:
-make test-cpu                     # 348 tests, ~20s
+make test-cpu                     # 393 tests, ~20s
 
 # After changing configs/:
 make validate-config              # Pydantic validation, ~0.3s
@@ -152,7 +152,7 @@ Use this checklist when developing a new feature without cluster access:
 
 **Before PR / merge:**
 - [ ] `make lint && make format`
-- [ ] `make test-cpu` passes (348+ tests)
+- [ ] `make test-cpu` passes (393+ tests)
 - [ ] `make validate-config` passes
 - [ ] `make smoke` passes
 - [ ] If Triton/GPU paths were modified: run T4 Colab notebook Sections 0–5.

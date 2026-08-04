@@ -450,7 +450,8 @@ Verify with: `pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed
 | `test_pipeline_parallel.py` | 1F1B schedule; single-process invariants; 2-rank `mp.spawn` PP |
 | `test_sequence_parallel_v03.py` | SP fused `next_weight` path (zero collectives, ADR-007); non-divisible sequence length; 2-rank `mp.spawn` SP, genuinely verified |
 | `test_distributed.py` | MoE layer fwd/bwd shapes, topology construction |
-| `test_distributed_invariants.py` | 4-process Gloo: token conservation, NaN guard |
+| `test_distributed_invariants.py` | 4-process Gloo: token conservation, NaN guard — ✅ ADR-009 |
+| `test_moe_layer.py` | DistributedMoELayer per-token correctness vs. independent reference (ADR-009); send_counts arithmetic; 2-rank EP genuinely verified |
 | `test_elastic.py` / `test_elastic_v02.py` | NVMe round-trip, reshard edge cases, schema versioning |
 | `test_mfu.py` / `test_mfu_v02.py` | MFU formula, `MFUAccountant`, sparse fraction scaling |
 | `test_telemetry.py` | JSON completeness (`REQUIRED_KEYS`), thread safety, v0.3.3 fields |
@@ -460,7 +461,7 @@ Verify with: `pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed
 | `test_smoke_e2e.py` | Full `train.py` loop, all telemetry envelope keys, S3 mock |
 | `test_chaos.py` | Scenario B ✅ 100%; Scenario A ⚠️ ~85% |
 
-**Total: 380 passing tests** (22 test files), 3 skips (1 pre-existing:
+**Total: 393 passing tests** (23 test files), 3 skips (1 pre-existing:
 Triton GPU path, no CUDA in this environment; 2 new in
 `test_gpu_portability.py`, requiring real CUDA / 2+ CUDA devices
 respectively — see ADR-006), 1 `xfail` (documented statistical edge case
