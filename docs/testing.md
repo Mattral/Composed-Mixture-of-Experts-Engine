@@ -28,7 +28,7 @@ The four-tier model matches the four-tier benchmark strategy in `docs/benchmarks
 ### Tier 0: CPU-only (must pass on every commit)
 
 ```bash
-# All 380 CPU tests
+# All 393 CPU tests
 make test-cpu
 
 # Equivalent manual command
@@ -39,7 +39,7 @@ pytest tests/ \
   -k "not (2rank or multiprocess or distributed_invariants)" \
   -q
 
-# Expected: 380 passed, 3 skipped (Triton GPU; 2 more in test_gpu_portability.py needing real/multi CUDA — see ADR-006), 1 xfailed (seed=2 routing, documented statistical edge case)
+# Expected: 393 passed, 3 skipped (Triton GPU; 2 more in test_gpu_portability.py needing real/multi CUDA — see ADR-006), 1 xfailed (seed=2 routing, documented statistical edge case)
 ```
 
 ### Tier 1: GPU (Triton kernel, real CUDA)
@@ -70,11 +70,11 @@ GLOO_SOCKET_IFNAME=lo pytest tests/ \
   -k "2rank or multiprocess or distributed_invariants" -v
 ```
 
-Tests covered, with known status as of ADR-008 (August 2026):
+Tests covered, with known status as of ADR-009 (August 2026):
 - `test_tensor_parallel.py::test_column_row_parallel_2rank_numerically_correct` — ✅ fixed, see ADR-008
 - `test_pipeline_parallel.py::test_pp_multiprocess_2stage_activation_flow` — ❌ fails (not yet fixed)
 - `test_sequence_parallel_v03.py::test_sp_fused_2rank_numerically_correct` — ✅ fixed, see ADR-007
-- `test_distributed_invariants.py::test_token_conservation_distributed` — ❌ fails, `Split sizes doesn't match total dim 0 size` (not yet fixed)
+- `test_distributed_invariants.py::test_token_conservation_distributed` — ✅ fixed, see ADR-009
 
 See `roadmap.md`'s "2-Rank CI Blind Spot" section for the full list (six
 failing tests across four files) and recommended next steps.
@@ -103,7 +103,8 @@ make chaos-a
 | `test_pipeline_parallel.py` | 0/2 | 16 | 1F1B scheduling; 2-rank `mp.spawn` activation flow |
 | `test_sequence_parallel_v03.py` | 0/2 | 26 | SP scatter/gather incl. non-divisible-length padding; fused `next_weight` path (zero collectives, ADR-007); 5 genuinely-verified 2-rank checks |
 | `test_distributed.py` | 0 | 4 | `DistributedMoELayer` expert-to-rank mapping |
-| `test_distributed_invariants.py` | 2 | 2 | Token conservation + backward NaN (4-process Gloo) |
+| `test_distributed_invariants.py` | 2 | 2 | Token conservation + backward NaN (4-process Gloo) — ✅ ADR-009 |
+| `test_moe_layer.py` | 0/2 | 14 | DistributedMoELayer per-token correctness (ADR-009): reference comparison, gradient routing, send_counts arithmetic, 2-rank EP |
 | `test_elastic.py` | 0 | 7 | Async checkpointing core (NVMe + S3 mock) |
 | `test_elastic_v02.py` | 0 | 10 | Expert resharding after node drop |
 | `test_mfu.py` | 0 | 6 | MFU formula correctness |
@@ -113,7 +114,7 @@ make chaos-a
 | `test_gpu_portability.py` | 0/1 | 22 | ADR-005's three A100 fixes + ADR-006's device-coercion correction; CPU logic/source tests, 2 hardware-gated `gpu`-tier tests |
 | `test_chaos.py` | 3 | 3 | Scenario A (node kill) + Scenario B (storage stall) |
 
-**Total Tier-0 CPU: 380 passing** (v0.3.3, July 2026)
+**Total Tier-0 CPU: 393 passing** (v0.3.3, July 2026)
 
 ---
 
@@ -133,7 +134,7 @@ markers = [
 Usage:
 
 ```bash
-pytest tests/ -m cpu          # 380 tests, ~20s
+pytest tests/ -m cpu          # 393 tests, ~20s
 pytest tests/ -m gpu          # requires CUDA + Triton
 pytest tests/ -m chaos        # requires torchrun + Gloo
 pytest tests/ -m "cpu or gpu" # both tiers
@@ -187,7 +188,7 @@ codebase and is present in the original repo's CI. It does not reflect a bug
 in the refactored code.
 
 Status: **non-blocking**. Marked `xfail(strict=False)` with the mechanism
-documented inline; excluded from the 380-passing count when counting
+documented inline; excluded from the 393-passing count when counting
 stable tests. Tracked as a known issue.
 
 ### Multi-process tests (`2rank`, `multiprocess`, `distributed_invariants`)

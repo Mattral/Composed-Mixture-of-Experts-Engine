@@ -112,10 +112,10 @@ make test-cpu
 Expected:
 
 ```
-1 xfailed, 380 passed, 3 skipped in ~20s
+1 xfailed, 393 passed, 3 skipped in ~20s
 ```
 
-- **380 passed**
+- **393 passed**
 - **3 skipped**: Triton GPU path (no CUDA in this environment — expected);
   plus two hardware-gated tests in `test_gpu_portability.py` that need a
   real CUDA GPU and 2+ CUDA devices respectively (see ADR-006) — all three

@@ -23,7 +23,7 @@ pip install pre-commit && pre-commit install
 # 3. Verify setup
 python scripts/validate_config.py configs/   # both configs should pass
 make smoke                                    # ~5s smoke run
-make test-cpu                                 # ~20s, 380 tests expected
+make test-cpu                                 # ~20s, 393 tests expected
 
 # 4. Verify your environment
 python scripts/cli.py info
@@ -61,7 +61,7 @@ make lint                    # ruff + mypy
 
 ```bash
 make format                  # auto-fix formatting
-make test-cpu                # 380 tests
+make test-cpu                # 393 tests
 make lint                    # zero ruff errors
 make validate-config         # configs valid
 python scripts/cli.py info   # environment summary for PR description
@@ -198,7 +198,7 @@ multiple processes. See tests/test_mock_dist.py for examples.
 ## Pull request checklist
 
 ```
-- [ ] make test-cpu passes (380+ tests)
+- [ ] make test-cpu passes (393+ tests)
 - [ ] make lint passes (zero ruff errors)
 - [ ] make validate-config passes
 - [ ] make smoke passes
