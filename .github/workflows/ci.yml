@@ -6,6 +6,7 @@
 #
 #   lint          every push + PR          ruff + mypy
 #   test-cpu      every push + PR          319 Tier-0 CPU tests
+#   test-differential every push + PR      multi-process Gloo: EP/TP/SP vs dense reference
 #   test-config   every push + PR          34 config system tests
 #   benchmark     every push + PR          CPU benchmark + conservation
 #   docker        workflow_dispatch only   Docker CPU-stage build + smoke
@@ -121,6 +122,7 @@ jobs:
           pytest tests/ \
             --ignore=tests/test_chaos.py \
             --ignore=tests/test_smoke_e2e.py \
+            --ignore=tests/test_differential.py \
             -m cpu \
             -k "not (2rank or multiprocess or distributed_invariants)" \
             --tb=short -q \
@@ -131,6 +133,54 @@ jobs:
         if: always()
         with:
           name: test-results-cpu-${{ github.run_id }}
+          path: moe-engine/test-results/
+          retention-days: 7
+
+# ---------------------------------------------------------------------------
+# Job: test-differential  (every push + PR)
+#
+# Multi-process Gloo-on-CPU differential tests (tests/test_differential.py):
+# EP, TP and SP compared against a dense single-device reference, for the
+# forward output and every parameter and input gradient. Runs on standard
+# GitHub-hosted runners; nothing here needs a GPU or NCCL.
+#
+# Cases that fail today are xfail(strict=True) with their audit finding IDs,
+# so this job stays green while those findings are open and turns red when
+# a passing case regresses OR when a fix makes an xfail case pass without
+# removing its marker (strict XPASS).
+# ---------------------------------------------------------------------------
+  test-differential:
+    name: "Differential tests (multi-process Gloo, CPU)"
+    runs-on: ubuntu-22.04
+    needs: lint
+    timeout-minutes: 45
+    env:
+      GLOO_SOCKET_IFNAME: lo
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies (CPU-only torch)
+        run: |
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install -e ".[dev]"
+
+      - name: Run differential suite
+        run: |
+          pytest tests/test_differential.py \
+            -v -rxXfE --tb=short --timeout=600 \
+            --junitxml=test-results/junit-differential.xml
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-differential-${{ github.run_id }}
           path: moe-engine/test-results/
           retention-days: 7
 

@@ -130,7 +130,8 @@ something this audit resolves.
   `roadmap.md` v0.4 P1 item). This is real algorithm work, not a
   correctness gap or doc fix, and this pass was scoped to verification +
   low-risk fixes. Queued for the next iteration.
-- **PR #18 (GitHub) disposition** (Handoff Task 7.1.3). Requires the
+- **Disposition of David's (@DavidMacha) Triton router commits
+  `edafea5^..a9b7627`** (Handoff Task 7.1.3). Requires the
   repo owner's decision and write credentials this environment doesn't
   have — flagged back to Min rather than acted on unilaterally.
 - **Anything in Handoff Section 7.2 or 7.3** (multi-GPU MFU validation,
