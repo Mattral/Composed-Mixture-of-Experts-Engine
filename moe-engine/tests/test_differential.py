@@ -76,7 +76,6 @@ from tests._differential import (  # noqa: E402
     dense_moe,
     failures_for,
     run_multiprocess,
-    swiglu,
 )
 
 pytestmark = pytest.mark.cpu
@@ -243,7 +242,10 @@ _FINDING_TEXT = {
     "F1": "F1: EP all-to-all is invisible to autograd (experts get no grad, input grad wrong)",
     "F2": "F2: TP collectives lack autograd Functions (gather raises / input grad wrong)",
     "F3": "F3: SP gather/scatter lack autograd Functions",
-    "F4": "F4: send_counts assumes E % ep_size == 0 (split-size crash)",
+    "F4": (
+        "F4: send_counts assumes E % ep_size == 0 (split-size crash, or a Gloo "
+        "timeout on ranks whose local counts happen to be consistent)"
+    ),
 }
 
 
@@ -384,7 +386,7 @@ def test_tp_gradients_match_dense(cid):
 
 
 def _sp_worker(rank: int, ws: int, cfg: dict) -> list:
-    B, H, O = 2, 8, 6
+    B, H, OUT = 2, 8, 6
     S = cfg["S"]
     topo = build_topology(dp_size=1, ep_size=1, tp_size=ws, device_type="cpu")
     chunk = -(-S // ws)
@@ -418,9 +420,9 @@ def _sp_worker(rank: int, ws: int, cfg: dict) -> list:
     w = None
     if cfg["fused"]:
         torch.manual_seed(SEED + rank)
-        w = torch.randn(O, H) / math.sqrt(H)
+        w = torch.randn(OUT, H) / math.sqrt(H)
         dist.broadcast(w, src=0)  # next_weight must be replicated
-    cot = torch.randn(B, S, O if cfg["fused"] else H, generator=g_rep)
+    cot = torch.randn(B, S, OUT if cfg["fused"] else H, generator=g_rep)
 
     xr = x.clone().requires_grad_(True)
     wr = w.clone().requires_grad_(True) if w is not None else None
@@ -445,15 +447,18 @@ def _sp_worker(rank: int, ws: int, cfg: dict) -> list:
     return checks
 
 
+# Every SP case calls gather_from_sequence_parallel on a tensor that requires
+# grad, which raises during the forward itself on Gloo (F3), so forward and
+# gradient checks both fail today.
 _SP_CASES = []
 for _S, _tag in ((6, "div"), (7, "nondiv")):
-    _SP_CASES.append((f"sp2-gather-S{_S}{_tag}", dict(case="gather", S=_S), (), ("F3",)))
+    _SP_CASES.append((f"sp2-gather-S{_S}{_tag}", dict(case="gather", S=_S), ("F3",), ("F3",)))
     for _fused in (False, True):
         _SP_CASES.append(
             (
                 f"sp2-roundtrip-{'fused' if _fused else 'unfused'}-S{_S}{_tag}",
                 dict(case="roundtrip", S=_S, fused=_fused),
-                (),
+                ("F3",),
                 ("F3",),
             )
         )
@@ -517,7 +522,9 @@ def _composite_worker(rank: int, ws: int, cfg: dict) -> list:
     for s in shards:
         all_experts.update(s["experts"])
     ref_experts = [[w.clone().requires_grad_(True) for w in all_experts[e]] for e in range(E)]
-    rp = {n: _detached(p).requires_grad_(True) for n, p in model.named_parameters() if n in replicated}
+    rp = {
+        n: _detached(p).requires_grad_(True) for n, p in model.named_parameters() if n in replicated
+    }
 
     def dense_model(xx):
         h = torch.tanh(F.linear(xx, rp["inp.weight"], rp["inp.bias"]))

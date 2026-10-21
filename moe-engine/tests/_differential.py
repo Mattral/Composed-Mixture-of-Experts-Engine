@@ -69,9 +69,7 @@ RUN_TIMEOUT_S = 150
 # ===========================================================================
 
 
-def compare(
-    kind: str, name: str, actual: Optional[torch.Tensor], expected: torch.Tensor
-) -> dict:
+def compare(kind: str, name: str, actual: Optional[torch.Tensor], expected: torch.Tensor) -> dict:
     """Compare ``actual`` to ``expected`` at (ATOL, RTOL).
 
     ``actual is None`` (a gradient autograd never produced) is compared as
@@ -114,7 +112,9 @@ def check(kind: str, name: str, ok: bool, note: str) -> dict:
 # ===========================================================================
 
 
-def dense_router(x: torch.Tensor, gate_w: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
+def dense_router(
+    x: torch.Tensor, gate_w: torch.Tensor, k: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """Softmax top-k router with renormalized weights, computed in fp64."""
     probs = torch.softmax(x.to(torch.float64) @ gate_w.to(torch.float64), dim=-1)
     vals, idx = torch.topk(probs, k=k, dim=-1)
@@ -264,8 +264,7 @@ def failures_for(results: Dict[int, Optional[dict]], kind: str) -> List[str]:
             if not c["ok"]:
                 note = f" ({c['note']})" if c["note"] else ""
                 out.append(
-                    f"rank {rank} {c['name']}: max_abs={c['max_abs']:.3e} "
-                    f"rel={c['rel']:.3e}{note}"
+                    f"rank {rank} {c['name']}: max_abs={c['max_abs']:.3e} rel={c['rel']:.3e}{note}"
                 )
     if not out and n_checks == 0:
         out.append(f"no '{kind}' checks ran")
