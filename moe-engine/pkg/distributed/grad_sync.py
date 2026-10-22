@@ -48,10 +48,28 @@ micro-batch backward passes and before gradient clipping and
 ``optimizer.step()`` (Megatron's ``finalize_model_grads`` position). Every
 rank must call it on the same model structure.
 
+Initialisation (F14-init)
+-------------------------
+:func:`broadcast_replicated_params` makes every replicated parameter
+identical across the ranks that replicate it, once, right after model
+construction (before FSDP2 wrapping and optimizer creation). Without it,
+ranks seeded differently start from different replicas, and no later step
+reconciles them. Broadcasts go from each group's lowest rank:
+
+* over DP: every parameter (DP ranks are full replicas);
+* over EP: non-expert parameters (expert weights are EP shards);
+* over TP: every parameter not marked as a TP shard via
+  :func:`mark_tensor_parallel_shard` (``ColumnParallelLinear`` /
+  ``RowParallelLinear`` mark their weights).
+
+Pipeline stages hold different layers and are never involved.
+
 Public API
 ----------
     mark_sequence_parallel(param)
+    mark_tensor_parallel_shard(param)
     sync_replicated_grads(model, topology)
+    broadcast_replicated_params(model, topology)
 """
 
 from __future__ import annotations
@@ -69,15 +87,31 @@ try:
 except Exception:  # pragma: no cover
     DTensor = None  # type: ignore
 
-__all__ = ["mark_sequence_parallel", "sync_replicated_grads", "SEQUENCE_PARALLEL_ATTR"]
+__all__ = [
+    "mark_sequence_parallel",
+    "mark_tensor_parallel_shard",
+    "sync_replicated_grads",
+    "broadcast_replicated_params",
+    "SEQUENCE_PARALLEL_ATTR",
+    "TENSOR_PARALLEL_SHARD_ATTR",
+]
 
 SEQUENCE_PARALLEL_ATTR = "sequence_parallel"
+TENSOR_PARALLEL_SHARD_ATTR = "tensor_parallel_shard"
 
 
 def mark_sequence_parallel(param: nn.Parameter) -> nn.Parameter:
     """Mark a replicated parameter as used inside a sequence-parallel region,
     so :func:`sync_replicated_grads` sums its gradient over the TP group."""
     setattr(param, SEQUENCE_PARALLEL_ATTR, True)
+    return param
+
+
+def mark_tensor_parallel_shard(param: nn.Parameter) -> nn.Parameter:
+    """Mark a parameter as a tensor-parallel shard (different on every TP
+    rank by design), so :func:`broadcast_replicated_params` never overwrites
+    it with another rank's shard."""
+    setattr(param, TENSOR_PARALLEL_SHARD_ATTR, True)
     return param
 
 
@@ -135,3 +169,36 @@ def sync_replicated_grads(model: nn.Module, topology: ParallelTopology) -> None:
             dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ep_group)
         if over_tp:
             dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=tp_group)
+
+
+def broadcast_replicated_params(model: nn.Module, topology: ParallelTopology) -> None:
+    """Make replicated parameters identical across the ranks that replicate
+    them, broadcasting from each group's lowest rank (F14-init); see the
+    module docstring for which parameters go over which group. Call once
+    after model construction, before FSDP2 wrapping and optimizer creation.
+    No-op when ``torch.distributed`` is not initialised.
+    """
+    if not dist.is_initialized():
+        return
+    experts = _expert_param_ids(model)
+    plan = []
+    if topology.dp_size > 1:
+        if topology.mesh is None:
+            raise RuntimeError("broadcast_replicated_params: dp_size > 1 requires a DeviceMesh")
+        plan.append((topology.mesh["dp"].get_group(), lambda p: True))
+    ep_group = _ep_group(topology)
+    if ep_group is not None:
+        plan.append((ep_group, lambda p: id(p) not in experts))
+    if topology.tp_size > 1:
+        plan.append(
+            (
+                tp_process_group(topology),
+                lambda p: not getattr(p, TENSOR_PARALLEL_SHARD_ATTR, False),
+            )
+        )
+    with torch.no_grad():
+        for group, wanted in plan:
+            src = dist.get_global_rank(group, 0)
+            for p in model.parameters():
+                if wanted(p):
+                    dist.broadcast(_local(p.data), src=src, group=group)

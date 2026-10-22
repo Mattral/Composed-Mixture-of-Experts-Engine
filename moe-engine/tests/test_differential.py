@@ -239,11 +239,10 @@ def _ep_result(cid: str):
     return run_multiprocess(_ep_worker, ws, cfg)
 
 
-# Finding ID -> xfail reason, for cases that currently fail. A new failing
-# case must add its finding here first.
-_FINDING_TEXT = {
-    "F14-init": "F14-init: replicated params are not broadcast at model construction",
-}
+# Finding ID -> xfail reason, for cases that currently fail. Empty since the
+# M1 fixes (F1-F4, F21, F14-init); a new failing case must add its finding
+# here first.
+_FINDING_TEXT: dict = {}
 
 
 def _params(cases, which):
@@ -670,16 +669,16 @@ _COMPOSITE_CASES = [
     (
         "engine-init",
         dict(E=8, engine_init=True, engine_sync=False),
-        ("F14-init",),
-        ("F14-init",),
-        ("F14-init",),
+        (),
+        (),
+        (),
     ),
     (
         "engine-all",
         dict(E=8, engine_init=True, engine_sync=True),
-        ("F14-init",),
-        ("F14-init",),
-        ("F14-init",),
+        (),
+        (),
+        (),
     ),
 ]
 

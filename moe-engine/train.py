@@ -51,7 +51,7 @@ from pkg.distributed import (
     apply_fsdp2,
     build_topology,
 )
-from pkg.distributed.grad_sync import sync_replicated_grads
+from pkg.distributed.grad_sync import broadcast_replicated_params, sync_replicated_grads
 from pkg.elastic.fault_monitor import (
     ElasticConfig as _ElasticRuntimeConfig,
 )
@@ -216,6 +216,9 @@ def main() -> None:
     # Model.
     # ----------------------------------------------------------------
     model = build_model(cfg, topology)
+    # Ranks may have initialised replicated params differently; make every
+    # replica identical before FSDP2 wrapping and optimizer creation (F14-init).
+    broadcast_replicated_params(model, topology)
     model = apply_fsdp2(
         model,
         topology,
