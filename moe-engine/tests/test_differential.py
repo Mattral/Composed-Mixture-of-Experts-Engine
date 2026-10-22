@@ -226,7 +226,7 @@ def _ep_cases():
                             f"ep{ws}-E{E}-k{K}-{'imbal' if imbalanced else 'bal'}"
                             f"-{'drop' if drop else 'nodrop'}"
                         )
-                        cases.append((cid, ws, cfg, (), ("F1",)))
+                        cases.append((cid, ws, cfg, (), ()))
     return cases
 
 
@@ -240,7 +240,6 @@ def _ep_result(cid: str):
 
 
 _FINDING_TEXT = {
-    "F1": "F1: EP all-to-all is invisible to autograd (experts get no grad, input grad wrong)",
     "F2": "F2: TP collectives lack autograd Functions (gather raises / input grad wrong)",
     "F3": "F3: SP gather/scatter lack autograd Functions",
 }
@@ -620,12 +619,10 @@ def test_composite_ep2_forward_matches_dense():
     _assert_kind(_composite_result(), "fwd")
 
 
-@pytest.mark.xfail(strict=True, reason=_FINDING_TEXT["F1"])
 def test_composite_ep2_gradients_match_dense():
     _assert_kind(_composite_result(), "grad")
 
 
-@pytest.mark.xfail(strict=True, reason=_FINDING_TEXT["F1"])
 def test_composite_ep2_sgd_step_matches_dense():
     _assert_kind(_composite_result(), "step")
 
