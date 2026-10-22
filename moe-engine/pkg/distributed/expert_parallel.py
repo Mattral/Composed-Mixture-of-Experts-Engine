@@ -29,6 +29,7 @@ from typing import Optional, Tuple
 import torch
 import torch.distributed as dist
 
+from pkg.distributed.comm_ops import all_to_all
 from pkg.distributed.mesh import ParallelTopology
 
 __all__ = [
@@ -141,26 +142,17 @@ def all_to_all_dispatch(
         )
     recv_counts = meta_in[:, 0].contiguous()
 
-    total_recv = int(recv_counts.sum().item())
-    H = tokens_sorted.shape[1]
-    received = torch.empty(
-        (total_recv, H),
-        dtype=tokens_sorted.dtype,
-        device=tokens_sorted.device,
-    )
+    # Split sizes as Python lists, computed once: the autograd Function saves
+    # them for its backward (the reverse exchange), so no second sync (F1).
+    out_splits = recv_counts.tolist()
+    in_splits = send_counts.tolist()
 
     if stream is not None and torch.cuda.is_available():
         start_evt = torch.cuda.Event(enable_timing=True)
         end_evt = torch.cuda.Event(enable_timing=True)
         start_evt.record(stream)
         with torch.cuda.stream(stream):
-            dist.all_to_all_single(
-                received,
-                tokens_sorted,
-                output_split_sizes=recv_counts.tolist(),
-                input_split_sizes=send_counts.tolist(),
-                group=ep_group,
-            )
+            received = all_to_all(tokens_sorted, out_splits, in_splits, ep_group)
             end_evt.record(stream)
         end_evt.synchronize()
         latency_ms = max(start_evt.elapsed_time(end_evt), 0.0)
@@ -168,14 +160,9 @@ def all_to_all_dispatch(
         completion_event.record(stream)
         return received, recv_counts, completion_event, latency_ms
 
-    # CPU path
-    dist.all_to_all_single(
-        received,
-        tokens_sorted,
-        output_split_sizes=recv_counts.tolist(),
-        input_split_sizes=send_counts.tolist(),
-        group=ep_group,
-    )
+    # CPU path. Differentiable (F1): backward returns each gradient row to
+    # the rank its token came from.
+    received = all_to_all(tokens_sorted, out_splits, in_splits, ep_group)
     return received, recv_counts, None, 0.0
 
 
@@ -217,13 +204,8 @@ def all_to_all_combine(
 
     ep_group = topology.mesh["ep"].get_group() if topology.mesh is not None else None
     stream = _CommStream.get(topology.device)
-    total_send = int(send_counts.sum().item())
-    H = expert_out.shape[1]
-    combined = torch.empty(
-        (total_send, H),
-        dtype=expert_out.dtype,
-        device=expert_out.device,
-    )
+    out_splits = send_counts.tolist()
+    in_splits = recv_counts.tolist()
 
     if stream is not None and torch.cuda.is_available():
         if wait_event is not None:
@@ -232,27 +214,16 @@ def all_to_all_combine(
         end_evt = torch.cuda.Event(enable_timing=True)
         start_evt.record(stream)
         with torch.cuda.stream(stream):
-            dist.all_to_all_single(
-                combined,
-                expert_out,
-                output_split_sizes=send_counts.tolist(),
-                input_split_sizes=recv_counts.tolist(),
-                group=ep_group,
-            )
+            combined = all_to_all(expert_out, out_splits, in_splits, ep_group)
             end_evt.record(stream)
         torch.cuda.current_stream().wait_event(end_evt)
         end_evt.synchronize()
         latency_ms = max(start_evt.elapsed_time(end_evt), 0.0)
         return combined, latency_ms
 
-    # CPU path
-    dist.all_to_all_single(
-        combined,
-        expert_out,
-        output_split_sizes=send_counts.tolist(),
-        input_split_sizes=recv_counts.tolist(),
-        group=ep_group,
-    )
+    # CPU path. Differentiable (F1): backward sends each expert-output
+    # gradient row back to the rank that computed it.
+    combined = all_to_all(expert_out, out_splits, in_splits, ep_group)
     return combined, 0.0
 
 

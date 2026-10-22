@@ -107,6 +107,70 @@ def check(kind: str, name: str, ok: bool, note: str) -> dict:
     return dict(kind=kind, name=name, ok=bool(ok), max_abs=0.0, rel=0.0, note=note)
 
 
+def distributed_fd_check(
+    name: str,
+    fn: Callable[[torch.Tensor], torch.Tensor],
+    x: torch.Tensor,
+    cot: torch.Tensor,
+    *,
+    input_replicated: bool,
+    output_replicated: bool,
+    eps: float = 1e-6,
+) -> dict:
+    """Finite-difference check of a collective's VJP across all ranks.
+
+    ``torch.autograd.gradcheck`` cannot be used per rank: each rank would
+    perturb only its own input while its output also depends on its peers'.
+    Here every rank evaluates one *global* scalar loss and all ranks perturb
+    the same global input element in lockstep (so every rank issues the same
+    number of collectives):
+
+    * ``input_replicated``: ``x`` is one tensor held identically by every
+      rank, so a perturbation is applied on all ranks at once and every rank
+      must end up with the full gradient. Otherwise ``x`` is sharded: element
+      ``(r, i)`` is perturbed on rank ``r`` only.
+    * ``output_replicated``: every rank holds the same output, so the loss is
+      ``<cot, fn(x)>`` counted once (``cot`` must then be identical on all
+      ranks). Otherwise outputs are partitioned and the loss is the sum of
+      every rank's ``<cot_r, fn_r(x)>``.
+
+    The analytical gradient is each rank's ``x.grad`` after backward of its
+    local ``<cot, fn(x)>``. Use float64; ``fn`` must be deterministic.
+    """
+    x = x.detach()
+    xa = x.clone().requires_grad_(True)
+    (fn(xa) * cot).sum().backward()
+    analytical = xa.grad if xa.grad is not None else torch.zeros_like(x)
+
+    def global_loss(xp: torch.Tensor) -> float:
+        with torch.no_grad():
+            val = (fn(xp) * cot).sum().reshape(1)
+            if not output_replicated:
+                dist.all_reduce(val)
+        return float(val)
+
+    rank = dist.get_rank()
+    if input_replicated:
+        elements = [(None, i) for i in range(x.numel())]
+    else:
+        sizes = [None] * dist.get_world_size()
+        dist.all_gather_object(sizes, x.numel())
+        elements = [(r, i) for r, n in enumerate(sizes) for i in range(n)]
+
+    numeric = torch.zeros_like(x)
+    for owner, i in elements:
+        mine = owner is None or owner == rank
+        losses = []
+        for sign in (1.0, -1.0):
+            xp = x.clone()
+            if mine:
+                xp.view(-1)[i] += sign * eps
+            losses.append(global_loss(xp))
+        if mine:
+            numeric.view(-1)[i] = (losses[0] - losses[1]) / (2 * eps)
+    return compare("grad", f"{name}: VJP vs finite differences", analytical, numeric)
+
+
 # ===========================================================================
 # Dense references (no pkg imports, no collectives)
 # ===========================================================================
