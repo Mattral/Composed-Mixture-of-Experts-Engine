@@ -61,7 +61,13 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from pkg.distributed.data_parallel import apply_fsdp2  # noqa: E402
 from pkg.distributed.expert_parallel import all_to_all_dispatch  # noqa: E402
+from pkg.distributed.grad_sync import (  # noqa: E402
+    broadcast_replicated_params,
+    mark_sequence_parallel,
+    sync_replicated_grads,
+)
 from pkg.distributed.mesh import build_topology  # noqa: E402
 from pkg.distributed.moe_layer import DistributedMoELayer  # noqa: E402
 from pkg.distributed.sequence_parallel import (  # noqa: E402
@@ -239,10 +245,19 @@ def _ep_result(cid: str):
     return run_multiprocess(_ep_worker, ws, cfg)
 
 
-# Finding ID -> xfail reason, for cases that currently fail. Empty since the
-# M1 fixes (F1-F4, F21, F14-init); a new failing case must add its finding
-# here first.
-_FINDING_TEXT: dict = {}
+# Finding ID -> xfail reason, for cases that currently fail. A new failing
+# case must add its finding here first.
+_FINDING_TEXT: dict = {
+    "F22": (
+        "F22: the training objective depends on the parallel layout (each rank's "
+        "mean over its own tokens, summed over EP/SP and averaged over DP and "
+        "micro-batches), not a mean over the global batch"
+    ),
+    "F24": (
+        "F24: apply_fsdp2 passes mp_policy=None to fully_shard when mixed "
+        "precision is off, so FSDP2 raises at the first forward (every dp > 1 case)"
+    ),
+}
 
 
 def _params(cases, which):
@@ -717,6 +732,206 @@ def test_composite_engine_gradients_match_dense(variant):
 @pytest.mark.parametrize("variant", _params(_ENGINE_CASES, 4))
 def test_composite_engine_sgd_step_matches_dense(variant):
     _assert_kind(_composite_result(variant), "step")
+
+
+# ===========================================================================
+# Layout independence: one global batch under many (dp, ep, sp) layouts
+# ===========================================================================
+
+# Global batch: _LG sequences of length _LS per micro-batch, _LMB micro-batches
+# (gradient accumulation). Sequence s of micro-batch mb has a loss mask over
+# its first _LMASK[mb][s] tokens, so data ranks hold unequal numbers of
+# loss-bearing tokens (in some layouts one holds none) and the micro-batches
+# differ too. A per-rank or per-micro-batch mean then weights tokens
+# unequally; only a mean over the global batch matches the dense reference.
+_LG, _LS, _LMB = 4, 7, 2
+_LMASK = ((7, 2, 5, 1), (3, 6, 0, 4))
+
+
+class _LayoutModel(nn.Module):
+    """Replicated input projection -> sequence-parallel block (fused
+    projection of each sequence shard with a replicated weight) -> MoE ->
+    output projection, with residuals. At tp = 1 the SP block is a plain
+    projection; dp and ep split the batch; ep shards the experts."""
+
+    def __init__(self, H, Fd, E, K, topo):
+        super().__init__()
+        self.topo = topo
+        self.inp = nn.Linear(H, H)
+        self.sp_w = nn.Parameter(torch.randn(H, H) / math.sqrt(H))
+        self.moe = DistributedMoELayer(H, Fd, E, K, topo)
+        self.out = nn.Linear(H, H)
+
+    def forward(self, x):
+        h = torch.tanh(self.inp(x))
+        s = torch.tanh(scatter_to_sequence_parallel(h, self.topo, next_weight=self.sp_w))
+        g = gather_from_sequence_parallel(s, self.topo, orig_seq_len=x.shape[1])
+        return self.out(g + self.moe(g))
+
+
+def _token_loss_sum(y, t, m):
+    """Sum over loss-bearing tokens of 0.5 * ||y - t||^2."""
+    return (0.5 * ((y - t) ** 2).sum(-1) * m).sum()
+
+
+def _full(t):
+    """Full tensor of an FSDP2 DTensor (a DP-group collective), else ``t``."""
+    return t.full_tensor() if hasattr(t, "full_tensor") else t
+
+
+def _layout_worker(rank: int, ws: int, cfg: dict) -> list:
+    H, Fd, E, K, LR = 16, 32, 8, 2, 0.1
+    dp, ep, tp = cfg["dp"], cfg["ep"], cfg["tp"]
+    topo = build_topology(dp_size=dp, ep_size=ep, tp_size=tp, device_type="cpu")
+    torch.manual_seed(SEED + rank)
+    model = _LayoutModel(H, Fd, E, K, topo)
+    mark_sequence_parallel(model.sp_w)
+    broadcast_replicated_params(model, topo)
+
+    # ---- The global batch (identical on every rank) and this rank's part.
+    #      TP ranks of one (dp, ep) position hold the same sequences. ----
+    g = torch.Generator().manual_seed(SEED + 4242)
+    X = torch.randn(_LMB, _LG, _LS, H, generator=g)
+    T = torch.randn(_LMB, _LG, _LS, H, generator=g)
+    M = torch.zeros(_LMB, _LG, _LS)
+    for mb, lengths in enumerate(_LMASK):
+        for s, n in enumerate(lengths):
+            M[mb, s, :n] = 1.0
+    n_global = int(M.sum())
+    per = _LG // (dp * ep)
+    d = topo.dp_rank * ep + topo.ep_rank
+    mine = slice(d * per, (d + 1) * per)
+
+    # ---- Dense reference: full experts from every (expert, TP shard),
+    #      replicated params from rank 0; loss = global-batch mean. ----
+    shards = _all_gather_obj(
+        {
+            "experts": {
+                (eid, topo.tp_rank): tuple(
+                    _detached(w) for w in (m.w_gate.weight, m.w_up.weight, m.w_down.weight)
+                )
+                for eid, m in zip(model.moe.local_expert_ids, model.moe.experts)
+            },
+            "rep": {
+                n: _detached(p)
+                for n, p in model.named_parameters()
+                if not n.startswith("moe.experts.")
+            },
+        }
+    )
+    parts = {}
+    for s in shards:
+        parts.update(s["experts"])
+    ref_experts = [
+        [
+            torch.cat([parts[(e, r)][0] for r in range(tp)], 0).requires_grad_(True),
+            torch.cat([parts[(e, r)][1] for r in range(tp)], 0).requires_grad_(True),
+            torch.cat([parts[(e, r)][2] for r in range(tp)], 1).requires_grad_(True),
+        ]
+        for e in range(E)
+    ]
+    rp = {n: t.clone().requires_grad_(True) for n, t in shards[0]["rep"].items()}
+
+    def dense_model(xx):
+        h = torch.tanh(F.linear(xx, rp["inp.weight"], rp["inp.bias"]))
+        gg = torch.tanh(F.linear(h, rp["sp_w"]))
+        moe = dense_moe(gg.reshape(-1, H), rp["moe.router.gate_w"], ref_experts, K)
+        return F.linear(gg + moe.reshape(gg.shape), rp["out.weight"], rp["out.bias"])
+
+    loss_ref = 0.0
+    y_ref = []
+    for mb in range(_LMB):
+        ys = dense_model(X[mb])
+        y_ref.append(ys[mine].detach())
+        loss_ref = loss_ref + _token_loss_sum(ys, T[mb], M[mb])
+    (loss_ref / n_global).backward()
+
+    chunk = Fd // tp
+    rows = slice(topo.tp_rank * chunk, (topo.tp_rank + 1) * chunk)
+
+    def ref_of(name, tensors_of):
+        if not name.startswith("moe.experts."):
+            return tensors_of(rp[name])
+        i, pname = name.split(".")[2], name.split(".")[3]
+        eid = model.moe.local_expert_ids[int(i)]
+        j = ("w_gate", "w_up", "w_down").index(pname)
+        full = tensors_of(ref_experts[eid][j])
+        return full[:, rows] if pname == "w_down" else full[rows]
+
+    def grad_of(t):
+        return t.grad if t.grad is not None else torch.zeros_like(t)
+
+    with torch.no_grad():
+        ref_grads = {n: ref_of(n, grad_of) for n, _ in model.named_parameters()}
+        ref_after = {
+            n: ref_of(n, lambda t: t - LR * grad_of(t)) for n, _ in model.named_parameters()
+        }
+
+    # ---- Engine path: FSDP2 over DP, then train.py's step structure. ----
+    model = apply_fsdp2(model, topo)
+    try:
+        from pkg.distributed.grad_sync import finalize_grads, global_token_count
+    except ImportError:
+        finalize_grads = None
+    checks = []
+    local_tokens = 0
+    for mb in range(_LMB):
+        y = model(X[mb][mine])
+        checks.append(compare("fwd", f"micro-batch {mb} output", y, y_ref[mb]))
+        loss_sum = _token_loss_sum(y, T[mb][mine], M[mb][mine])
+        n_local = int(M[mb][mine].sum())
+        local_tokens += n_local
+        if finalize_grads is not None:
+            loss_sum.backward()
+        else:
+            # The convention shipped in M1 (train.py, ADR-010): each rank's
+            # mean over its own tokens, divided by the accumulation steps.
+            (loss_sum / max(n_local, 1) / _LMB).backward()
+    if finalize_grads is not None:
+        finalize_grads(model, topo, global_token_count(local_tokens, topo))
+    else:
+        sync_replicated_grads(model, topo)
+    for n, p in model.named_parameters():
+        grad = _full(p.grad) if p.grad is not None else None
+        checks.append(compare("grad", f"{n}.grad", grad, ref_grads[n]))
+    torch.optim.SGD(model.parameters(), lr=LR).step()
+    for n, p in model.named_parameters():
+        checks.append(compare("step", f"{n} after SGD step", _full(p.detach()), ref_after[n]))
+    checks.append(check("fwd", "global token count", n_global > 0, f"N_global={n_global}"))
+    return checks
+
+
+# (id, cfg, findings failing fwd, grad, step); world size = dp * ep * tp.
+_LAYOUT_CASES = [
+    ("single", dict(dp=1, ep=1, tp=1), (), ("F22",), ("F22",)),
+    ("dp2", dict(dp=2, ep=1, tp=1), ("F24",), ("F24", "F22"), ("F24", "F22")),
+    ("ep2", dict(dp=1, ep=2, tp=1), (), ("F22",), ("F22",)),
+    ("sp2", dict(dp=1, ep=1, tp=2), (), ("F22",), ("F22",)),
+    ("dp2-ep2", dict(dp=2, ep=2, tp=1), ("F24",), ("F24", "F22"), ("F24", "F22")),
+    ("dp2-sp2", dict(dp=2, ep=1, tp=2), ("F24",), ("F24", "F22"), ("F24", "F22")),
+    ("ep2-sp2", dict(dp=1, ep=2, tp=2), (), ("F22",), ("F22",)),
+]
+
+
+@functools.lru_cache(maxsize=None)
+def _layout_result(cid: str):
+    cfg = next(c for c in _LAYOUT_CASES if c[0] == cid)[1]
+    return run_multiprocess(_layout_worker, cfg["dp"] * cfg["ep"] * cfg["tp"], cfg)
+
+
+@pytest.mark.parametrize("cid", _params(_LAYOUT_CASES, 2))
+def test_layout_forward_matches_dense(cid):
+    _assert_kind(_layout_result(cid), "fwd")
+
+
+@pytest.mark.parametrize("cid", _params(_LAYOUT_CASES, 3))
+def test_layout_gradients_match_dense_global_mean(cid):
+    _assert_kind(_layout_result(cid), "grad")
+
+
+@pytest.mark.parametrize("cid", _params(_LAYOUT_CASES, 4))
+def test_layout_sgd_step_matches_dense_global_mean(cid):
+    _assert_kind(_layout_result(cid), "step")
 
 
 if __name__ == "__main__":
