@@ -93,16 +93,53 @@ def all_to_all_dispatch(
         ordering.  None on CPU.
     latency_ms : float
         Elapsed time of the dispatch collective in milliseconds.
+
+    Raises
+    ------
+    RuntimeError
+        On **every** EP rank at once, if any rank's ``send_counts`` is
+        invalid (wrong length, negative, or not summing to that rank's
+        ``tokens_sorted.shape[0]``). See the count-exchange comment below.
     """
     if topology.ep_size == 1 or not dist.is_initialized():
         return tokens_sorted, send_counts.clone(), None, 0.0
 
     ep_group = topology.mesh["ep"].get_group() if topology.mesh is not None else None
     stream = _CommStream.get(topology.device)
+    ep_size = topology.ep_size
 
-    # Exchange send counts so every rank knows how many tokens it will receive.
-    recv_counts = torch.empty_like(send_counts)
-    _all_to_all_single_on_stream(recv_counts, send_counts, ep_group, stream)
+    # Exchange send counts so every rank knows how many tokens it will
+    # receive -- together with a per-rank validity flag, in ONE collective
+    # that every rank always enters (F4). If a rank checked its counts
+    # locally and raised, its peers would already be blocked in a collective
+    # it never joins and hang until the collective timeout (an invalid split
+    # used to raise Gloo's "Split sizes doesn't match" on that rank only).
+    # Instead each rank sends (count_for_peer, ok) to every peer, so all
+    # ranks see every rank's flag and abort together before the data
+    # all-to-all, naming the bad rank(s).
+    valid = (
+        send_counts.dim() == 1
+        and send_counts.numel() == ep_size
+        and bool((send_counts >= 0).all())
+        and int(send_counts.sum()) == tokens_sorted.shape[0]
+    )
+    counts = (
+        send_counts.to(torch.long)
+        if valid
+        else torch.zeros(ep_size, dtype=torch.long, device=send_counts.device)
+    )
+    meta_out = torch.stack([counts, torch.full_like(counts, int(valid))], dim=1)  # [ep, 2]
+    meta_in = torch.empty_like(meta_out)
+    _all_to_all_single_on_stream(meta_in, meta_out, ep_group, stream)
+    peer_valid = meta_in[:, 1]
+    if not bool(peer_valid.all()):
+        bad = (peer_valid == 0).nonzero().flatten().tolist()
+        raise RuntimeError(
+            f"EP dispatch aborted on all {ep_size} EP ranks: invalid send_counts on "
+            f"EP rank(s) {bad}. Each rank's send_counts must have ep_size entries, be "
+            "non-negative, and sum to the number of rows it dispatches."
+        )
+    recv_counts = meta_in[:, 0].contiguous()
 
     total_recv = int(recv_counts.sum().item())
     H = tokens_sorted.shape[1]
