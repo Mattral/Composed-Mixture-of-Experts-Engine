@@ -28,7 +28,13 @@ import torch.distributed as dist
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from pkg.distributed.comm_ops import all_to_all  # noqa: E402
+from pkg.distributed.comm_ops import (  # noqa: E402
+    all_to_all,
+    copy_to_group,
+    gather_along_dim,
+    reduce_from_group,
+    split_along_dim,
+)
 from tests._differential import (  # noqa: E402
     compare,
     distributed_fd_check,
@@ -93,3 +99,58 @@ def _all_to_all_worker(rank: int, ws: int, cfg: dict) -> list:
 )
 def test_all_to_all_forward_and_vjp(splits):
     _assert_ok(run_multiprocess(_all_to_all_worker, WS, {"splits": splits}))
+
+
+# ===========================================================================
+# Tensor / sequence parallel conjugate pairs
+# ===========================================================================
+
+# name -> (input_replicated, output_replicated). A replicated tensor is the
+# same on every rank; a sharded/partitioned one differs per rank.
+_PAIR_KINDS = {
+    "copy_to_group": (True, False),
+    "reduce_from_group": (False, True),
+    "gather_along_dim": (False, True),
+    "split_along_dim": (True, False),
+}
+
+
+def _pair_worker(rank: int, ws: int, cfg: dict) -> list:
+    op, dim = cfg["op"], cfg["dim"]
+    in_rep, out_rep = _PAIR_KINDS[op]
+    shape = (2, 4, 6)
+    g_in = torch.Generator().manual_seed(200 if in_rep else 300 + rank)
+    x = torch.randn(*shape, generator=g_in, dtype=torch.float64)
+    xs = _all_gather_obj(x)
+
+    if op == "copy_to_group":
+        fn, expected = (lambda t: copy_to_group(t)), x
+    elif op == "reduce_from_group":
+        fn, expected = (lambda t: reduce_from_group(t)), sum(xs)
+    elif op == "gather_along_dim":
+        fn, expected = (lambda t: gather_along_dim(t, dim)), torch.cat(xs, dim=dim)
+    else:
+        fn, expected = (lambda t: split_along_dim(t, dim)), x.chunk(ws, dim=dim)[rank]
+
+    g_cot = torch.Generator().manual_seed(400 if out_rep else 500 + rank)
+    cot = torch.randn(*expected.shape, generator=g_cot, dtype=torch.float64)
+    return [
+        compare("fwd", f"{op} output", fn(x), expected),
+        distributed_fd_check(op, fn, x, cot, input_replicated=in_rep, output_replicated=out_rep),
+    ]
+
+
+@pytest.mark.parametrize(
+    "op,dim",
+    [
+        ("copy_to_group", None),
+        ("reduce_from_group", None),
+        ("gather_along_dim", -1),
+        ("gather_along_dim", 1),
+        ("split_along_dim", -1),
+        ("split_along_dim", 1),
+    ],
+    ids=["copy", "reduce", "gather-last", "gather-dim1", "split-last", "split-dim1"],
+)
+def test_conjugate_pair_forward_and_vjp(op, dim):
+    _assert_ok(run_multiprocess(_pair_worker, WS, {"op": op, "dim": dim}))
