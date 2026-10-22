@@ -49,6 +49,7 @@ from __future__ import annotations
 import functools
 import math
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,7 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from pkg.distributed.expert_parallel import all_to_all_dispatch  # noqa: E402
 from pkg.distributed.mesh import build_topology  # noqa: E402
 from pkg.distributed.moe_layer import DistributedMoELayer  # noqa: E402
 from pkg.distributed.sequence_parallel import (  # noqa: E402
@@ -203,9 +205,10 @@ def _ep_worker(rank: int, ws: int, cfg: dict) -> list:
 def _ep_cases():
     """(id, world_size, cfg, findings-that-fail-fwd, findings-that-fail-grad)."""
     cases = []
+    # E=5 (ep=2, ep=4) and E=10 (ep=4) are the non-divisible cases that
+    # crashed or deadlocked before the F4 fix; they are now plain regressions.
     for ws, e_values in ((2, (8, 5, 10)), (4, (8, 5, 10))):
         for E in e_values:
-            divisible = E % ws == 0
             for K in (1, 2):
                 for imbalanced in (False, True):
                     for drop in (False, True):
@@ -223,9 +226,7 @@ def _ep_cases():
                             f"ep{ws}-E{E}-k{K}-{'imbal' if imbalanced else 'bal'}"
                             f"-{'drop' if drop else 'nodrop'}"
                         )
-                        fwd_fail = () if divisible else ("F4",)
-                        grad_fail = ("F1",) + fwd_fail
-                        cases.append((cid, ws, cfg, fwd_fail, grad_fail))
+                        cases.append((cid, ws, cfg, (), ()))
     return cases
 
 
@@ -238,15 +239,10 @@ def _ep_result(cid: str):
     return run_multiprocess(_ep_worker, ws, cfg)
 
 
-_FINDING_TEXT = {
-    "F1": "F1: EP all-to-all is invisible to autograd (experts get no grad, input grad wrong)",
-    "F2": "F2: TP collectives lack autograd Functions (gather raises / input grad wrong)",
-    "F3": "F3: SP gather/scatter lack autograd Functions",
-    "F4": (
-        "F4: send_counts assumes E % ep_size == 0 (split-size crash, or a Gloo "
-        "timeout on ranks whose local counts happen to be consistent)"
-    ),
-}
+# Finding ID -> xfail reason, for cases that currently fail. Empty since the
+# M1 fixes (F1-F4, F21, F14-init); a new failing case must add its finding
+# here first.
+_FINDING_TEXT: dict = {}
 
 
 def _params(cases, which):
@@ -275,6 +271,43 @@ def test_ep_forward_matches_dense(cid):
 @pytest.mark.parametrize("cid", _params(_EP_CASES, 4))
 def test_ep_gradients_match_dense(cid):
     _assert_kind(_ep_result(cid), "grad")
+
+
+# ---------------------------------------------------------------------------
+# EP dispatch must fail on every rank together, never hang (F4)
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_bad_counts_worker(rank: int, ws: int, cfg: dict) -> list:
+    """Rank ``cfg["bad_rank"]`` passes send_counts that do not sum to its row
+    count. Before F4 that rank raised Gloo's local split-size error while its
+    peers entered the all-to-all and blocked until the collective timeout."""
+    topo = build_topology(dp_size=1, ep_size=ws, tp_size=1, device_type="cpu")
+    rows_per_peer = 2
+    tokens = torch.randn(rows_per_peer * ws, 4)
+    send_counts = torch.full((ws,), rows_per_peer, dtype=torch.long)
+    if rank == cfg["bad_rank"]:
+        send_counts[0] += 1
+    t0 = time.monotonic()
+    try:
+        all_to_all_dispatch(tokens, send_counts, topo)
+    except RuntimeError as exc:
+        msg = str(exc)
+        named = "invalid send_counts" in msg and f"[{cfg['bad_rank']}]" in msg
+        return [
+            check(
+                "abort",
+                "every rank aborts with the same error naming the bad rank",
+                named,
+                f"after {time.monotonic() - t0:.1f}s: {msg[:300]}",
+            )
+        ]
+    return [check("abort", "dispatch must not succeed", False, "returned normally")]
+
+
+@pytest.mark.parametrize("ws,bad_rank", [(2, 1), (4, 2)], ids=["ep2-bad1", "ep4-bad2"])
+def test_ep_dispatch_bad_counts_abort_on_all_ranks(ws, bad_rank):
+    _assert_kind(run_multiprocess(_dispatch_bad_counts_worker, ws, {"bad_rank": bad_rank}), "abort")
 
 
 # ===========================================================================
@@ -355,12 +388,12 @@ def _tp_worker(rank: int, ws: int, cfg: dict) -> list:
 
 
 _TP_CASES = [
-    ("tp2-col_gather-nobias", dict(case="col_gather", bias=False), ("F2",), ("F2",)),
-    ("tp2-col_gather-bias", dict(case="col_gather", bias=True), ("F2",), ("F2",)),
+    ("tp2-col_gather-nobias", dict(case="col_gather", bias=False), (), ()),
+    ("tp2-col_gather-bias", dict(case="col_gather", bias=True), (), ()),
     # ColumnParallelLinear(gather_output=False, bias=True) raises
     # NotImplementedError by design (ADR-008), so only the Row bias varies.
-    ("tp2-mlp-nobias", dict(case="mlp", bias=False), (), ("F2",)),
-    ("tp2-mlp-rowbias", dict(case="mlp", bias=True), (), ("F2",)),
+    ("tp2-mlp-nobias", dict(case="mlp", bias=False), (), ()),
+    ("tp2-mlp-rowbias", dict(case="mlp", bias=True), (), ()),
 ]
 
 
@@ -437,31 +470,57 @@ def _sp_worker(rank: int, ws: int, cfg: dict) -> list:
     checks.append(compare("fwd", "output", y, yr))
     y.backward(cot)
     checks.append(compare("grad", "input x.grad (replicated input)", xd.grad, xr.grad))
-    if wd is not None:
+    if wd is not None and cfg.get("engine_sync"):
         # next_weight is replicated but applied to a sequence shard, so each
-        # rank holds its tokens' partial gradient; the cross-rank sum belongs
-        # to the optimizer layer (as in Megatron SP). Compare the TP-group sum.
+        # rank holds only its tokens' partial gradient. The engine's
+        # replicated-gradient sync must sum it over the TP group for a param
+        # marked sequence-parallel (F21); compare each rank's grad directly.
+        try:
+            from pkg.distributed.grad_sync import mark_sequence_parallel, sync_replicated_grads
+        except ImportError as exc:
+            checks.append(check("grad", "engine sync_replicated_grads", False, repr(exc)))
+        else:
+            holder = nn.Module()
+            holder.next_weight = nn.Parameter(wd.detach().clone())
+            holder.next_weight.grad = wd.grad.detach().clone()
+            mark_sequence_parallel(holder.next_weight)
+            sync_replicated_grads(holder, topo)
+            checks.append(
+                compare(
+                    "grad", "next_weight.grad (engine-synced)", holder.next_weight.grad, wr.grad
+                )
+            )
+    elif wd is not None:
+        # Harness stand-in for the engine's sync (F21): compare the TP-group sum.
         wg = wd.grad.clone() if wd.grad is not None else torch.zeros_like(wd)
         dist.all_reduce(wg)
         checks.append(compare("grad", "next_weight.grad (TP-group sum)", wg, wr.grad))
     return checks
 
 
-# Every SP case calls gather_from_sequence_parallel on a tensor that requires
-# grad, which raises during the forward itself on Gloo (F3), so forward and
-# gradient checks both fail today.
+# Before F3, every SP case raised in forward: gather_from_sequence_parallel
+# wrote in place into a fresh buffer while its input required grad.
 _SP_CASES = []
 for _S, _tag in ((6, "div"), (7, "nondiv")):
-    _SP_CASES.append((f"sp2-gather-S{_S}{_tag}", dict(case="gather", S=_S), ("F3",), ("F3",)))
+    _SP_CASES.append((f"sp2-gather-S{_S}{_tag}", dict(case="gather", S=_S), (), ()))
     for _fused in (False, True):
         _SP_CASES.append(
             (
                 f"sp2-roundtrip-{'fused' if _fused else 'unfused'}-S{_S}{_tag}",
                 dict(case="roundtrip", S=_S, fused=_fused),
-                ("F3",),
-                ("F3",),
+                (),
+                (),
             )
         )
+    # Same fused round trip with no harness-side TP-group sum (F21).
+    _SP_CASES.append(
+        (
+            f"sp2-roundtrip-fused-engine-sync-S{_S}{_tag}",
+            dict(case="roundtrip", S=_S, fused=True, engine_sync=True),
+            (),
+            (),
+        )
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -503,10 +562,21 @@ def _composite_worker(rank: int, ws: int, cfg: dict) -> list:
     torch.manual_seed(SEED + rank)
     model = _TinyMoEModel(H, Fd, E, K, topo)
     replicated = {n for n, _ in model.named_parameters() if not n.startswith("moe.experts.")}
-    with torch.no_grad():
-        for n, p in model.named_parameters():
-            if n in replicated:
-                dist.broadcast(p, src=0)
+    engine_errors = []
+    if cfg["engine_init"]:
+        # The engine must make replicated params identical across ranks (F14-init).
+        try:
+            from pkg.distributed.grad_sync import broadcast_replicated_params
+        except ImportError as exc:
+            engine_errors.append(("fwd", "engine broadcast_replicated_params", repr(exc)))
+        else:
+            broadcast_replicated_params(model, topo)
+    else:
+        # Harness stand-in for the init broadcast the engine lacked (F14).
+        with torch.no_grad():
+            for n, p in model.named_parameters():
+                if n in replicated:
+                    dist.broadcast(p, src=0)
 
     g = torch.Generator().manual_seed(SEED + 900 + rank)
     x = torch.randn(N, H, generator=g)
@@ -522,9 +592,11 @@ def _composite_worker(rank: int, ws: int, cfg: dict) -> list:
     for s in shards:
         all_experts.update(s["experts"])
     ref_experts = [[w.clone().requires_grad_(True) for w in all_experts[e]] for e in range(E)]
-    rp = {
-        n: _detached(p).requires_grad_(True) for n, p in model.named_parameters() if n in replicated
-    }
+    # Rank 0's copy of each replicated parameter is the reference value.
+    rank0 = _all_gather_obj(
+        {n: _detached(p) for n, p in model.named_parameters() if n in replicated}
+    )[0]
+    rp = {n: t.clone().requires_grad_(True) for n, t in rank0.items()}
 
     def dense_model(xx):
         h = torch.tanh(F.linear(xx, rp["inp.weight"], rp["inp.bias"]))
@@ -556,15 +628,29 @@ def _composite_worker(rank: int, ws: int, cfg: dict) -> list:
                 ref_after[f"moe.experts.{i}.{pname}.weight"] = t - LR * gt
 
     # ---- Distributed step ----
-    y = model(x)
-    checks = [compare("fwd", "output", y, y_ref)]
-    (y * cot).sum().backward()
-    # Stand-in for data-parallel gradient sync of replicated parameters: the
-    # EP ranks hold disjoint tokens, so replicated grads are summed across
-    # them. (The engine does not do this itself at dp=1; see F14.)
+    checks = [check(kind, name, False, err) for kind, name, err in engine_errors]
     for n, p in model.named_parameters():
-        if n in replicated and p.grad is not None:
-            dist.all_reduce(p.grad)
+        if n in replicated:
+            checks.append(compare("fwd", f"init: {n} equals rank 0's", p, rank0[n]))
+    y = model(x)
+    checks.append(compare("fwd", "output", y, y_ref))
+    (y * cot).sum().backward()
+    if cfg["engine_sync"]:
+        # The engine must sum replicated params' grads across the EP ranks,
+        # which hold disjoint tokens (F21).
+        try:
+            from pkg.distributed.grad_sync import sync_replicated_grads
+        except ImportError as exc:
+            for kind in ("grad", "step"):
+                checks.append(check(kind, "engine sync_replicated_grads", False, repr(exc)))
+        else:
+            sync_replicated_grads(model, topo)
+    else:
+        # Harness stand-in for the replicated-gradient sync the engine lacked
+        # (F21): EP ranks hold disjoint tokens, so sum replicated grads.
+        for n, p in model.named_parameters():
+            if n in replicated and p.grad is not None:
+                dist.all_reduce(p.grad)
     for n, p in model.named_parameters():
         checks.append(compare("grad", f"{n}.grad", p.grad, ref_grads[n]))
     opt = torch.optim.SGD(model.parameters(), lr=LR)
@@ -574,26 +660,63 @@ def _composite_worker(rank: int, ws: int, cfg: dict) -> list:
     return checks
 
 
-_COMPOSITE_CFG = {"E": 8}
+# (id, cfg, findings failing fwd, grad, step). "harness" keeps the test-side
+# stand-ins (rank-0 broadcast, summed replicated grads); the engine-* variants
+# switch them off and rely on the engine instead.
+_COMPOSITE_CASES = [
+    ("harness", dict(E=8, engine_init=False, engine_sync=False), (), (), ()),
+    ("engine-sync", dict(E=8, engine_init=False, engine_sync=True), (), (), ()),
+    (
+        "engine-init",
+        dict(E=8, engine_init=True, engine_sync=False),
+        (),
+        (),
+        (),
+    ),
+    (
+        "engine-all",
+        dict(E=8, engine_init=True, engine_sync=True),
+        (),
+        (),
+        (),
+    ),
+]
 
 
 @functools.lru_cache(maxsize=None)
-def _composite_result():
-    return run_multiprocess(_composite_worker, 2, _COMPOSITE_CFG)
+def _composite_result(variant: str = "harness"):
+    cfg = next(c for c in _COMPOSITE_CASES if c[0] == variant)[1]
+    return run_multiprocess(_composite_worker, 2, cfg)
 
 
 def test_composite_ep2_forward_matches_dense():
     _assert_kind(_composite_result(), "fwd")
 
 
-@pytest.mark.xfail(strict=True, reason=_FINDING_TEXT["F1"])
 def test_composite_ep2_gradients_match_dense():
     _assert_kind(_composite_result(), "grad")
 
 
-@pytest.mark.xfail(strict=True, reason=_FINDING_TEXT["F1"])
 def test_composite_ep2_sgd_step_matches_dense():
     _assert_kind(_composite_result(), "step")
+
+
+_ENGINE_CASES = [c for c in _COMPOSITE_CASES if c[0] != "harness"]
+
+
+@pytest.mark.parametrize("variant", _params(_ENGINE_CASES, 2))
+def test_composite_engine_forward_matches_dense(variant):
+    _assert_kind(_composite_result(variant), "fwd")
+
+
+@pytest.mark.parametrize("variant", _params(_ENGINE_CASES, 3))
+def test_composite_engine_gradients_match_dense(variant):
+    _assert_kind(_composite_result(variant), "grad")
+
+
+@pytest.mark.parametrize("variant", _params(_ENGINE_CASES, 4))
+def test_composite_engine_sgd_step_matches_dense(variant):
+    _assert_kind(_composite_result(variant), "step")
 
 
 if __name__ == "__main__":

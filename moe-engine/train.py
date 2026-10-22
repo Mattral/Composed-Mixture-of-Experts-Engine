@@ -51,6 +51,7 @@ from pkg.distributed import (
     apply_fsdp2,
     build_topology,
 )
+from pkg.distributed.grad_sync import broadcast_replicated_params, sync_replicated_grads
 from pkg.elastic.fault_monitor import (
     ElasticConfig as _ElasticRuntimeConfig,
 )
@@ -215,6 +216,9 @@ def main() -> None:
     # Model.
     # ----------------------------------------------------------------
     model = build_model(cfg, topology)
+    # Ranks may have initialised replicated params differently; make every
+    # replica identical before FSDP2 wrapping and optimizer creation (F14-init).
+    broadcast_replicated_params(model, topology)
     model = apply_fsdp2(
         model,
         topology,
@@ -337,6 +341,10 @@ def main() -> None:
             loss.backward()
             total_loss += float(ce_loss.detach().item())  # log CE only
 
+        # Sum replicated params' grads over the EP ranks (and SP-marked
+        # params over TP), which saw different tokens; FSDP2 already handled
+        # DP. Must precede clipping. Convention: pkg/distributed/grad_sync.py.
+        sync_replicated_grads(model, topology)
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
         optimizer.step()
 

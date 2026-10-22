@@ -182,29 +182,45 @@ def test_moe_layer_gradient_flows_to_correct_experts_only():
         (50, 16, 4, 4, 2),
         (13, 5, 2, 5, 3),  # ep_size == E: one expert per rank
         (100, 32, 1, 4, 4),  # top_k=1: no possible span-multiple-ranks case
+        # E % ep_size != 0 (F4): remainder experts go to the lowest EP ranks.
+        (24, 5, 2, 2, 5),
+        (40, 10, 2, 4, 6),
+        (30, 7, 3, 3, 7),
+        (16, 5, 1, 4, 8),
     ],
 )
-def test_send_counts_sum_equals_dispatch_item_count(N, E, K, ep_size, seed):
-    """send_counts.sum() must equal N*K always -- the invariant the
-    original per-token 'any slot in range' check violated whenever a
-    token's K experts spanned multiple EP ranks. This is pure arithmetic
-    on a random idx tensor, independent of the model or any dispatch
-    machinery, and independent of ep_size actually being reachable
-    (values are computed the same way DistributedMoELayer.forward() does,
-    inlined here so this test doesn't silently go stale if that logic ever
-    moves)."""
+def test_send_counts_match_expert_ownership(N, E, K, ep_size, seed):
+    """send_counts[r] must equal the number of dispatch items whose expert is
+    owned by EP rank r, per ParallelTopology.experts_on_this_rank -- the same
+    ownership that decides which experts each rank builds. So the counts sum
+    to N*K and every item goes to the rank that actually holds its expert.
+
+    Before F4, forward() assumed E // ep_size contiguous experts per rank, so
+    with E % ep_size != 0 the remainder experts were counted by no rank (the
+    split-size crash, or a deadlock when only some ranks hit it). This calls
+    the engine's own compute_send_counts rather than an inlined copy, so it
+    cannot drift from what forward() does."""
+    from pkg.distributed.mesh import ParallelTopology
+    from pkg.distributed.moe_layer import build_expert_rank_table, compute_send_counts
+
+    def topo(rank):
+        return ParallelTopology(
+            world_size=ep_size, rank=rank, dp_size=1, ep_size=ep_size, mesh=None
+        )
+
     torch.manual_seed(seed)
-    idx = torch.randint(0, E, (N, K))
-    experts_per_rank = E // ep_size
-    expert_ids_flat = idx.reshape(-1)
+    expert_ids_flat = torch.randint(0, E, (N, K)).reshape(-1)
+    send_counts = compute_send_counts(expert_ids_flat, build_expert_rank_table(topo(0), E), ep_size)
 
-    send_counts = torch.zeros(ep_size, dtype=torch.long)
-    for ep_r in range(ep_size):
-        lo = ep_r * experts_per_rank
-        hi = lo + experts_per_rank
-        send_counts[ep_r] = int(((expert_ids_flat >= lo) & (expert_ids_flat < hi)).sum().item())
-
-    assert int(send_counts.sum().item()) == N * K
+    assert send_counts.shape == (ep_size,)
+    assert int(send_counts.sum()) == N * K
+    for r in range(ep_size):
+        owned = torch.tensor(topo(r).experts_on_this_rank(E), dtype=torch.long)
+        expected = int(torch.isin(expert_ids_flat, owned).sum())
+        assert int(send_counts[r]) == expected, (
+            f"EP rank {r} owns {owned.tolist()}: send_counts says "
+            f"{int(send_counts[r])}, ownership says {expected}"
+        )
 
 
 # ===========================================================================

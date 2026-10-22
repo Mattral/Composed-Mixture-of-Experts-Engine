@@ -40,9 +40,10 @@ import math
 from typing import Optional
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 
+from pkg.distributed.comm_ops import copy_to_group, gather_along_dim, reduce_from_group
+from pkg.distributed.grad_sync import mark_tensor_parallel_shard
 from pkg.distributed.mesh import ParallelTopology, tp_process_group
 
 __all__ = [
@@ -121,6 +122,7 @@ class ColumnParallelLinear(nn.Module):
             )
         local_out = out_features // tp_size
         self.weight = nn.Parameter(torch.empty(local_out, in_features, device=device, dtype=dtype))
+        mark_tensor_parallel_shard(self.weight)  # distinct per TP rank: never broadcast
         self.bias: Optional[nn.Parameter] = (
             nn.Parameter(torch.zeros(out_features, device=device, dtype=dtype)) if bias else None
         )
@@ -134,10 +136,17 @@ class ColumnParallelLinear(nn.Module):
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        local_out = torch.nn.functional.linear(x, self.weight, bias=None)
-
         if self.tp_size == 1 or self.tp_group is None:
+            local_out = torch.nn.functional.linear(x, self.weight, bias=None)
             return local_out if self.bias is None else local_out + self.bias
+
+        # x is replicated across the TP group but each rank only multiplies
+        # it by its own weight shard, so each rank's dL/dx is a partial sum:
+        # copy_to_group all-reduces it in backward (Megatron's f; F2). Without
+        # it, every rank's x.grad held only its shard's contribution.
+        local_out = torch.nn.functional.linear(
+            copy_to_group(x, self.tp_group), self.weight, bias=None
+        )
 
         if not self.gather_output:
             if self.bias is not None:
@@ -154,29 +163,13 @@ class ColumnParallelLinear(nn.Module):
                 )
             return local_out
 
-        # dist.all_gather_into_tensor concatenates along dim 0 ONLY -- it
-        # treats its input as a flat per-rank buffer and places each rank's
-        # whole buffer at a flat offset in the output. local_out's sharded
-        # dimension is the LAST one (out_features), not dim 0, so gathering
-        # directly into a (*x.shape[:-1], out_features) buffer is wrong
-        # whenever x's leading dims don't happen to multiply out to
-        # out_features // tp_size -- the same root-cause bug ADR-007 found
-        # and fixed in gather_from_sequence_parallel, in a different
-        # dimension. See ADR-008. Move the sharded dimension to the front
-        # (where dim-0 concatenation is the semantics we actually want),
-        # gather there, then move it back.
-        local_out_t = local_out.movedim(-1, 0).contiguous()  # [local_out_features, ...]
-        gathered_t = torch.empty(
-            (self.out_features, *local_out_t.shape[1:]),
-            dtype=x.dtype,
-            device=x.device,
-        )
-        req = dist.all_gather_into_tensor(
-            gathered_t, local_out_t, group=self.tp_group, async_op=True
-        )
-        if req is not None:
-            req.wait()
-        gathered = gathered_t.movedim(0, -1).contiguous()  # [..., out_features]
+        # Gather the out_features shards along the LAST dim. ADR-008: a raw
+        # all_gather_into_tensor concatenates along dim 0 only, which needed
+        # a movedim workaround; it also wrote in place into a fresh buffer,
+        # which raises in grad mode on Gloo and has no autograd edge (F2).
+        # gather_along_dim concatenates along an explicit dim and its
+        # backward hands each rank its slice of the gradient.
+        gathered = gather_along_dim(local_out, -1, self.tp_group)  # [..., out_features]
 
         if self.bias is not None:
             gathered = gathered + self.bias
@@ -230,6 +223,7 @@ class RowParallelLinear(nn.Module):
             )
         local_in = in_features // tp_size
         self.weight = nn.Parameter(torch.empty(out_features, local_in, device=device, dtype=dtype))
+        mark_tensor_parallel_shard(self.weight)  # distinct per TP rank: never broadcast
         self.bias: Optional[nn.Parameter] = (
             nn.Parameter(torch.zeros(out_features, device=device, dtype=dtype)) if bias else None
         )
@@ -247,14 +241,10 @@ class RowParallelLinear(nn.Module):
         if self.tp_size == 1 or self.tp_group is None:
             return local_out if self.bias is None else local_out + self.bias
 
-        req = dist.all_reduce(
-            local_out,
-            op=dist.ReduceOp.SUM,
-            group=self.tp_group,
-            async_op=True,
-        )
-        if req is not None:
-            req.wait()
+        # Sum the per-rank partial products; backward is the identity, since
+        # the output is replicated (Megatron's g; F2). The previous in-place
+        # all_reduce only gave the right backward by accident.
+        local_out = reduce_from_group(local_out, self.tp_group)
 
         if self.bias is not None:
             local_out = local_out + self.bias
