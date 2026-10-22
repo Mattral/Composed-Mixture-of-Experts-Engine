@@ -15,6 +15,21 @@ Public API
     all_to_all(x, output_split_sizes, input_split_sizes, group)
         EP dispatch/combine. Backward: the reverse all-to-all with the split
         sizes swapped.
+    copy_to_group(x, group)      fwd identity          bwd all-reduce(sum)
+    reduce_from_group(x, group)  fwd all-reduce(sum)   bwd identity
+    gather_along_dim(x, dim, group)  fwd all-gather + cat on ``dim``
+                                     bwd keep this rank's chunk
+    split_along_dim(x, dim, group)   fwd keep this rank's chunk of ``dim``
+                                     bwd all-gather + cat on ``dim``
+
+The last four are Megatron-LM's conjugate pairs. Gradient conventions: a
+tensor replicated across the group carries the full gradient on every rank;
+a sharded tensor carries its shard of it. So ``copy_to_group`` (replicated
+input feeding per-rank computation) sums the per-rank partial gradients, and
+``gather_along_dim`` (sharded input, replicated output) hands each rank its
+slice. Gathering by concatenating along an explicit ``dim`` also removes the
+``all_gather_into_tensor`` dim-0-only layout pitfall (ADR-007/ADR-008)
+without any transpose.
 
 Split sizes are plain Python lists, computed once by the caller and saved on
 ``ctx``, so backward needs no extra synchronisation to recover them.
@@ -30,7 +45,13 @@ from typing import List, Optional
 import torch
 import torch.distributed as dist
 
-__all__ = ["all_to_all"]
+__all__ = [
+    "all_to_all",
+    "copy_to_group",
+    "reduce_from_group",
+    "gather_along_dim",
+    "split_along_dim",
+]
 
 
 def _all_to_all(
@@ -88,3 +109,122 @@ def all_to_all(
     if not dist.is_initialized():
         return x
     return _AllToAll.apply(x, list(output_split_sizes), list(input_split_sizes), group)
+
+
+# ===========================================================================
+# Tensor / sequence parallel conjugate pairs
+# ===========================================================================
+
+
+def _all_reduce(x: torch.Tensor, group: "Optional[dist.ProcessGroup]") -> torch.Tensor:
+    out = x.contiguous().clone()
+    dist.all_reduce(out, op=dist.ReduceOp.SUM, group=group)
+    return out
+
+
+def _gather(x: torch.Tensor, dim: int, group: "Optional[dist.ProcessGroup]") -> torch.Tensor:
+    x = x.contiguous()
+    parts = [torch.empty_like(x) for _ in range(dist.get_world_size(group))]
+    dist.all_gather(parts, x, group=group)
+    return torch.cat(parts, dim=dim)
+
+
+def _split(x: torch.Tensor, dim: int, group: "Optional[dist.ProcessGroup]") -> torch.Tensor:
+    world = dist.get_world_size(group)
+    if x.shape[dim] % world != 0:
+        raise ValueError(
+            f"split_along_dim: size {x.shape[dim]} of dim {dim} is not divisible "
+            f"by the group size {world}"
+        )
+    return x.chunk(world, dim=dim)[dist.get_rank(group)].contiguous()
+
+
+class _CopyToGroup(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, group):
+        ctx.group = group
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        return _all_reduce(grad_out, ctx.group), None
+
+
+class _ReduceFromGroup(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, group):
+        return _all_reduce(x, group)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        return grad_out, None
+
+
+class _GatherAlongDim(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, dim, group):
+        ctx.dim, ctx.group = dim, group
+        return _gather(x, dim, group)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        return _split(grad_out, ctx.dim, ctx.group), None, None
+
+
+class _SplitAlongDim(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, dim, group):
+        ctx.dim, ctx.group = dim, group
+        return _split(x, dim, group)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        return _gather(grad_out, ctx.dim, ctx.group), None, None
+
+
+def copy_to_group(x: torch.Tensor, group: "Optional[dist.ProcessGroup]" = None) -> torch.Tensor:
+    """Identity forward; all-reduce of the gradient in backward.
+
+    Use where a replicated tensor enters per-rank computation (Megatron's
+    ``f`` operator), e.g. the input of a column-parallel linear: each rank's
+    gradient w.r.t. it is only its shard's partial contribution.
+    """
+    if not dist.is_initialized():
+        return x
+    return _CopyToGroup.apply(x, group)
+
+
+def reduce_from_group(x: torch.Tensor, group: "Optional[dist.ProcessGroup]" = None) -> torch.Tensor:
+    """All-reduce (sum) forward; identity backward (Megatron's ``g``).
+
+    Use to sum per-rank partial results into a replicated tensor, e.g. the
+    output of a row-parallel linear.
+    """
+    if not dist.is_initialized():
+        return x
+    return _ReduceFromGroup.apply(x, group)
+
+
+def gather_along_dim(
+    x: torch.Tensor, dim: int, group: "Optional[dist.ProcessGroup]" = None
+) -> torch.Tensor:
+    """All-gather equal-sized shards and concatenate them along ``dim``.
+
+    Backward keeps this rank's slice of the (replicated) gradient.
+    """
+    if not dist.is_initialized():
+        return x
+    return _GatherAlongDim.apply(x, dim, group)
+
+
+def split_along_dim(
+    x: torch.Tensor, dim: int, group: "Optional[dist.ProcessGroup]" = None
+) -> torch.Tensor:
+    """Keep this rank's equal-sized chunk of a replicated tensor along ``dim``.
+
+    Backward all-gathers the per-rank gradients into the full gradient. The
+    size of ``dim`` must be divisible by the group size.
+    """
+    if not dist.is_initialized():
+        return x
+    return _SplitAlongDim.apply(x, dim, group)

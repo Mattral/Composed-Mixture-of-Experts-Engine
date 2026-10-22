@@ -240,7 +240,6 @@ def _ep_result(cid: str):
 
 
 _FINDING_TEXT = {
-    "F2": "F2: TP collectives lack autograd Functions (gather raises / input grad wrong)",
     "F3": "F3: SP gather/scatter lack autograd Functions",
 }
 
@@ -388,12 +387,12 @@ def _tp_worker(rank: int, ws: int, cfg: dict) -> list:
 
 
 _TP_CASES = [
-    ("tp2-col_gather-nobias", dict(case="col_gather", bias=False), ("F2",), ("F2",)),
-    ("tp2-col_gather-bias", dict(case="col_gather", bias=True), ("F2",), ("F2",)),
+    ("tp2-col_gather-nobias", dict(case="col_gather", bias=False), (), ()),
+    ("tp2-col_gather-bias", dict(case="col_gather", bias=True), (), ()),
     # ColumnParallelLinear(gather_output=False, bias=True) raises
     # NotImplementedError by design (ADR-008), so only the Row bias varies.
-    ("tp2-mlp-nobias", dict(case="mlp", bias=False), (), ("F2",)),
-    ("tp2-mlp-rowbias", dict(case="mlp", bias=True), (), ("F2",)),
+    ("tp2-mlp-nobias", dict(case="mlp", bias=False), (), ()),
+    ("tp2-mlp-rowbias", dict(case="mlp", bias=True), (), ()),
 ]
 
 
