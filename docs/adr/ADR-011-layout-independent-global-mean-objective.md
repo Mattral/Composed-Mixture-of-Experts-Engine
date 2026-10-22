@@ -118,14 +118,16 @@ test exposed were fixed:
 ## Consequences
 
 * The same global batch gives the same gradients and the same post-step
-  parameters under single, dp2, ep2, sp2 (tp2), dp2×ep2 and ep2×sp2, each
-  matching a dense global-mean reference at fp32 `atol=1e-5, rtol=1e-4`.
-  CPU + Gloo only (Windows 11, WSL Ubuntu 24.04, GitHub ubuntu runners).
-* dp2×sp2 still fails, on `sp_w` only (strict xfail **F26**). FSDP2
-  replaces every parameter with a new DTensor parameter, so the
-  `mark_sequence_parallel` attribute is lost. At dp > 1 with tp > 1,
-  `sync_replicated_grads` then never sums an SP-region weight over TP.
-  F22 had been hiding this.
+  parameters under single, dp2, ep2, sp2 (tp2), dp2×ep2, dp2×sp2 and
+  ep2×sp2, each matching a dense global-mean reference at fp32
+  `atol=1e-5, rtol=1e-4`. CPU + Gloo only (Windows 11, WSL Ubuntu 24.04,
+  GitHub ubuntu runners).
+* dp2×sp2 passed only after a third fix (**F26**), which F22 had been
+  hiding. FSDP2 replaces every parameter with a new DTensor parameter, so
+  the `mark_sequence_parallel` attribute was lost. At dp > 1 with tp > 1,
+  `sync_replicated_grads` then never summed an SP-region weight over TP.
+  `apply_fsdp2` now records `grad_sync`'s marks before wrapping and
+  restores them on the new parameters.
 * FSDP2 at dp = 2 is now exercised on CPU/Gloo (layouts dp2, dp2×ep2 and
   dp2×sp2, plus unit tests). **Not verified:** FSDP2 on NCCL or GPU,
   dp > 2, multi-node.

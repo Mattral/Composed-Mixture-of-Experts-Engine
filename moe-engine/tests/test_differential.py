@@ -248,13 +248,7 @@ def _ep_result(cid: str):
 
 # Finding ID -> xfail reason, for cases that currently fail. A new failing
 # case must add its finding here first.
-_FINDING_TEXT: dict = {
-    "F26": (
-        "F26: FSDP2 replaces parameters with new DTensor parameters, dropping the "
-        "mark_sequence_parallel attribute, so at dp > 1 an SP-region replicated "
-        "weight's gradient is never summed over TP"
-    ),
-}
+_FINDING_TEXT: dict = {}
 
 
 def _params(cases, which):
@@ -896,7 +890,7 @@ _LAYOUT_CASES = [
     ("ep2", dict(dp=1, ep=2, tp=1), (), (), ()),
     ("sp2", dict(dp=1, ep=1, tp=2), (), (), ()),
     ("dp2-ep2", dict(dp=2, ep=2, tp=1), (), (), ()),
-    ("dp2-sp2", dict(dp=2, ep=1, tp=2), (), ("F26",), ("F26",)),
+    ("dp2-sp2", dict(dp=2, ep=1, tp=2), (), (), ()),
     ("ep2-sp2", dict(dp=1, ep=2, tp=2), (), (), ()),
 ]
 

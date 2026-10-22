@@ -339,13 +339,10 @@ def _marks_worker(rank: int, ws: int, cfg: dict) -> list:
     ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="F26: FSDP2 replaces parameters, dropping grad_sync's parameter marks",
-)
 def test_apply_fsdp2_keeps_grad_sync_marks():
     """sync_replicated_grads finds sequence-parallel params by their mark,
-    and runs after FSDP2 has wrapped the model: the marks must survive."""
+    and runs after FSDP2 has wrapped the model: the marks must survive
+    (F26: FSDP2's new DTensor parameters dropped them)."""
     _assert_ok(run_multiprocess(_marks_worker, 2, {}), "marks")
 
 
