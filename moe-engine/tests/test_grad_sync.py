@@ -172,7 +172,8 @@ def test_broadcast_makes_replicas_identical_and_keeps_shards(dp, ep, tp, ws):
 
 
 # ===========================================================================
-# Global-mean objective (F22): DP SUM via FSDP2, global token count
+# FSDP2 at dp > 1 (F24, F25) and the global-mean objective (F22): DP SUM via
+# FSDP2, global token count
 # ===========================================================================
 
 _F22 = "F22: the training objective is not a mean over the global batch"
@@ -194,12 +195,6 @@ def _fsdp_fp32_worker(rank: int, ws: int, cfg: dict) -> list:
         compare("fsdp", "output", out, ref),
         check("fsdp", "every parameter has a gradient", has_grads, ""),
     ]
-
-
-_F25 = (
-    "F25: under FSDP2 at dp > 1, DP ranks whose tokens skip different experts "
-    "reduce-scatter different parameter sets (hang, or silently mixed expert grads)"
-)
 
 
 def _fsdp_moe_worker(rank: int, ws: int, cfg: dict) -> list:
@@ -254,9 +249,12 @@ def _fsdp_moe_worker(rank: int, ws: int, cfg: dict) -> list:
     return checks
 
 
-@pytest.mark.xfail(strict=True, reason=_F25)
 def test_fsdp2_moe_grads_correct_when_ranks_use_different_experts():
-    """Each expert's DP-reduced gradient must come from that expert alone."""
+    """Each expert's DP-reduced gradient must come from that expert alone
+    (F25: FSDP2 skipped unused parameters, so DP ranks that left different
+    experts unused reduce-scattered different parameter sets -- a hang, or,
+    with equal-sized experts as here, one expert's gradient mixed into
+    another's)."""
     _assert_ok(run_multiprocess(_fsdp_moe_worker, 2, {}), "fsdp")
 
 
@@ -267,12 +265,17 @@ def test_apply_fsdp2_fp32_trains_at_dp2():
 
 
 def test_fsdp2_force_sum_api_present():
-    """The DP SUM that the global-mean convention needs relies on two FSDP2
-    methods whose availability depends on the torch version (ADR-011).
-    Pin the requirement: fail here, not in the middle of a training run."""
+    """apply_fsdp2 relies on FSDP2 methods whose availability depends on the
+    torch version (ADR-011): the DP SUM of the global-mean convention (F22)
+    and the reduction of unused expert parameters (F25). Pin the
+    requirement: fail here, not in the middle of a training run."""
     from torch.distributed.fsdp import FSDPModule
 
-    for name in ("set_force_sum_reduction_for_comms", "set_gradient_divide_factor"):
+    for name in (
+        "set_force_sum_reduction_for_comms",
+        "set_gradient_divide_factor",
+        "set_reduce_scatter_unused_params",
+    ):
         assert hasattr(FSDPModule, name), f"torch {torch.__version__}: FSDPModule.{name} missing"
 
 
