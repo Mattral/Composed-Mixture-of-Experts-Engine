@@ -239,9 +239,9 @@ def _ep_result(cid: str):
     return run_multiprocess(_ep_worker, ws, cfg)
 
 
-_FINDING_TEXT = {
-    "F3": "F3: SP gather/scatter lack autograd Functions",
-}
+# Finding ID -> xfail reason, for cases that currently fail. Empty since the
+# F1-F4 fixes; a new failing case must add its finding here first.
+_FINDING_TEXT: dict = {}
 
 
 def _params(cases, which):
@@ -479,19 +479,18 @@ def _sp_worker(rank: int, ws: int, cfg: dict) -> list:
     return checks
 
 
-# Every SP case calls gather_from_sequence_parallel on a tensor that requires
-# grad, which raises during the forward itself on Gloo (F3), so forward and
-# gradient checks both fail today.
+# Before F3, every SP case raised in forward: gather_from_sequence_parallel
+# wrote in place into a fresh buffer while its input required grad.
 _SP_CASES = []
 for _S, _tag in ((6, "div"), (7, "nondiv")):
-    _SP_CASES.append((f"sp2-gather-S{_S}{_tag}", dict(case="gather", S=_S), ("F3",), ("F3",)))
+    _SP_CASES.append((f"sp2-gather-S{_S}{_tag}", dict(case="gather", S=_S), (), ()))
     for _fused in (False, True):
         _SP_CASES.append(
             (
                 f"sp2-roundtrip-{'fused' if _fused else 'unfused'}-S{_S}{_tag}",
                 dict(case="roundtrip", S=_S, fused=_fused),
-                ("F3",),
-                ("F3",),
+                (),
+                (),
             )
         )
 
