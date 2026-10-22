@@ -26,13 +26,16 @@ NCCL, or across multiple hosts unless it says so.
   different experts reduce-scattered different parameter sets: a hang, or one
   expert's gradient silently summed into another's. Unused parameters now
   reduce zeros.
+- **F26 — parameter marks under FSDP2.** FSDP2 replaces parameters with new
+  DTensor parameters, which dropped `mark_sequence_parallel`, so at dp > 1
+  with tp > 1 SP-region weights were never summed over TP. `apply_fsdp2` now
+  restores the marks.
 
 ### Added
 - `tests/test_differential.py::test_layout_*`: one global batch with unequal
   loss masks and 2 micro-batches, run under single, dp2, ep2, sp2, dp2×ep2,
   dp2×sp2 and ep2×sp2 and compared against a dense global-mean reference
-  (CPU/Gloo; FSDP2 at dp = 2 on CPU/Gloo only). dp2×sp2's gradients wait on
-  F26 (strict xfail).
+  (CPU/Gloo; FSDP2 at dp = 2 on CPU/Gloo only).
 
 ## Unreleased — M1: correct gradients under EP/TP/SP (October 2026)
 

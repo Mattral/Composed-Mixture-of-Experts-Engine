@@ -97,7 +97,20 @@ def apply_fsdp2(
     )
 
     # Import here to avoid circular import at module level.
+    from pkg.distributed.grad_sync import SEQUENCE_PARALLEL_ATTR, TENSOR_PARALLEL_SHARD_ATTR
     from pkg.distributed.moe_layer import DistributedMoELayer
+
+    # fully_shard replaces every parameter with a new DTensor parameter, which
+    # drops grad_sync's marks; without them sync_replicated_grads never sums an
+    # SP-region weight over TP (F26). Record them per (module, name) and put
+    # them back on the new parameters after wrapping.
+    marks = [
+        (module, pname, attr)
+        for module in model.modules()
+        for pname, p in module.named_parameters(recurse=False)
+        for attr in (SEQUENCE_PARALLEL_ATTR, TENSOR_PARALLEL_SHARD_ATTR)
+        if getattr(p, attr, False)
+    ]
 
     for name, module in model.named_modules():
         if isinstance(module, DistributedMoELayer):
@@ -125,4 +138,6 @@ def apply_fsdp2(
             if isinstance(module, FSDPModule):
                 module.set_force_sum_reduction_for_comms(True)
                 module.set_gradient_divide_factor(1.0)
+    for module, pname, attr in marks:
+        setattr(getattr(module, pname), attr, True)
     return model
