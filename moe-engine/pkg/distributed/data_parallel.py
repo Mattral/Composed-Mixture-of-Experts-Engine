@@ -28,13 +28,23 @@ __all__ = ["apply_fsdp2"]
 # Optional FSDP2 import — gracefully degrade to identity on older PyTorch.
 # ---------------------------------------------------------------------------
 try:
-    from torch.distributed._composable.fsdp import MixedPrecisionPolicy, fully_shard
+    from torch.distributed._composable.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 
     _HAS_FSDP2 = True
 except Exception:  # pragma: no cover
     fully_shard = None  # type: ignore
     MixedPrecisionPolicy = None  # type: ignore
+    FSDPModule = None  # type: ignore
     _HAS_FSDP2 = False
+
+# FSDP2 methods apply_fsdp2 relies on: the DP SUM of the global-mean objective
+# (F22) and the reduction of unused expert parameters (F25). They depend on
+# the torch version; verified with torch 2.14.1 (ADR-011).
+_REQUIRED_FSDP2_METHODS = (
+    "set_force_sum_reduction_for_comms",
+    "set_gradient_divide_factor",
+    "set_reduce_scatter_unused_params",
+)
 
 
 def apply_fsdp2(
@@ -70,6 +80,12 @@ def apply_fsdp2(
     #   3. A DeviceMesh is available (needed for the "dp" sub-mesh).
     if not _HAS_FSDP2 or topology.dp_size == 1 or topology.mesh is None:
         return model
+    missing = [m for m in _REQUIRED_FSDP2_METHODS if not hasattr(FSDPModule, m)]
+    if missing:
+        raise RuntimeError(
+            f"apply_fsdp2: FSDP2 in torch {torch.__version__} lacks {missing}, which the "
+            "DP gradient reduction relies on (ADR-011). Use the pinned torch version."
+        )
 
     dp_mesh = topology.mesh["dp"] if "dp" in topology.mesh.mesh_dim_names else topology.mesh
     # fully_shard needs a policy object even without mixed precision: an
@@ -100,4 +116,13 @@ def apply_fsdp2(
         # ranks: a hang, or (experts being equal-sized) one expert's gradient
         # summed into another's. Reduce zeros for unused parameters (F25).
         model.set_reduce_scatter_unused_params(True)
+        # SUM over DP, not FSDP2's default mean: the objective is the mean over
+        # the global batch, divided once by the global token count in
+        # grad_sync.finalize_grads (ADR-011, F22). Per FSDP module, since the
+        # setters do not recurse. Without force-sum, a divide factor of 1 uses
+        # ReduceOp.PREMUL_SUM, which Gloo rejects.
+        for module in model.modules():
+            if isinstance(module, FSDPModule):
+                module.set_force_sum_reduction_for_comms(True)
+                module.set_gradient_divide_factor(1.0)
     return model
