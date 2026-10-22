@@ -17,6 +17,9 @@ New coverage:
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -267,6 +270,51 @@ def test_harness_no_signal_handler_in_thread(tmp_path: Path):
     t.start()
     t.join()
     assert not errors, f"install_signal_handlers raised in thread: {errors}"
+
+
+# ---------------------------------------------------------------------------
+# F20: no process-wide Gloo network-interface default
+# ---------------------------------------------------------------------------
+
+
+def test_import_does_not_set_gloo_socket_ifname():
+    """Importing fault_monitor must not pin Gloo to a network interface (F20).
+
+    The module used to run ``os.environ.setdefault("GLOO_SOCKET_IFNAME",
+    "lo")`` at import time, so every Gloo process group created later in the
+    process -- and in every process it spawned, which inherit the
+    environment -- bound to an interface named ``lo``. That interface does
+    not exist on Windows or macOS (Gloo init fails), and on a multi-host
+    Linux job it confines Gloo to loopback. Checked in a fresh interpreter,
+    since this test process has already imported the module.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "GLOO_SOCKET_IFNAME"}
+    code = (
+        "import os, pkg.elastic.fault_monitor; "
+        "print('GLOO_SOCKET_IFNAME=' + repr(os.environ.get('GLOO_SOCKET_IFNAME')))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    assert "GLOO_SOCKET_IFNAME=None" in out.stdout.splitlines()
+
+
+def test_harness_does_not_set_gloo_socket_ifname(tmp_path: Path, monkeypatch):
+    """Constructing ElasticTrainerHarness must not set GLOO_SOCKET_IFNAME (F20)."""
+    monkeypatch.delenv("GLOO_SOCKET_IFNAME", raising=False)
+    cfg = ElasticConfig(local_ckpt_dir=str(tmp_path), remote_uri=None, min_nodes=1)
+    topo = build_topology(dp_size=1, ep_size=1, device_type="cpu")
+    harness = ElasticTrainerHarness(cfg, topo)
+    try:
+        assert os.environ.get("GLOO_SOCKET_IFNAME") is None
+    finally:
+        harness.shutdown()
 
 
 if __name__ == "__main__":

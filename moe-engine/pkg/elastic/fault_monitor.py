@@ -41,11 +41,16 @@ import torch.distributed as dist
 
 from pkg.distributed.parallel_mesh import ParallelTopology, build_topology
 
-# Ensure sensible defaults for local/test runs: prefer loopback for Gloo
-# and enable NCCL async watchdogs. Setting these at module import guarantees
+# Enable NCCL async watchdogs. Setting these at module import guarantees
 # worker processes that simply `from pkg.elastic.fault_monitor import ...`
 # inherit the same robust defaults used by the harness.
-os.environ.setdefault("GLOO_SOCKET_IFNAME", "lo")
+#
+# GLOO_SOCKET_IFNAME is deliberately NOT defaulted here (F20). A default of
+# "lo" pinned every Gloo process group created after this import -- and in
+# every process spawned from it -- to an interface that does not exist on
+# Windows/macOS and that confines Gloo to loopback on multi-host Linux.
+# Single-host test runs that want loopback set it explicitly (CI jobs,
+# tests/test_chaos.py, Makefile chaos targets).
 os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
 os.environ.setdefault("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC", "30")
 os.environ.setdefault("TORCH_NCCL_TRACE_BUFFER_SIZE", "1048576")
@@ -661,9 +666,8 @@ class ElasticTrainerHarness:
         os.environ.setdefault("TORCH_NCCL_ASYNC_ERROR_HANDLING", "1")
         os.environ.setdefault("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC", "30")
         os.environ.setdefault("TORCH_NCCL_TRACE_BUFFER_SIZE", "1048576")
-        # Prefer loopback for local Gloo runs to avoid interface bind/connect
-        # races in containerized test environments.
-        os.environ.setdefault("GLOO_SOCKET_IFNAME", "lo")
+        # No GLOO_SOCKET_IFNAME default here either; see the module-level
+        # note (F20).
 
         self.cfg = cfg
         self.topology = topology

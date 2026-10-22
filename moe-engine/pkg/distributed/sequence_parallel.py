@@ -73,6 +73,7 @@ from typing import Optional, Tuple
 import torch
 import torch.distributed as dist
 
+from pkg.distributed.comm_ops import gather_along_dim, split_along_dim
 from pkg.distributed.mesh import ParallelTopology, tp_process_group
 
 __all__ = [
@@ -169,8 +170,11 @@ def scatter_to_sequence_parallel(
         pad = x.new_zeros(B, pad_amount, H)
         x = torch.cat([x, pad], dim=1)
 
-    tp_rank = topology.tp_rank
-    shard = x[:, tp_rank * chunk : (tp_rank + 1) * chunk, :].contiguous()
+    # Keep this rank's chunk of the sequence dim. split_along_dim has no
+    # collective in forward; its backward all-gathers the per-rank gradients
+    # so the replicated input x gets the full gradient on every rank (F3).
+    # A plain slice gave each rank only its own chunk's gradient.
+    shard = split_along_dim(x, 1, tp_process_group(topology))
 
     if next_weight is None:
         return shard
@@ -230,23 +234,14 @@ def gather_from_sequence_parallel(
     B, S_local, H = x.shape
     padded_total = S_local * topology.tp_size
 
-    # dist.all_gather_into_tensor concatenates along dim 0 ONLY -- it treats
-    # its input as a flat per-rank buffer and places rank r's entire buffer
-    # at flat offset r * input.numel() in the output. That means an output
-    # tensor shaped (B, S_local*tp_size, H) is only correct when B == 1; for
-    # B > 1 it corrupts data across the batch dimension (each rank's whole
-    # (B, S_local, H) block lands contiguously rather than being interleaved
-    # per-batch the way (B, S_local*tp_size, H) requires). Move the sequence
-    # dimension to the front -- where dim-0 concatenation is actually the
-    # semantics we want -- gather there, then move it back. See ADR-007.
-    x_t = x.transpose(0, 1).contiguous()  # [S_local, B, H]
-    gathered_t = torch.empty(
-        (padded_total, B, H),
-        dtype=x.dtype,
-        device=x.device,
-    )
-    dist.all_gather_into_tensor(gathered_t, x_t, group=pg)
-    gathered = gathered_t.transpose(0, 1).contiguous()  # [B, padded_total, H]
+    # Gather the shards along the sequence dim (dim 1). ADR-007: a raw
+    # all_gather_into_tensor concatenates along dim 0 only, which needed a
+    # transpose workaround to keep B > 1 batches from being corrupted; it
+    # also wrote in place into a fresh buffer, which raises in grad mode on
+    # Gloo and has no autograd edge (F3). gather_along_dim concatenates
+    # along an explicit dim, and its backward hands each rank its slice of
+    # the (replicated) gradient.
+    gathered = gather_along_dim(x, 1, pg)  # [B, padded_total, H]
 
     if orig_seq_len is None:
         return gathered

@@ -113,6 +113,11 @@ class MockTopology:
     def experts_on_this_rank(self, total_experts: int) -> List[int]:
         return list(range(total_experts))
 
+    def experts_on_ep_rank(self, total_experts: int, ep_rank: int) -> List[int]:
+        # Consistent with experts_on_this_rank: the single mocked process
+        # (ep_rank 0) owns every expert.
+        return list(range(total_experts)) if ep_rank == self.ep_rank else []
+
     def validate_world_size(self) -> None:
         pass
 

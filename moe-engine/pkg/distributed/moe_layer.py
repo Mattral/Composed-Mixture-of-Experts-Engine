@@ -155,7 +155,50 @@ def compute_capacity_drop_mask(
     return drop_mask
 
 
-__all__ = ["DistributedMoELayer"]
+def build_expert_rank_table(topology: ParallelTopology, num_experts: int) -> torch.Tensor:
+    """Return ``table`` with ``table[e]`` = the EP rank that owns expert ``e``.
+
+    Derived from :meth:`ParallelTopology.experts_on_ep_rank`, the same
+    ownership rule that decides which experts each rank builds, so dispatch
+    can never send a token to a rank that does not hold its expert (F4).
+
+    Raises if any expert is unowned or owned twice, or if ownership is not
+    non-decreasing in expert id. ``forward()`` relies on the last property:
+    sorting dispatch items by expert id must also group them by destination
+    rank, in rank order, for ``all_to_all_single``'s contiguous splits.
+    """
+    table = torch.full((num_experts,), -1, dtype=torch.long)
+    for r in range(topology.ep_size):
+        for e in topology.experts_on_ep_rank(num_experts, r):
+            if table[e] != -1:
+                raise ValueError(f"expert {e} is owned by EP ranks {int(table[e])} and {r}")
+            table[e] = r
+    if (table < 0).any():
+        missing = (table < 0).nonzero().flatten().tolist()
+        raise ValueError(f"experts {missing} are owned by no EP rank")
+    if num_experts > 1 and (table[1:] < table[:-1]).any():
+        raise ValueError(
+            "expert ownership must be non-decreasing in expert id so that sorting "
+            f"by expert id groups dispatch items by destination rank; got {table.tolist()}"
+        )
+    return table
+
+
+def compute_send_counts(
+    expert_ids_flat: torch.Tensor, expert_rank_table: torch.Tensor, ep_size: int
+) -> torch.Tensor:
+    """Number of dispatch items bound for each EP rank.
+
+    ``send_counts[r]`` counts the items whose expert ``expert_rank_table``
+    assigns to rank ``r``; the counts always sum to ``expert_ids_flat.numel()``.
+    Replaces the old ``E // ep_size`` contiguous-range arithmetic, which left
+    the remainder experts uncounted whenever ``E % ep_size != 0`` (F4).
+    """
+    owner = expert_rank_table.to(expert_ids_flat.device)[expert_ids_flat.long()]
+    return torch.bincount(owner, minlength=ep_size)
+
+
+__all__ = ["DistributedMoELayer", "build_expert_rank_table", "compute_send_counts"]
 
 
 # ===========================================================================
@@ -261,6 +304,13 @@ class DistributedMoELayer(nn.Module):
         self.capacity_dropping = capacity_dropping
 
         self.local_expert_ids: List[int] = topology.experts_on_this_rank(num_experts)
+        # expert id -> owning EP rank. Non-persistent: derived from the
+        # topology, so it follows .to(device) but is not checkpointed.
+        self.register_buffer(
+            "_expert_rank_table",
+            build_expert_rank_table(topology, num_experts).to(topology.device),
+            persistent=False,
+        )
         self.experts = nn.ModuleList(
             [_SwiGLUExpert(hidden_dim, ffn_dim, topology, dtype) for _ in self.local_expert_ids]
         )
@@ -335,25 +385,23 @@ class DistributedMoELayer(nn.Module):
         # paired with expert_ids_flat[i*top_k + k] = idx[i, k].
 
         # ---- Build per-EP-rank send counts (per dispatch ITEM, not per
-        #      token) ----
-        experts_per_rank = self.num_experts // self.topology.ep_size
-        send_counts = torch.zeros(self.topology.ep_size, dtype=torch.long, device=flat.device)
-        for ep_r in range(self.topology.ep_size):
-            lo = ep_r * experts_per_rank
-            hi = lo + experts_per_rank
-            send_counts[ep_r] = int(((expert_ids_flat >= lo) & (expert_ids_flat < hi)).sum().item())
+        #      token) from the same ownership table that decided which
+        #      experts each rank built (F4). ----
+        send_counts = compute_send_counts(
+            expert_ids_flat, self._expert_rank_table, self.topology.ep_size
+        )
         # send_counts.sum() == N * top_k always, by construction: every
         # dispatch item has exactly one expert, hence contributes to exactly
         # one rank's count. (The previous per-token "any slot in range"
         # check double-counted tokens whose top_k experts spanned multiple
-        # ranks, so send_counts.sum() could exceed N*top_k -- the exact
-        # mismatch behind the "Split sizes doesn't match total dim 0 size"
-        # failure in test_distributed_invariants.py.)
+        # ranks, and the later E // ep_size range arithmetic counted the
+        # remainder experts nowhere when E % ep_size != 0 -- both surfaced
+        # as "Split sizes doesn't match total dim 0 size".)
 
         # ---- Sort dispatch items by target expert id for contiguous
-        #      per-rank blocks (contiguous experts share an EP rank, so
-        #      sorting by global expert id also groups by destination rank)
-        #      ----
+        #      per-rank blocks (build_expert_rank_table guarantees ownership
+        #      is non-decreasing in expert id, so sorting by global expert id
+        #      also groups by destination rank) ----
         sort_order = expert_ids_flat.argsort(stable=True)  # [N*top_k]
         tokens_sorted = tokens_expanded[sort_order]
         expert_ids_sorted = expert_ids_flat[sort_order]
@@ -415,9 +463,10 @@ class DistributedMoELayer(nn.Module):
     def _expert_to_rank(self, expert_ids: torch.Tensor) -> torch.Tensor:
         """Map a tensor of expert indices to their owning EP rank.
 
-        Uses the same round-robin remainder assignment as
-        :meth:`~pkg.distributed.mesh.ParallelTopology.experts_on_this_rank`
-        so the mapping is guaranteed consistent across all callers.
+        Reads the table built by :func:`build_expert_rank_table` from
+        :meth:`~pkg.distributed.mesh.ParallelTopology.experts_on_ep_rank`,
+        so it always agrees with which experts each rank actually holds and
+        with the ``send_counts`` used for dispatch.
 
         Parameters
         ----------
@@ -425,18 +474,7 @@ class DistributedMoELayer(nn.Module):
 
         Returns
         -------
-        LongTensor  ``[...]``  — EP rank index for each expert id.
+        LongTensor  ``[...]``  — EP rank index for each expert id, on
+        ``expert_ids``'s device.
         """
-        ep_size = self.topology.ep_size
-        E = self.num_experts
-        per_rank = E // ep_size
-        rem = E % ep_size
-
-        lookup = torch.zeros(E, dtype=torch.long)
-        idx = 0
-        for r in range(ep_size):
-            count = per_rank + (1 if r < rem else 0)
-            lookup[idx : idx + count] = r
-            idx += count
-
-        return lookup[expert_ids.long()]
+        return self._expert_rank_table.to(expert_ids.device)[expert_ids.long()]
