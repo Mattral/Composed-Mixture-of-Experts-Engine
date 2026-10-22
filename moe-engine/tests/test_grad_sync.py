@@ -176,10 +176,6 @@ def test_broadcast_makes_replicas_identical_and_keeps_shards(dp, ep, tp, ws):
 # ===========================================================================
 
 _F22 = "F22: the training objective is not a mean over the global batch"
-_F24 = (
-    "F24: apply_fsdp2 passes mp_policy=None to fully_shard when mixed precision "
-    "is off, so FSDP2 raises at the first forward"
-)
 
 
 def _fsdp_fp32_worker(rank: int, ws: int, cfg: dict) -> list:
@@ -200,9 +196,73 @@ def _fsdp_fp32_worker(rank: int, ws: int, cfg: dict) -> list:
     ]
 
 
-@pytest.mark.xfail(strict=True, reason=_F24)
+_F25 = (
+    "F25: under FSDP2 at dp > 1, DP ranks whose tokens skip different experts "
+    "reduce-scatter different parameter sets (hang, or silently mixed expert grads)"
+)
+
+
+def _fsdp_moe_worker(rank: int, ws: int, cfg: dict) -> list:
+    """dp=2, E=2, top-1: rank 0's tokens all pick expert 0 and rank 1's all
+    pick expert 1, so each rank leaves a different expert unused."""
+    from pkg.distributed.data_parallel import apply_fsdp2
+    from tests._differential import dense_moe
+
+    H, Fd, E, N = 4, 8, 2, 6
+    topo = build_topology(dp_size=ws, ep_size=1, tp_size=1, device_type="cpu")
+    torch.manual_seed(0)  # identical replicas on both DP ranks
+    layer = DistributedMoELayer(H, Fd, E, 1, topo)
+    with torch.no_grad():
+        layer.router.gate_w.zero_()
+        layer.router.gate_w[0] = torch.tensor([3.0, -3.0])
+    ref_experts = [
+        [
+            w.detach().clone().requires_grad_(True)
+            for w in (m.w_gate.weight, m.w_up.weight, m.w_down.weight)
+        ]
+        for m in layer.experts
+    ]
+    gate_w = layer.router.gate_w.detach().clone()
+
+    def batch(r):
+        g = torch.Generator().manual_seed(100 + r)
+        x = torch.randn(N, H, generator=g)
+        x[:, 0] = 5.0 if r == 0 else -5.0
+        return x, torch.randn(N, H, generator=g)
+
+    # Dense reference: sum over DP ranks of each rank's loss. Only directions
+    # are compared below, so this test does not depend on the DP mean/sum.
+    sum(
+        (dense_moe(x, gate_w, ref_experts, 1) * c).sum() for x, c in map(batch, range(ws))
+    ).backward()
+
+    layer = apply_fsdp2(layer, topo)
+    x, cot = batch(rank)
+    (layer(x) * cot).sum().backward()
+    checks = []
+    for i, m in enumerate(layer.experts):
+        for j, pname in enumerate(("w_gate", "w_up", "w_down")):
+            exp = ref_experts[i][j].grad
+            got = getattr(m, pname).weight.grad
+            got = got.full_tensor() if got is not None else torch.zeros_like(exp)
+            cos = float(torch.nn.functional.cosine_similarity(got.flatten(), exp.flatten(), dim=0))
+            checks.append(
+                check(
+                    "fsdp", f"experts.{i}.{pname}.grad direction", cos > 1 - 1e-5, f"cos={cos:.6f}"
+                )
+            )
+    return checks
+
+
+@pytest.mark.xfail(strict=True, reason=_F25)
+def test_fsdp2_moe_grads_correct_when_ranks_use_different_experts():
+    """Each expert's DP-reduced gradient must come from that expert alone."""
+    _assert_ok(run_multiprocess(_fsdp_moe_worker, 2, {}), "fsdp")
+
+
 def test_apply_fsdp2_fp32_trains_at_dp2():
-    """apply_fsdp2 without mixed precision must give a working FSDP2 model."""
+    """apply_fsdp2 without mixed precision must give a working FSDP2 model
+    (F24: it passed mp_policy=None, and FSDP2 raised at the first forward)."""
     _assert_ok(run_multiprocess(_fsdp_fp32_worker, 2, {}), "fsdp")
 
 
@@ -240,7 +300,7 @@ def _fsdp_sum_worker(rank: int, ws: int, cfg: dict) -> list:
     return checks
 
 
-@pytest.mark.xfail(strict=True, reason=f"{_F24}; {_F22}")
+@pytest.mark.xfail(strict=True, reason=_F22)
 def test_fsdp2_reduces_dp_grads_as_sum():
     """apply_fsdp2 must SUM gradients over DP (CPU/Gloo, dp=2), not average."""
     _assert_ok(run_multiprocess(_fsdp_sum_worker, 2, {}), "fsdp")
