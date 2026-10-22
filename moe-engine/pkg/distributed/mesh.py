@@ -117,27 +117,43 @@ class ParallelTopology:
     # Expert ownership
     # ------------------------------------------------------------------
 
-    def experts_on_this_rank(self, total_experts: int) -> List[int]:
-        """Return global expert indices owned by this EP rank.
+    def experts_on_ep_rank(self, total_experts: int, ep_rank: int) -> List[int]:
+        """Return global expert indices owned by EP rank ``ep_rank``.
 
-        Remainder experts are round-robin assigned to the lowest EP ranks
-        so resharding after a node drop never leaves experts orphaned.
+        This is the single source of truth for expert ownership: which
+        experts a rank builds (:meth:`experts_on_this_rank`) and where
+        dispatch sends each token (``DistributedMoELayer``) both derive from
+        it. Each rank owns one contiguous, increasing range; the
+        ``total_experts % ep_size`` remainder experts go one each to the
+        lowest EP ranks, so no expert is left unowned when ``total_experts``
+        is not divisible by ``ep_size`` (F4).
 
         Parameters
         ----------
         total_experts : int
             Total number of experts across all EP ranks.
+        ep_rank : int
+            Position along the expert-parallel axis, in ``[0, ep_size)``.
 
         Returns
         -------
         List[int]
-            Sorted list of expert indices owned by this rank.
+            Sorted list of expert indices owned by that EP rank.
         """
+        if not 0 <= ep_rank < self.ep_size:
+            raise ValueError(f"ep_rank {ep_rank} out of range for ep_size {self.ep_size}")
         per_rank = total_experts // self.ep_size
         rem = total_experts - per_rank * self.ep_size
-        start = self.ep_rank * per_rank + min(self.ep_rank, rem)
-        extra = 1 if self.ep_rank < rem else 0
+        start = ep_rank * per_rank + min(ep_rank, rem)
+        extra = 1 if ep_rank < rem else 0
         return list(range(start, start + per_rank + extra))
+
+    def experts_on_this_rank(self, total_experts: int) -> List[int]:
+        """Return global expert indices owned by this EP rank.
+
+        See :meth:`experts_on_ep_rank` for the ownership rule.
+        """
+        return self.experts_on_ep_rank(total_experts, self.ep_rank)
 
     # ------------------------------------------------------------------
     # Convenience

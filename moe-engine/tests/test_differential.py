@@ -49,6 +49,7 @@ from __future__ import annotations
 import functools
 import math
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,7 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from pkg.distributed.expert_parallel import all_to_all_dispatch  # noqa: E402
 from pkg.distributed.mesh import build_topology  # noqa: E402
 from pkg.distributed.moe_layer import DistributedMoELayer  # noqa: E402
 from pkg.distributed.sequence_parallel import (  # noqa: E402
@@ -203,9 +205,10 @@ def _ep_worker(rank: int, ws: int, cfg: dict) -> list:
 def _ep_cases():
     """(id, world_size, cfg, findings-that-fail-fwd, findings-that-fail-grad)."""
     cases = []
+    # E=5 (ep=2, ep=4) and E=10 (ep=4) are the non-divisible cases that
+    # crashed or deadlocked before the F4 fix; they are now plain regressions.
     for ws, e_values in ((2, (8, 5, 10)), (4, (8, 5, 10))):
         for E in e_values:
-            divisible = E % ws == 0
             for K in (1, 2):
                 for imbalanced in (False, True):
                     for drop in (False, True):
@@ -223,9 +226,7 @@ def _ep_cases():
                             f"ep{ws}-E{E}-k{K}-{'imbal' if imbalanced else 'bal'}"
                             f"-{'drop' if drop else 'nodrop'}"
                         )
-                        fwd_fail = () if divisible else ("F4",)
-                        grad_fail = ("F1",) + fwd_fail
-                        cases.append((cid, ws, cfg, fwd_fail, grad_fail))
+                        cases.append((cid, ws, cfg, (), ("F1",)))
     return cases
 
 
@@ -242,10 +243,6 @@ _FINDING_TEXT = {
     "F1": "F1: EP all-to-all is invisible to autograd (experts get no grad, input grad wrong)",
     "F2": "F2: TP collectives lack autograd Functions (gather raises / input grad wrong)",
     "F3": "F3: SP gather/scatter lack autograd Functions",
-    "F4": (
-        "F4: send_counts assumes E % ep_size == 0 (split-size crash, or a Gloo "
-        "timeout on ranks whose local counts happen to be consistent)"
-    ),
 }
 
 
@@ -275,6 +272,43 @@ def test_ep_forward_matches_dense(cid):
 @pytest.mark.parametrize("cid", _params(_EP_CASES, 4))
 def test_ep_gradients_match_dense(cid):
     _assert_kind(_ep_result(cid), "grad")
+
+
+# ---------------------------------------------------------------------------
+# EP dispatch must fail on every rank together, never hang (F4)
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_bad_counts_worker(rank: int, ws: int, cfg: dict) -> list:
+    """Rank ``cfg["bad_rank"]`` passes send_counts that do not sum to its row
+    count. Before F4 that rank raised Gloo's local split-size error while its
+    peers entered the all-to-all and blocked until the collective timeout."""
+    topo = build_topology(dp_size=1, ep_size=ws, tp_size=1, device_type="cpu")
+    rows_per_peer = 2
+    tokens = torch.randn(rows_per_peer * ws, 4)
+    send_counts = torch.full((ws,), rows_per_peer, dtype=torch.long)
+    if rank == cfg["bad_rank"]:
+        send_counts[0] += 1
+    t0 = time.monotonic()
+    try:
+        all_to_all_dispatch(tokens, send_counts, topo)
+    except RuntimeError as exc:
+        msg = str(exc)
+        named = "invalid send_counts" in msg and f"[{cfg['bad_rank']}]" in msg
+        return [
+            check(
+                "abort",
+                "every rank aborts with the same error naming the bad rank",
+                named,
+                f"after {time.monotonic() - t0:.1f}s: {msg[:300]}",
+            )
+        ]
+    return [check("abort", "dispatch must not succeed", False, "returned normally")]
+
+
+@pytest.mark.parametrize("ws,bad_rank", [(2, 1), (4, 2)], ids=["ep2-bad1", "ep4-bad2"])
+def test_ep_dispatch_bad_counts_abort_on_all_ranks(ws, bad_rank):
+    _assert_kind(run_multiprocess(_dispatch_bad_counts_worker, ws, {"bad_rank": bad_rank}), "abort")
 
 
 # ===========================================================================
