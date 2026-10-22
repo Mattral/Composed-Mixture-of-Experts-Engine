@@ -72,13 +72,12 @@ def apply_fsdp2(
         return model
 
     dp_mesh = topology.mesh["dp"] if "dp" in topology.mesh.mesh_dim_names else topology.mesh
+    # fully_shard needs a policy object even without mixed precision: an
+    # explicit mp_policy=None makes FSDP2 raise at the first forward (F24).
     mp_policy = (
-        MixedPrecisionPolicy(
-            param_dtype=mixed_precision_dtype,
-            reduce_dtype=torch.float32,
-        )
-        if mixed_precision_dtype is not None and MixedPrecisionPolicy is not None
-        else None
+        MixedPrecisionPolicy(param_dtype=mixed_precision_dtype, reduce_dtype=torch.float32)
+        if mixed_precision_dtype is not None
+        else MixedPrecisionPolicy()
     )
 
     # Import here to avoid circular import at module level.

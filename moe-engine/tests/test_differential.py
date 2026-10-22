@@ -253,9 +253,9 @@ _FINDING_TEXT: dict = {
         "mean over its own tokens, summed over EP/SP and averaged over DP and "
         "micro-batches), not a mean over the global batch"
     ),
-    "F24": (
-        "F24: apply_fsdp2 passes mp_policy=None to fully_shard when mixed "
-        "precision is off, so FSDP2 raises at the first forward (every dp > 1 case)"
+    "F25": (
+        "F25: under FSDP2 at dp > 1, DP ranks whose tokens skip different experts "
+        "reduce-scatter different parameter sets (here: dp2 hangs)"
     ),
 }
 
@@ -904,11 +904,11 @@ def _layout_worker(rank: int, ws: int, cfg: dict) -> list:
 # (id, cfg, findings failing fwd, grad, step); world size = dp * ep * tp.
 _LAYOUT_CASES = [
     ("single", dict(dp=1, ep=1, tp=1), (), ("F22",), ("F22",)),
-    ("dp2", dict(dp=2, ep=1, tp=1), ("F24",), ("F24", "F22"), ("F24", "F22")),
+    ("dp2", dict(dp=2, ep=1, tp=1), ("F25",), ("F25", "F22"), ("F25", "F22")),
     ("ep2", dict(dp=1, ep=2, tp=1), (), ("F22",), ("F22",)),
     ("sp2", dict(dp=1, ep=1, tp=2), (), ("F22",), ("F22",)),
-    ("dp2-ep2", dict(dp=2, ep=2, tp=1), ("F24",), ("F24", "F22"), ("F24", "F22")),
-    ("dp2-sp2", dict(dp=2, ep=1, tp=2), ("F24",), ("F24", "F22"), ("F24", "F22")),
+    ("dp2-ep2", dict(dp=2, ep=2, tp=1), (), ("F22",), ("F22",)),
+    ("dp2-sp2", dict(dp=2, ep=1, tp=2), (), ("F22",), ("F22",)),
     ("ep2-sp2", dict(dp=1, ep=2, tp=2), (), ("F22",), ("F22",)),
 ]
 
