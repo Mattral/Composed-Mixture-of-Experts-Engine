@@ -43,6 +43,7 @@ import torch
 import torch.nn as nn
 
 from pkg.distributed.comm_ops import copy_to_group, gather_along_dim, reduce_from_group
+from pkg.distributed.grad_sync import mark_tensor_parallel_shard
 from pkg.distributed.mesh import ParallelTopology, tp_process_group
 
 __all__ = [
@@ -121,6 +122,7 @@ class ColumnParallelLinear(nn.Module):
             )
         local_out = out_features // tp_size
         self.weight = nn.Parameter(torch.empty(local_out, in_features, device=device, dtype=dtype))
+        mark_tensor_parallel_shard(self.weight)  # distinct per TP rank: never broadcast
         self.bias: Optional[nn.Parameter] = (
             nn.Parameter(torch.zeros(out_features, device=device, dtype=dtype)) if bias else None
         )
@@ -221,6 +223,7 @@ class RowParallelLinear(nn.Module):
             )
         local_in = in_features // tp_size
         self.weight = nn.Parameter(torch.empty(out_features, local_in, device=device, dtype=dtype))
+        mark_tensor_parallel_shard(self.weight)  # distinct per TP rank: never broadcast
         self.bias: Optional[nn.Parameter] = (
             nn.Parameter(torch.zeros(out_features, device=device, dtype=dtype)) if bias else None
         )

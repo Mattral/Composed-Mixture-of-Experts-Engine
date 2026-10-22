@@ -38,8 +38,6 @@ from tests._differential import check, failures_for, run_multiprocess  # noqa: E
 
 pytestmark = pytest.mark.cpu
 
-F14_INIT = "F14-init: replicated params are not broadcast at model construction"
-
 
 class _Model(nn.Module):
     def __init__(self, topo):
@@ -162,7 +160,6 @@ def _init_worker(rank: int, ws: int, cfg: dict) -> list:
     return checks
 
 
-@pytest.mark.xfail(strict=True, reason=F14_INIT)
 @pytest.mark.parametrize(
     "dp,ep,tp,ws",
     [(2, 2, 1, 4), (1, 1, 2, 2)],
