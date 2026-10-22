@@ -94,4 +94,10 @@ def apply_fsdp2(
 
     if fully_shard is not None:
         fully_shard(model, mesh=dp_mesh, mp_policy=mp_policy)
+        # DP ranks route their tokens to different experts, so in one backward
+        # an expert can get a gradient on one DP rank and none on another.
+        # FSDP2 would then reduce-scatter different parameter sets on different
+        # ranks: a hang, or (experts being equal-sized) one expert's gradient
+        # summed into another's. Reduce zeros for unused parameters (F25).
+        model.set_reduce_scatter_unused_params(True)
     return model
