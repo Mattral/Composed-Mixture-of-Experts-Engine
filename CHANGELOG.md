@@ -4,6 +4,36 @@ All notable changes to this project are recorded here. Verification claims
 state the environment they were run in; nothing below was run on a GPU, with
 NCCL, or across multiple hosts unless it says so.
 
+## Unreleased — M2: MoE semantics (October 2026, in progress)
+
+### Changed
+- **F22 — training objective.** The objective is now the mean over the
+  global batch's loss-bearing tokens, independent of the (dp, ep, tp/sp)
+  layout, of per-rank token counts and of the gradient-accumulation count.
+  Before, each rank's own mean was summed over EP/SP and averaged over DP and
+  micro-batches. Micro-batches backpropagate local loss sums;
+  `grad_sync.finalize_grads` divides by `grad_sync.global_token_count` once
+  per step, and FSDP2 now sums over DP. Supersedes ADR-010's loss convention:
+  see [ADR-011](docs/adr/ADR-011-layout-independent-global-mean-objective.md).
+  The CI differential job pins `torch==2.14.1`, because the FSDP2 methods
+  this relies on depend on the torch version.
+
+### Fixed
+- **F24 — FSDP2 without mixed precision.** `apply_fsdp2` passed
+  `mp_policy=None`, so FSDP2 raised at the first forward of every fp32 run at
+  dp > 1.
+- **F25 — FSDP2 with sparse expert use.** DP ranks whose tokens skipped
+  different experts reduce-scattered different parameter sets: a hang, or one
+  expert's gradient silently summed into another's. Unused parameters now
+  reduce zeros.
+
+### Added
+- `tests/test_differential.py::test_layout_*`: one global batch with unequal
+  loss masks and 2 micro-batches, run under single, dp2, ep2, sp2, dp2×ep2,
+  dp2×sp2 and ep2×sp2 and compared against a dense global-mean reference
+  (CPU/Gloo; FSDP2 at dp = 2 on CPU/Gloo only). dp2×sp2's gradients wait on
+  F26 (strict xfail).
+
 ## Unreleased — M1: correct gradients under EP/TP/SP (October 2026)
 
 Fixes from the October 2026 correctness audit. Before this, **training was

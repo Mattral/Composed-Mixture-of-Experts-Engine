@@ -51,7 +51,11 @@ from pkg.distributed import (
     apply_fsdp2,
     build_topology,
 )
-from pkg.distributed.grad_sync import broadcast_replicated_params, sync_replicated_grads
+from pkg.distributed.grad_sync import (
+    broadcast_replicated_params,
+    finalize_grads,
+    global_token_count,
+)
 from pkg.elastic.fault_monitor import (
     ElasticConfig as _ElasticRuntimeConfig,
 )
@@ -311,18 +315,21 @@ def main() -> None:
         mfu_acct.start_step()
         optimizer.zero_grad(set_to_none=True)
 
+        # Objective: mean CE over the global batch's loss-bearing tokens
+        # (ADR-011). Each micro-batch backpropagates its local SUM;
+        # finalize_grads divides by the global token count once per step.
         total_loss = 0.0
+        local_tokens = 0
         for _acc_step in range(grad_accum):
             ids = torch.randint(0, V, (B, S), device=topology.device)
             targets = torch.randint(0, V, (B, S), device=topology.device)
             logits = model(ids)
-            ce_loss = (
-                torch.nn.functional.cross_entropy(
-                    logits.view(-1, V).float(),
-                    targets.view(-1),
-                )
-                / grad_accum
+            ce_loss = torch.nn.functional.cross_entropy(
+                logits.view(-1, V).float(),
+                targets.view(-1),
+                reduction="sum",
             )
+            local_tokens += int((targets != -100).sum())  # cross_entropy's ignore_index
 
             # Aux z-loss (P2.2 — advanced load balancing).
             # Weight from cfg, default 0 (disabled). Enable with
@@ -342,9 +349,11 @@ def main() -> None:
             total_loss += float(ce_loss.detach().item())  # log CE only
 
         # Sum replicated params' grads over the EP ranks (and SP-marked
-        # params over TP), which saw different tokens; FSDP2 already handled
-        # DP. Must precede clipping. Convention: pkg/distributed/grad_sync.py.
-        sync_replicated_grads(model, topology)
+        # params over TP), which saw different tokens (FSDP2 already summed
+        # over DP), then divide by the global token count. Must precede
+        # clipping. Convention: pkg/distributed/grad_sync.py, ADR-011.
+        finalize_grads(model, topology, global_token_count(local_tokens, topology))
+        total_loss /= max(local_tokens, 1)  # logged: this rank's mean CE
         torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
         optimizer.step()
 

@@ -65,8 +65,9 @@ from pkg.distributed.data_parallel import apply_fsdp2  # noqa: E402
 from pkg.distributed.expert_parallel import all_to_all_dispatch  # noqa: E402
 from pkg.distributed.grad_sync import (  # noqa: E402
     broadcast_replicated_params,
+    finalize_grads,
+    global_token_count,
     mark_sequence_parallel,
-    sync_replicated_grads,
 )
 from pkg.distributed.mesh import build_topology  # noqa: E402
 from pkg.distributed.moe_layer import DistributedMoELayer  # noqa: E402
@@ -248,10 +249,10 @@ def _ep_result(cid: str):
 # Finding ID -> xfail reason, for cases that currently fail. A new failing
 # case must add its finding here first.
 _FINDING_TEXT: dict = {
-    "F22": (
-        "F22: the training objective depends on the parallel layout (each rank's "
-        "mean over its own tokens, summed over EP/SP and averaged over DP and "
-        "micro-batches), not a mean over the global batch"
+    "F26": (
+        "F26: FSDP2 replaces parameters with new DTensor parameters, dropping the "
+        "mark_sequence_parallel attribute, so at dp > 1 an SP-region replicated "
+        "weight's gradient is never summed over TP"
     ),
 }
 
@@ -864,48 +865,39 @@ def _layout_worker(rank: int, ws: int, cfg: dict) -> list:
         }
 
     # ---- Engine path: FSDP2 over DP, then train.py's step structure. ----
+    # Each micro-batch backpropagates its local loss SUM; finalize_grads
+    # divides by the global token count once per step (ADR-011).
     model = apply_fsdp2(model, topo)
-    try:
-        from pkg.distributed.grad_sync import finalize_grads, global_token_count
-    except ImportError:
-        finalize_grads = None
     checks = []
     local_tokens = 0
     for mb in range(_LMB):
         y = model(X[mb][mine])
         checks.append(compare("fwd", f"micro-batch {mb} output", y, y_ref[mb]))
-        loss_sum = _token_loss_sum(y, T[mb][mine], M[mb][mine])
-        n_local = int(M[mb][mine].sum())
-        local_tokens += n_local
-        if finalize_grads is not None:
-            loss_sum.backward()
-        else:
-            # The convention shipped in M1 (train.py, ADR-010): each rank's
-            # mean over its own tokens, divided by the accumulation steps.
-            (loss_sum / max(n_local, 1) / _LMB).backward()
-    if finalize_grads is not None:
-        finalize_grads(model, topo, global_token_count(local_tokens, topo))
-    else:
-        sync_replicated_grads(model, topo)
+        _token_loss_sum(y, T[mb][mine], M[mb][mine]).backward()
+        local_tokens += int(M[mb][mine].sum())
+    n_engine = global_token_count(local_tokens, topo)
+    checks.append(
+        check("grad", "global_token_count", n_engine == n_global, f"{n_engine} vs {n_global}")
+    )
+    finalize_grads(model, topo, n_engine)
     for n, p in model.named_parameters():
         grad = _full(p.grad) if p.grad is not None else None
         checks.append(compare("grad", f"{n}.grad", grad, ref_grads[n]))
     torch.optim.SGD(model.parameters(), lr=LR).step()
     for n, p in model.named_parameters():
         checks.append(compare("step", f"{n} after SGD step", _full(p.detach()), ref_after[n]))
-    checks.append(check("fwd", "global token count", n_global > 0, f"N_global={n_global}"))
     return checks
 
 
 # (id, cfg, findings failing fwd, grad, step); world size = dp * ep * tp.
 _LAYOUT_CASES = [
-    ("single", dict(dp=1, ep=1, tp=1), (), ("F22",), ("F22",)),
-    ("dp2", dict(dp=2, ep=1, tp=1), (), ("F22",), ("F22",)),
-    ("ep2", dict(dp=1, ep=2, tp=1), (), ("F22",), ("F22",)),
-    ("sp2", dict(dp=1, ep=1, tp=2), (), ("F22",), ("F22",)),
-    ("dp2-ep2", dict(dp=2, ep=2, tp=1), (), ("F22",), ("F22",)),
-    ("dp2-sp2", dict(dp=2, ep=1, tp=2), (), ("F22",), ("F22",)),
-    ("ep2-sp2", dict(dp=1, ep=2, tp=2), (), ("F22",), ("F22",)),
+    ("single", dict(dp=1, ep=1, tp=1), (), (), ()),
+    ("dp2", dict(dp=2, ep=1, tp=1), (), (), ()),
+    ("ep2", dict(dp=1, ep=2, tp=1), (), (), ()),
+    ("sp2", dict(dp=1, ep=1, tp=2), (), (), ()),
+    ("dp2-ep2", dict(dp=2, ep=2, tp=1), (), (), ()),
+    ("dp2-sp2", dict(dp=2, ep=1, tp=2), (), ("F26",), ("F26",)),
+    ("ep2-sp2", dict(dp=1, ep=2, tp=2), (), (), ()),
 ]
 
 

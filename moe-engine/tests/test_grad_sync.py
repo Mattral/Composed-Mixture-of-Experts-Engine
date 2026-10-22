@@ -176,8 +176,6 @@ def test_broadcast_makes_replicas_identical_and_keeps_shards(dp, ep, tp, ws):
 # FSDP2, global token count
 # ===========================================================================
 
-_F22 = "F22: the training objective is not a mean over the global batch"
-
 
 def _fsdp_fp32_worker(rank: int, ws: int, cfg: dict) -> list:
     from pkg.distributed.data_parallel import apply_fsdp2
@@ -303,20 +301,60 @@ def _fsdp_sum_worker(rank: int, ws: int, cfg: dict) -> list:
     return checks
 
 
-@pytest.mark.xfail(strict=True, reason=_F22)
 def test_fsdp2_reduces_dp_grads_as_sum():
-    """apply_fsdp2 must SUM gradients over DP (CPU/Gloo, dp=2), not average."""
+    """apply_fsdp2 must SUM gradients over DP (CPU/Gloo, dp=2), not average
+    (F22: FSDP2's default DP mean)."""
     _assert_ok(run_multiprocess(_fsdp_sum_worker, 2, {}), "fsdp")
 
 
+def _marks_worker(rank: int, ws: int, cfg: dict) -> list:
+    from pkg.distributed.data_parallel import apply_fsdp2
+    from pkg.distributed.grad_sync import (
+        SEQUENCE_PARALLEL_ATTR,
+        TENSOR_PARALLEL_SHARD_ATTR,
+        mark_sequence_parallel,
+        mark_tensor_parallel_shard,
+    )
+
+    topo = build_topology(dp_size=ws, ep_size=1, tp_size=1, device_type="cpu")
+    model = nn.Module()
+    model.lin = nn.Linear(4, 4)
+    model.sp_w = nn.Parameter(torch.zeros(4, 4))
+    mark_sequence_parallel(model.sp_w)
+    mark_tensor_parallel_shard(model.lin.weight)
+    model = apply_fsdp2(model, topo)
+    return [
+        check(
+            "marks",
+            "sp_w sequence-parallel",
+            getattr(model.sp_w, SEQUENCE_PARALLEL_ATTR, False),
+            "",
+        ),
+        check(
+            "marks",
+            "lin.weight TP shard",
+            getattr(model.lin.weight, TENSOR_PARALLEL_SHARD_ATTR, False),
+            "",
+        ),
+    ]
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="F26: FSDP2 replaces parameters, dropping grad_sync's parameter marks",
+)
+def test_apply_fsdp2_keeps_grad_sync_marks():
+    """sync_replicated_grads finds sequence-parallel params by their mark,
+    and runs after FSDP2 has wrapped the model: the marks must survive."""
+    _assert_ok(run_multiprocess(_marks_worker, 2, {}), "marks")
+
+
 def _count_worker(rank: int, ws: int, cfg: dict) -> list:
+    from pkg.distributed.grad_sync import global_token_count
+
     topo = build_topology(
         dp_size=cfg["dp"], ep_size=cfg["ep"], tp_size=cfg["tp"], device_type="cpu"
     )
-    try:
-        from pkg.distributed.grad_sync import global_token_count
-    except ImportError as exc:
-        return [check("count", "global_token_count", False, repr(exc))]
     # Same count on the TP ranks of a (dp, ep) position: they hold the same tokens.
     data_rank = topo.dp_rank * topo.ep_size + topo.ep_rank
     got = global_token_count(10 * data_rank + 1, topo)
@@ -326,7 +364,6 @@ def _count_worker(rank: int, ws: int, cfg: dict) -> list:
     ]
 
 
-@pytest.mark.xfail(strict=True, reason=_F22)
 @pytest.mark.parametrize(
     "dp,ep,tp,ws",
     [(2, 2, 1, 4), (1, 2, 2, 4), (2, 1, 2, 4)],

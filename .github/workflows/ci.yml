@@ -167,10 +167,15 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      # Pinned: apply_fsdp2 relies on version-dependent FSDP2 methods
+      # (set_force_sum_reduction_for_comms, set_gradient_divide_factor,
+      # set_reduce_scatter_unused_params), verified with this release
+      # (ADR-011). Re-verify before bumping.
       - name: Install dependencies (CPU-only torch)
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]"
+          python -c "import torch; print('torch', torch.__version__)"
 
       - name: Run differential suite
         run: |
