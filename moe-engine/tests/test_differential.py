@@ -242,7 +242,6 @@ def _ep_result(cid: str):
 # Finding ID -> xfail reason, for cases that currently fail. A new failing
 # case must add its finding here first.
 _FINDING_TEXT = {
-    "F21": "F21: replicated-parameter grads are never all-reduced across ranks",
     "F14-init": "F14-init: replicated params are not broadcast at model construction",
 }
 
@@ -520,7 +519,7 @@ for _S, _tag in ((6, "div"), (7, "nondiv")):
             f"sp2-roundtrip-fused-engine-sync-S{_S}{_tag}",
             dict(case="roundtrip", S=_S, fused=True, engine_sync=True),
             (),
-            ("F21",),
+            (),
         )
     )
 
@@ -667,7 +666,7 @@ def _composite_worker(rank: int, ws: int, cfg: dict) -> list:
 # switch them off and rely on the engine instead.
 _COMPOSITE_CASES = [
     ("harness", dict(E=8, engine_init=False, engine_sync=False), (), (), ()),
-    ("engine-sync", dict(E=8, engine_init=False, engine_sync=True), (), ("F21",), ("F21",)),
+    ("engine-sync", dict(E=8, engine_init=False, engine_sync=True), (), (), ()),
     (
         "engine-init",
         dict(E=8, engine_init=True, engine_sync=False),
@@ -679,8 +678,8 @@ _COMPOSITE_CASES = [
         "engine-all",
         dict(E=8, engine_init=True, engine_sync=True),
         ("F14-init",),
-        ("F14-init", "F21"),
-        ("F14-init", "F21"),
+        ("F14-init",),
+        ("F14-init",),
     ),
 ]
 

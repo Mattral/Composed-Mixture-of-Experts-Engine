@@ -38,7 +38,6 @@ from tests._differential import check, failures_for, run_multiprocess  # noqa: E
 
 pytestmark = pytest.mark.cpu
 
-F21 = "F21: replicated-parameter grads are never all-reduced across ranks"
 F14_INIT = "F14-init: replicated params are not broadcast at model construction"
 
 
@@ -108,7 +107,6 @@ def _sync_worker(rank: int, ws: int, cfg: dict) -> list:
     return checks
 
 
-@pytest.mark.xfail(strict=True, reason=F21)
 @pytest.mark.parametrize(
     "dp,ep,tp,ws",
     [(2, 2, 1, 4), (1, 2, 1, 2), (1, 1, 2, 2)],
@@ -118,7 +116,6 @@ def test_sync_reduces_over_exactly_the_right_group(dp, ep, tp, ws):
     _assert_ok(run_multiprocess(_sync_worker, ws, dict(dp=dp, ep=ep, tp=tp)), "sync")
 
 
-@pytest.mark.xfail(strict=True, reason=F21)
 def test_sync_is_noop_at_dp_only():
     """dp=2, ep=tp=1: FSDP2 owns the DP reduction, so sync must not touch
     any gradient -- it can never double-reduce."""
