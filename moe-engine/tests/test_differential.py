@@ -82,6 +82,7 @@ from pkg.distributed.tensor_parallel import (  # noqa: E402
 from tests._differential import (  # noqa: E402
     check,
     compare,
+    dense_aux_sums,
     dense_moe,
     failures_for,
     run_multiprocess,
@@ -248,7 +249,12 @@ def _ep_result(cid: str):
 
 # Finding ID -> xfail reason, for cases that currently fail. A new failing
 # case must add its finding here first.
-_FINDING_TEXT: dict = {}
+_FINDING_TEXT: dict = {
+    "F5": (
+        "F5: the router z-loss is a detached Python float and there is no "
+        "load-balancing loss, so neither trains the router"
+    ),
+}
 
 
 def _params(cases, which):
@@ -737,6 +743,9 @@ def test_composite_engine_sgd_step_matches_dense(variant):
 # unequally; only a mean over the global batch matches the dense reference.
 _LG, _LS, _LMB = 4, 7, 2
 _LMASK = ((7, 2, 5, 1), (3, 6, 0, 4))
+# Auxiliary-loss weights for the aux-* layouts: large enough that the router
+# gradient is dominated by them, so a wrong f_e or a TP double count shows.
+_W_Z, _W_LB = 0.05, 0.5
 
 
 class _LayoutModel(nn.Module):
@@ -776,6 +785,8 @@ def _layout_worker(rank: int, ws: int, cfg: dict) -> list:
     topo = build_topology(dp_size=dp, ep_size=ep, tp_size=tp, device_type="cpu")
     torch.manual_seed(SEED + rank)
     model = _LayoutModel(H, Fd, E, K, topo)
+    if cfg.get("aux"):
+        model.moe.aux_losses = True  # F5: z-loss and load-balancing sums per forward
     mark_sequence_parallel(model.sp_w)
     broadcast_replicated_params(model, topo)
 
@@ -823,9 +834,12 @@ def _layout_worker(rank: int, ws: int, cfg: dict) -> list:
     ]
     rp = {n: t.clone().requires_grad_(True) for n, t in shards[0]["rep"].items()}
 
+    aux_sums = []  # per micro-batch (z, lb) of the dense MoE layer
+
     def dense_model(xx):
         h = torch.tanh(F.linear(xx, rp["inp.weight"], rp["inp.bias"]))
         gg = torch.tanh(F.linear(h, rp["sp_w"]))
+        aux_sums.append(dense_aux_sums(gg.reshape(-1, H), rp["moe.router.gate_w"], K))
         moe = dense_moe(gg.reshape(-1, H), rp["moe.router.gate_w"], ref_experts, K)
         return F.linear(gg + moe.reshape(gg.shape), rp["out.weight"], rp["out.bias"])
 
@@ -835,6 +849,12 @@ def _layout_worker(rank: int, ws: int, cfg: dict) -> list:
         ys = dense_model(X[mb])
         y_ref.append(ys[mine].detach())
         loss_ref = loss_ref + _token_loss_sum(ys, T[mb], M[mb])
+        if cfg.get("aux"):
+            # Auxiliary sums over every routed token of the whole micro-batch,
+            # with the micro-batch's global expert fractions; normalised by
+            # the same global loss-token count (ADR-011).
+            z, lb = aux_sums[-1]
+            loss_ref = loss_ref + _W_Z * z + _W_LB * lb
     (loss_ref / n_global).backward()
 
     chunk = Fd // tp
@@ -863,11 +883,22 @@ def _layout_worker(rank: int, ws: int, cfg: dict) -> list:
     # divides by the global token count once per step (ADR-011).
     model = apply_fsdp2(model, topo)
     checks = []
+    collect_aux_losses = None
+    if cfg.get("aux"):
+        try:
+            from pkg.distributed.moe_layer import collect_aux_losses
+        except ImportError as exc:
+            for kind in ("grad", "step"):
+                checks.append(check(kind, "engine collect_aux_losses", False, repr(exc)))
     local_tokens = 0
     for mb in range(_LMB):
         y = model(X[mb][mine])
         checks.append(compare("fwd", f"micro-batch {mb} output", y, y_ref[mb]))
-        _token_loss_sum(y, T[mb][mine], M[mb][mine]).backward()
+        loss = _token_loss_sum(y, T[mb][mine], M[mb][mine])
+        if collect_aux_losses is not None:
+            z, lb = collect_aux_losses(model)
+            loss = loss + _W_Z * z + _W_LB * lb
+        loss.backward()
         local_tokens += int(M[mb][mine].sum())
     n_engine = global_token_count(local_tokens, topo)
     checks.append(
@@ -892,6 +923,14 @@ _LAYOUT_CASES = [
     ("dp2-ep2", dict(dp=2, ep=2, tp=1), (), (), ()),
     ("dp2-sp2", dict(dp=2, ep=1, tp=2), (), (), ()),
     ("ep2-sp2", dict(dp=1, ep=2, tp=2), (), (), ()),
+    # Same batch with the router auxiliary losses on (F5): expert fractions
+    # must be global over the micro-batch (DP x EP), never double-counted
+    # over TP.
+    ("aux-single", dict(dp=1, ep=1, tp=1, aux=True), (), ("F5",), ("F5",)),
+    ("aux-dp2", dict(dp=2, ep=1, tp=1, aux=True), (), ("F5",), ("F5",)),
+    ("aux-ep2", dict(dp=1, ep=2, tp=1, aux=True), (), ("F5",), ("F5",)),
+    ("aux-sp2", dict(dp=1, ep=1, tp=2, aux=True), (), ("F5",), ("F5",)),
+    ("aux-dp2-ep2", dict(dp=2, ep=2, tp=1, aux=True), (), ("F5",), ("F5",)),
 ]
 
 
