@@ -4,7 +4,7 @@
 **Date:** October 2026
 **Deciders:** Min Htet Myet
 **Supersedes:** ADR-010, Decision 4 ("Replicated-gradient sync with an explicit loss convention"), as far as the loss convention goes. The F21 reductions themselves stay. ADR-010 is not edited.
-**Related:** ADR-010; October 2026 audit, M2 (findings F22, F24, F25, F26).
+**Related:** ADR-010; October 2026 audit, M2 (findings F5, F12, F14, F18, F22, F23, F24, F25, F26).
 
 ## Context
 
@@ -109,8 +109,9 @@ test exposed were fixed:
      GPU claim.
 
 5. **Scope.**
-   * The router auxiliary losses (F5) and capacity dropping (F12) are M2
-     items with their own sections below.
+   * The router auxiliary losses (F5), capacity dropping (F12), gradient
+     clipping (F14) and the training data under TP (F18) are M2 items with
+     their own sections below.
    * Capacity dropping depends on the layout by definition, because capacity
      is a per-group budget. It is therefore not part of the cross-layout
      invariance test.
@@ -281,3 +282,62 @@ trained the router.
   dropping, as Switch Transformer does.
 * `last_dropped_token_fraction` still reports dropped pairs / `N · K`. It
   costs a host sync per forward (F13).
+
+## Gradient clipping and replica semantics (F14, added with item 4)
+
+**Context.**
+
+* `train.py` clipped with `torch.nn.utils.clip_grad_norm_(model.parameters())`.
+  That is each rank's local norm, which under EP (expert shards) or TP
+  (Column/Row shards) misses the other ranks' shards.
+* Every rank also got a different norm and coefficient. At ep2 the two
+  ranks saw 2.58659 and 2.58774 against a true 2.59534, so replicated
+  weights drifted apart.
+* Separately, `apply_fsdp2` said expert weights were excluded from FSDP2.
+  They never were.
+
+**Decision.**
+
+* **One global norm.** `grad_sync.clip_grad_norm_(model, max_norm, topology)`
+  computes the norm of the **global** gradient this ADR defines, with every
+  parameter's full gradient counted once:
+  * squared local norms are summed per class: sharded over DP (FSDP2
+    DTensor), over EP (expert parameter), over TP (`tensor_parallel_shard`
+    mark);
+  * each class is summed over exactly those groups, with at most three
+    all-reduces of 8 numbers that every rank issues;
+  * one coefficient `min(1, max_norm / (norm + 1e-6))` is applied on every
+    rank.
+* `train.py` calls it after `finalize_grads`.
+* **Experts are expert-data-parallel over DP.** The root `fully_shard`
+  manages the expert weights. Each DP group holds one EP rank's experts, so
+  FSDP2 shards them over DP and sums their gradients over exactly those
+  ranks. This is kept, and documented in `apply_fsdp2`.
+
+**Consequences.**
+
+* The clipped gradients and post-step parameters match the dense
+  reference's under single, dp2, ep2, sp2, dp2×ep2, dp2×sp2 and ep2×sp2
+  (`clip-*` layouts).
+* A dp2×ep2 test checks, after three full engine steps, that:
+  * experts are identical across DP and distinct across EP;
+  * the router and every other replicated weight are identical on every
+    rank.
+
+## Training data under tensor parallelism (F18, added with item 5)
+
+**Context.** `train.py` drew each micro-batch with unseeded `torch.randint`
+on every rank, so the ranks of a TP group trained on different tokens.
+
+**Decision.**
+
+* `train.micro_batch` seeds each micro-batch's generator from
+  `(training.seed, step, micro-batch, data rank)`, where the data rank is
+  the (dp, ep) position. TP peers draw identical data, different data ranks
+  draw different data, and every batch is reproducible. No collective is
+  needed.
+* The step body is `train.train_step`, and a tp = 2 step (aux losses on,
+  clipping active and inactive) is tested against a dense reference.
+
+**Consequences.** The data is still synthetic. This fixes consistency and
+seeding, not the data source.

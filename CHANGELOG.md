@@ -4,7 +4,13 @@ All notable changes to this project are recorded here. Verification claims
 state the environment they were run in; nothing below was run on a GPU, with
 NCCL, or across multiple hosts unless it says so.
 
-## Unreleased — M2: MoE semantics (October 2026, in progress)
+## Unreleased — M2: MoE semantics (October 2026)
+
+Findings F5, F12, F14, F18, F22 and the new F23–F27 from the October 2026
+correctness audit; see
+[ADR-011](docs/adr/ADR-011-layout-independent-global-mean-objective.md).
+CPU + Gloo only (Windows 11, WSL Ubuntu 24.04, GitHub ubuntu-22.04),
+torch 2.14.1.
 
 ### Changed
 - **F22 — training objective.** The objective is now the mean over the
