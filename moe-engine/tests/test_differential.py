@@ -65,6 +65,7 @@ from pkg.distributed.data_parallel import apply_fsdp2  # noqa: E402
 from pkg.distributed.expert_parallel import all_to_all_dispatch  # noqa: E402
 from pkg.distributed.grad_sync import (  # noqa: E402
     broadcast_replicated_params,
+    clip_grad_norm_,
     finalize_grads,
     global_token_count,
     mark_sequence_parallel,
@@ -276,12 +277,7 @@ def _ep_result(cid: str):
 
 # Finding ID -> xfail reason, for cases that currently fail. A new failing
 # case must add its finding here first.
-_FINDING_TEXT: dict = {
-    "F14": (
-        "F14: gradient-norm clipping uses each rank's local norm, not the global "
-        "norm over EP/TP/DP shards"
-    ),
-}
+_FINDING_TEXT: dict = {}
 
 
 def _params(cases, which):
@@ -958,14 +954,7 @@ def _layout_worker(rank: int, ws: int, cfg: dict) -> list:
     if max_norm is not None:
         # F14: the norm must be global -- every parameter's full gradient
         # counted once across DP, EP and TP shards.
-        try:
-            from pkg.distributed.grad_sync import clip_grad_norm_
-        except ImportError:
-            # train.py's clipping before F14: a local norm per rank.
-            total = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
-        else:
-            total = clip_grad_norm_(model, max_norm, topo)
-        total = float(_full(torch.as_tensor(total)))
+        total = float(clip_grad_norm_(model, max_norm, topo))
         checks.append(
             check(
                 "grad",
@@ -1001,16 +990,14 @@ _LAYOUT_CASES = [
     ("aux-sp2", dict(dp=1, ep=1, tp=2, aux=True), (), (), ()),
     ("aux-dp2-ep2", dict(dp=2, ep=2, tp=1, aux=True), (), (), ()),
     # Same batch with gradient-norm clipping to half the global norm (F14):
-    # the engine's norm must cover every shard once (DP, EP, TP). single and
-    # dp2 pass with torch's clip_grad_norm_ too (FSDP2 DTensor grads reduce
-    # their own norm over DP); EP and TP shards were each rank's local norm.
+    # the engine's norm must cover every shard once (DP, EP, TP).
     ("clip-single", dict(dp=1, ep=1, tp=1, clip=True), (), (), ()),
     ("clip-dp2", dict(dp=2, ep=1, tp=1, clip=True), (), (), ()),
-    ("clip-ep2", dict(dp=1, ep=2, tp=1, clip=True), (), ("F14",), ("F14",)),
-    ("clip-sp2", dict(dp=1, ep=1, tp=2, clip=True), (), ("F14",), ("F14",)),
-    ("clip-dp2-ep2", dict(dp=2, ep=2, tp=1, clip=True), (), ("F14",), ("F14",)),
-    ("clip-dp2-sp2", dict(dp=2, ep=1, tp=2, clip=True), (), ("F14",), ("F14",)),
-    ("clip-ep2-sp2", dict(dp=1, ep=2, tp=2, clip=True), (), ("F14",), ("F14",)),
+    ("clip-ep2", dict(dp=1, ep=2, tp=1, clip=True), (), (), ()),
+    ("clip-sp2", dict(dp=1, ep=1, tp=2, clip=True), (), (), ()),
+    ("clip-dp2-ep2", dict(dp=2, ep=2, tp=1, clip=True), (), (), ()),
+    ("clip-dp2-sp2", dict(dp=2, ep=1, tp=2, clip=True), (), (), ()),
+    ("clip-ep2-sp2", dict(dp=1, ep=2, tp=2, clip=True), (), (), ()),
 ]
 
 

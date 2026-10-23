@@ -53,6 +53,7 @@ from pkg.distributed import (
 )
 from pkg.distributed.grad_sync import (
     broadcast_replicated_params,
+    clip_grad_norm_,
     finalize_grads,
     global_token_count,
 )
@@ -349,7 +350,9 @@ def main() -> None:
         # clipping. Convention: pkg/distributed/grad_sync.py, ADR-011.
         finalize_grads(model, topology, global_token_count(local_tokens, topology))
         total_loss /= max(local_tokens, 1)  # logged: this rank's mean CE
-        torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.training.grad_clip)
+        # Global norm over every DP/EP/TP shard, one coefficient on every rank
+        # (F14); torch.nn.utils.clip_grad_norm_ saw only this rank's shards.
+        clip_grad_norm_(model, cfg.training.grad_clip, topology)
         optimizer.step()
 
         mfu_res = mfu_acct.end_step(tokens=B * S * grad_accum)
