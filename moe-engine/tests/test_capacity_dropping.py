@@ -19,6 +19,8 @@ Covers:
 from __future__ import annotations
 
 import math
+import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -30,8 +32,10 @@ from pkg.distributed.moe_layer import (
     compute_capacity_drop_mask,
 )
 
-pytestmark = pytest.mark.cpu
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from tests._differential import capacity_drop_mask  # noqa: E402
 
+pytestmark = pytest.mark.cpu
 
 # ===========================================================================
 # _cumcount — the core primitive
@@ -130,15 +134,40 @@ class TestComputeCapacityDropMask:
         mask = compute_capacity_drop_mask(idx, num_experts=2, capacity=0)
         assert mask.all()
 
-    def test_multi_k_independent_per_slot(self):
-        """Each top-k slot is capacity-limited independently."""
-        # 2 tokens, K=2. Token0 -> [expert0, expert1]. Token1 -> [expert0, expert1].
-        idx = torch.tensor([[0, 1], [0, 1]])
+    def test_multi_k_capacity_is_per_expert_across_slots(self):
+        """Capacity bounds an expert's (token, slot) pairs over ALL top-k
+        slots: at most ``capacity`` in total. (Replaces
+        test_multi_k_independent_per_slot, which pinned the per-slot
+        semantics that let one expert accept K x capacity pairs; ADR-011.)"""
+        # Token0 -> [e0, e1], token1 -> [e1, e0]: each expert is wanted twice,
+        # once per slot. Per-slot capacity 1 kept all four pairs.
+        idx = torch.tensor([[0, 1], [1, 0]])
         mask = compute_capacity_drop_mask(idx, num_experts=2, capacity=1)
-        # slot k=0: expert0 gets 2 requests, capacity=1 -> 2nd dropped
-        # slot k=1: expert1 gets 2 requests, capacity=1 -> 2nd dropped
-        expected = torch.tensor([[False, False], [True, True]])
+        expected = torch.tensor([[False, True], [False, True]])
         assert torch.equal(mask, expected)
+
+    def test_multi_k_slot_major_priority(self):
+        """First choices win over earlier tokens' second choices (GShard /
+        Switch): every slot-0 pair is placed before any slot-1 pair."""
+        # Token0 -> [e1, e0], token1 -> [e0, e1]. Token-major order would keep
+        # token0's second choice (e0) and drop token1's first choice (e0).
+        idx = torch.tensor([[1, 0], [0, 1]])
+        mask = compute_capacity_drop_mask(idx, num_experts=2, capacity=1)
+        expected = torch.tensor([[False, True], [False, True]])
+        assert torch.equal(mask, expected)
+
+    @pytest.mark.parametrize("seed", range(5))
+    def test_matches_slot_major_reference(self, seed):
+        """Random routings against a plain-loop slot-major reference: no
+        expert keeps more than ``capacity`` pairs, and a pair is dropped
+        only when its expert is already full."""
+        g = torch.Generator().manual_seed(seed)
+        N, K, E, capacity = 40, 3, 5, 9
+        idx = torch.stack([torch.randperm(E, generator=g)[:K] for _ in range(N)])
+        mask = compute_capacity_drop_mask(idx, num_experts=E, capacity=capacity)
+        assert torch.equal(mask, capacity_drop_mask(idx, capacity))
+        kept = torch.bincount(idx[~mask], minlength=E)
+        assert int(kept.max()) <= capacity
 
     def test_single_token(self):
         idx = torch.tensor([[0]])
@@ -295,3 +324,80 @@ class TestDistributedMoELayerCapacityDropping:
         frac1 = run()
         frac2 = run()
         assert frac1 == frac2
+
+
+# ===========================================================================
+# Real dropping: dropped pairs are neither dispatched nor computed (F12)
+# ===========================================================================
+
+
+def _dropping_layer(seed=0, H=16, Fd=32, E=8, K=2, cf=0.25):
+    torch.manual_seed(seed)
+    topo = build_topology(dp_size=1, ep_size=1)
+    return DistributedMoELayer(H, Fd, E, K, topo, capacity_factor=cf, capacity_dropping=True)
+
+
+class TestDropBeforeDispatch:
+    def test_experts_compute_only_kept_pairs(self):
+        """The audit probe's case (E=8, K=2, N=64, capacity_factor=0.25):
+        experts used to compute all N*K = 128 rows. They must compute exactly
+        the kept pairs, at most ``capacity`` per expert."""
+        from tests._differential import dense_router
+
+        layer = _dropping_layer()
+        rows = [0] * layer.num_experts
+        for eid, m in zip(layer.local_expert_ids, layer.experts):
+            m.register_forward_hook(
+                lambda mod, inp, out, eid=eid: rows.__setitem__(eid, rows[eid] + inp[0].shape[0])
+            )
+        x = torch.randn(64, 16)
+        with torch.no_grad():
+            layer(x)
+        capacity = math.ceil(0.25 * 64 * 2 / layer.num_experts)
+        idx, _ = dense_router(x, layer.router.gate_w.detach(), 2)
+        kept = torch.bincount(idx[~capacity_drop_mask(idx, capacity)], minlength=8)
+        assert rows == kept.tolist()
+        assert max(rows) <= capacity
+        assert sum(rows) < 64 * 2
+
+    @pytest.mark.parametrize("k", [1, 2])
+    def test_output_and_grads_match_dense_reference(self, k):
+        from tests._differential import dense_moe
+
+        layer = _dropping_layer(seed=3, K=k, cf=0.5)
+        x = torch.randn(24, 16, requires_grad=True)
+        cot = torch.randn(24, 16)
+        (layer(x) * cot).sum().backward()
+
+        xr = x.detach().clone().requires_grad_(True)
+        gr = layer.router.gate_w.detach().clone().requires_grad_(True)
+        experts = [
+            [
+                w.detach().clone().requires_grad_(True)
+                for w in (m.w_gate.weight, m.w_up.weight, m.w_down.weight)
+            ]
+            for m in layer.experts
+        ]
+        capacity = math.ceil(0.5 * 24 * k / layer.num_experts)
+        y_ref = dense_moe(xr, gr, experts, k, capacity)
+        (y_ref * cot).sum().backward()
+        torch.testing.assert_close(layer(x.detach()), y_ref.detach(), atol=1e-5, rtol=1e-4)
+        torch.testing.assert_close(x.grad, xr.grad, atol=1e-5, rtol=1e-4)
+        torch.testing.assert_close(layer.router.gate_w.grad, gr.grad, atol=1e-5, rtol=1e-4)
+        for m, ref in zip(layer.experts, experts):
+            for w, wr in zip((m.w_gate.weight, m.w_up.weight, m.w_down.weight), ref):
+                g = w.grad if w.grad is not None else torch.zeros_like(w)
+                gref = wr.grad if wr.grad is not None else torch.zeros_like(wr)
+                torch.testing.assert_close(g, gref, atol=1e-5, rtol=1e-4)
+
+    def test_model_takes_capacity_dropping_from_config(self):
+        """cfg.model.capacity_dropping must reach every MoE layer (ToyMoEBlock
+        never passed it, so the config switch had no effect)."""
+        from pkg.models.moe import ToyMoEModel
+        from pkg.utils.config import MoEConfig
+
+        cfg = MoEConfig.from_yaml(Path(__file__).resolve().parents[1] / "configs" / "smoke.yaml")
+        cfg.model.capacity_dropping = True
+        model = ToyMoEModel(cfg, build_topology(dp_size=1, ep_size=1))
+        layers = [m for m in model.modules() if isinstance(m, DistributedMoELayer)]
+        assert layers and all(m.capacity_dropping for m in layers)

@@ -4,6 +4,109 @@ All notable changes to this project are recorded here. Verification claims
 state the environment they were run in; nothing below was run on a GPU, with
 NCCL, or across multiple hosts unless it says so.
 
+## Unreleased — M2: MoE semantics (October 2026)
+
+Findings F5, F12, F14, F18, F22 and the new F23–F27 from the October 2026
+correctness audit; see
+[ADR-011](docs/adr/ADR-011-layout-independent-global-mean-objective.md).
+CPU + Gloo only (Windows 11, WSL Ubuntu 24.04, GitHub ubuntu-22.04),
+torch 2.14.1.
+
+### Changed
+- **F22 — training objective.** The objective is now the mean over the
+  global batch's loss-bearing tokens, independent of the (dp, ep, tp/sp)
+  layout, of per-rank token counts and of the gradient-accumulation count.
+  Before, each rank's own mean was summed over EP/SP and averaged over DP and
+  micro-batches. Micro-batches backpropagate local loss sums;
+  `grad_sync.finalize_grads` divides by `grad_sync.global_token_count` once
+  per step, and FSDP2 now sums over DP. Supersedes ADR-010's loss convention:
+  see [ADR-011](docs/adr/ADR-011-layout-independent-global-mean-objective.md).
+  The CI differential job pins `torch==2.14.1`, because the FSDP2 methods
+  this relies on depend on the torch version.
+
+- **F5 — router auxiliary losses.** The router z-loss was a detached float
+  read from block 0 only, and there was no load-balancing loss, so neither
+  trained the router. Every MoE layer now produces tensor-valued z-loss and
+  Switch load-balancing sums. The expert fractions are global over the
+  micro-batch (DP × EP). `collect_aux_losses` gathers them from every layer,
+  and `train.py` adds them with `z_loss_weight` (default 0.0) and the new
+  `load_balance_weight` (default 1e-2). See ADR-011, "Router auxiliary
+  losses".
+
+- **F12 — capacity dropping.** Over-capacity (token, slot) pairs are now
+  removed before dispatch, so they are neither sent nor computed. Before,
+  only their combine weights were zeroed, and every pair was still
+  dispatched and computed. Capacity is now per expert across all top-k slots
+  with slot-major priority (first choices before second choices), per
+  sending rank's batch, instead of per slot. `cfg.model.capacity_dropping`
+  now reaches every layer. `test_multi_k_independent_per_slot` was rewritten
+  to the new semantics. See ADR-011, "Expert capacity and token dropping".
+
+- **F14 — gradient-norm clipping.** `train.py` clipped with
+  `torch.nn.utils.clip_grad_norm_(model.parameters())`. Under EP or TP that
+  is each rank's local norm, which misses the other ranks' expert and TP
+  shards. Ranks also clipped with different coefficients, so replicated
+  weights drifted apart. The new `grad_sync.clip_grad_norm_` computes the
+  global norm, each parameter counted once over DP, EP and TP shards, and
+  applies one coefficient on every rank.
+
+- **F14 — FSDP2 and expert weights (documentation).** `apply_fsdp2` said
+  expert weights were excluded from FSDP2. They never were: the root
+  `fully_shard` shards them over DP. That is expert-data-parallelism, and it
+  is correct, because each DP group holds one EP rank's experts. The
+  docstring and comments now say so, and a 4-rank test pins it: experts are
+  sharded over DP, identical across DP and distinct across EP, and after
+  three full engine steps every replicated weight, router included, is
+  identical on every rank. No behaviour change.
+
+- **F18 — training data under tensor parallelism.** `train.py` drew every
+  micro-batch with unseeded `torch.randint` on each rank, so the ranks of a
+  tensor-parallel group trained on different tokens. `train.micro_batch` now
+  draws from a generator seeded by `(training.seed, step, micro-batch, data
+  rank)`: TP peers share data, other DP×EP ranks get different data, and
+  every batch is reproducible. The step body is now `train.train_step`, and
+  a tp = 2 step is tested against a dense reference. The data is still
+  synthetic.
+
+### Removed
+- **F27 — `.github/workflows/signal-correctness.yml`.** It was invalid YAML
+  from the day it was added (`d9cf60c`, 2026-02-24): an unquoted
+  `name: Alternative: ...` on line 25. GitHub could not parse it, so it never
+  ran a job and reported a failed run on every push to any branch. Its checks
+  either already run in `ci.yml` or were obsolete:
+  - numerics tests: `test_kernels_numerics.py` runs in the Tier-0 CPU job;
+  - token conservation: the `benchmark` job's conservation assertion, plus
+    `test_router.py` and `test_kernels.py` in Tier-0;
+  - Python syntax: `ruff check` in the lint job;
+  - "assertion guards" (greps for three source lines): obsolete, since none
+    of the three lines exists any more and grepping source text is not a
+    behavioural check.
+
+### Fixed
+- **F23 — biased router.** `MoERouter(bias=True)` recomputed its routing
+  under `no_grad`, so its combine weights carried no gradient.
+- **F24 — FSDP2 without mixed precision.** `apply_fsdp2` passed
+  `mp_policy=None`, so FSDP2 raised at the first forward of every fp32 run at
+  dp > 1.
+- **F25 — FSDP2 with sparse expert use.** DP ranks whose tokens skipped
+  different experts reduce-scattered different parameter sets: a hang, or one
+  expert's gradient silently summed into another's. Unused parameters now
+  reduce zeros.
+- **F26 — parameter marks under FSDP2.** FSDP2 replaces parameters with new
+  DTensor parameters, which dropped `mark_sequence_parallel`, so at dp > 1
+  with tp > 1 SP-region weights were never summed over TP. `apply_fsdp2` now
+  restores the marks.
+
+### Added
+- `tests/test_differential.py::test_layout_*`: one global batch with unequal
+  loss masks and 2 micro-batches, run under single, dp2, ep2, sp2, dp2×ep2,
+  dp2×sp2 and ep2×sp2 and compared against a dense global-mean reference
+  (CPU/Gloo; FSDP2 at dp = 2 on CPU/Gloo only). The `aux-*` variants add the
+  router auxiliary losses.
+- `tests/test_router_losses.py` (Tier-0): biased-router gradients (F23);
+  auxiliary-loss values and gradients against a dense reference,
+  aggregation over every layer, and config defaults (F5).
+
 ## Unreleased — M1: correct gradients under EP/TP/SP (October 2026)
 
 Fixes from the October 2026 correctness audit. Before this, **training was

@@ -61,7 +61,15 @@ import torch.nn.functional as F
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from pkg.distributed.data_parallel import apply_fsdp2  # noqa: E402
 from pkg.distributed.expert_parallel import all_to_all_dispatch  # noqa: E402
+from pkg.distributed.grad_sync import (  # noqa: E402
+    broadcast_replicated_params,
+    clip_grad_norm_,
+    finalize_grads,
+    global_token_count,
+    mark_sequence_parallel,
+)
 from pkg.distributed.mesh import build_topology  # noqa: E402
 from pkg.distributed.moe_layer import DistributedMoELayer  # noqa: E402
 from pkg.distributed.sequence_parallel import (  # noqa: E402
@@ -73,9 +81,12 @@ from pkg.distributed.tensor_parallel import (  # noqa: E402
     RowParallelLinear,
 )
 from tests._differential import (  # noqa: E402
+    capacity_drop_mask,
     check,
     compare,
+    dense_aux_sums,
     dense_moe,
+    dense_router,
     failures_for,
     run_multiprocess,
 )
@@ -179,10 +190,34 @@ def _ep_worker(rank: int, ws: int, cfg: dict) -> list:
                 rg if rg is not None else torch.zeros_like(ref_experts[eid][j])
             )
 
+    # Rows each expert must compute: with dropping, only the kept (token,
+    # slot) pairs, i.e. every source rank's kept pairs for that expert.
+    expected_rows = {}
+    for blk in shards:
+        idx_s, _ = dense_router(blk["x"], gate, K)
+        if capacity is not None:
+            idx_s = idx_s[~capacity_drop_mask(idx_s, capacity)]
+        for e, n in enumerate(torch.bincount(idx_s.reshape(-1), minlength=E).tolist()):
+            expected_rows[e] = expected_rows.get(e, 0) + n
+    rows = {eid: 0 for eid in layer.local_expert_ids}
+    for eid, m in zip(layer.local_expert_ids, layer.experts):
+        m.register_forward_hook(
+            lambda mod, inp, out, eid=eid: rows.__setitem__(eid, rows[eid] + inp[0].shape[0])
+        )
+
     # ---- Distributed run ----
     xd = x.clone().requires_grad_(True)
     y = layer(xd)
     checks = [compare("fwd", "output", y, y_ref)]
+    for eid, n in rows.items():
+        checks.append(
+            check(
+                "rows",
+                f"expert {eid} rows computed",
+                n == expected_rows[eid],
+                f"{n} computed, {expected_rows[eid]} kept pairs routed to it",
+            )
+        )
     if cfg["drop"]:
         frac = layer.last_dropped_token_fraction
         checks.append(
@@ -203,7 +238,7 @@ def _ep_worker(rank: int, ws: int, cfg: dict) -> list:
 
 
 def _ep_cases():
-    """(id, world_size, cfg, findings-that-fail-fwd, findings-that-fail-grad)."""
+    """(id, world_size, cfg, findings that fail fwd, grad, rows)."""
     cases = []
     # E=5 (ep=2, ep=4) and E=10 (ep=4) are the non-divisible cases that
     # crashed or deadlocked before the F4 fix; they are now plain regressions.
@@ -226,22 +261,22 @@ def _ep_cases():
                             f"ep{ws}-E{E}-k{K}-{'imbal' if imbalanced else 'bal'}"
                             f"-{'drop' if drop else 'nodrop'}"
                         )
-                        cases.append((cid, ws, cfg, (), ()))
+                        cases.append((cid, ws, cfg, (), (), ()))
     return cases
 
 
 _EP_CASES = _ep_cases()
+_EP_DROP_CASES = [c for c in _EP_CASES if c[2]["drop"]]
 
 
 @functools.lru_cache(maxsize=None)
 def _ep_result(cid: str):
-    _, ws, cfg, _, _ = next(c for c in _EP_CASES if c[0] == cid)
+    _, ws, cfg, *_ = next(c for c in _EP_CASES if c[0] == cid)
     return run_multiprocess(_ep_worker, ws, cfg)
 
 
-# Finding ID -> xfail reason, for cases that currently fail. Empty since the
-# M1 fixes (F1-F4, F21, F14-init); a new failing case must add its finding
-# here first.
+# Finding ID -> xfail reason, for cases that currently fail. A new failing
+# case must add its finding here first.
 _FINDING_TEXT: dict = {}
 
 
@@ -271,6 +306,14 @@ def test_ep_forward_matches_dense(cid):
 @pytest.mark.parametrize("cid", _params(_EP_CASES, 4))
 def test_ep_gradients_match_dense(cid):
     _assert_kind(_ep_result(cid), "grad")
+
+
+@pytest.mark.parametrize("cid", _params(_EP_DROP_CASES, 5))
+def test_ep_capacity_dropping_bounds_expert_rows(cid):
+    """F12: with capacity dropping, each expert computes exactly the kept
+    (token, slot) pairs routed to it -- dropped pairs are neither dispatched
+    nor computed -- so expert compute and EP traffic are bounded by capacity."""
+    _assert_kind(_ep_result(cid), "rows")
 
 
 # ---------------------------------------------------------------------------
@@ -717,6 +760,266 @@ def test_composite_engine_gradients_match_dense(variant):
 @pytest.mark.parametrize("variant", _params(_ENGINE_CASES, 4))
 def test_composite_engine_sgd_step_matches_dense(variant):
     _assert_kind(_composite_result(variant), "step")
+
+
+# ===========================================================================
+# Layout independence: one global batch under many (dp, ep, sp) layouts
+# ===========================================================================
+
+# Global batch: _LG sequences of length _LS per micro-batch, _LMB micro-batches
+# (gradient accumulation). Sequence s of micro-batch mb has a loss mask over
+# its first _LMASK[mb][s] tokens, so data ranks hold unequal numbers of
+# loss-bearing tokens (in some layouts one holds none) and the micro-batches
+# differ too. A per-rank or per-micro-batch mean then weights tokens
+# unequally; only a mean over the global batch matches the dense reference.
+_LG, _LS, _LMB = 4, 7, 2
+_LMASK = ((7, 2, 5, 1), (3, 6, 0, 4))
+# Auxiliary-loss weights for the aux-* layouts: large enough that the router
+# gradient is dominated by them, so a wrong f_e or a TP double count shows.
+_W_Z, _W_LB = 0.05, 0.5
+
+
+class _LayoutModel(nn.Module):
+    """Replicated input projection -> sequence-parallel block (fused
+    projection of each sequence shard with a replicated weight) -> MoE ->
+    output projection, with residuals. At tp = 1 the SP block is a plain
+    projection; dp and ep split the batch; ep shards the experts."""
+
+    def __init__(self, H, Fd, E, K, topo):
+        super().__init__()
+        self.topo = topo
+        self.inp = nn.Linear(H, H)
+        self.sp_w = nn.Parameter(torch.randn(H, H) / math.sqrt(H))
+        self.moe = DistributedMoELayer(H, Fd, E, K, topo)
+        self.out = nn.Linear(H, H)
+
+    def forward(self, x):
+        h = torch.tanh(self.inp(x))
+        s = torch.tanh(scatter_to_sequence_parallel(h, self.topo, next_weight=self.sp_w))
+        g = gather_from_sequence_parallel(s, self.topo, orig_seq_len=x.shape[1])
+        return self.out(g + self.moe(g))
+
+
+def _token_loss_sum(y, t, m):
+    """Sum over loss-bearing tokens of 0.5 * ||y - t||^2."""
+    return (0.5 * ((y - t) ** 2).sum(-1) * m).sum()
+
+
+def _full(t):
+    """Full tensor of an FSDP2 DTensor (a DP-group collective), else ``t``."""
+    return t.full_tensor() if hasattr(t, "full_tensor") else t
+
+
+def _layout_worker(rank: int, ws: int, cfg: dict) -> list:
+    H, Fd, E, K, LR = 16, 32, 8, 2, 0.1
+    dp, ep, tp = cfg["dp"], cfg["ep"], cfg["tp"]
+    topo = build_topology(dp_size=dp, ep_size=ep, tp_size=tp, device_type="cpu")
+    torch.manual_seed(SEED + rank)
+    model = _LayoutModel(H, Fd, E, K, topo)
+    if cfg.get("aux"):
+        model.moe.aux_losses = True  # F5: z-loss and load-balancing sums per forward
+    mark_sequence_parallel(model.sp_w)
+    broadcast_replicated_params(model, topo)
+
+    # ---- The global batch (identical on every rank) and this rank's part.
+    #      TP ranks of one (dp, ep) position hold the same sequences. ----
+    g = torch.Generator().manual_seed(SEED + 4242)
+    X = torch.randn(_LMB, _LG, _LS, H, generator=g)
+    T = torch.randn(_LMB, _LG, _LS, H, generator=g)
+    M = torch.zeros(_LMB, _LG, _LS)
+    for mb, lengths in enumerate(_LMASK):
+        for s, n in enumerate(lengths):
+            M[mb, s, :n] = 1.0
+    n_global = int(M.sum())
+    per = _LG // (dp * ep)
+    d = topo.dp_rank * ep + topo.ep_rank
+    mine = slice(d * per, (d + 1) * per)
+
+    # ---- Dense reference: full experts from every (expert, TP shard),
+    #      replicated params from rank 0; loss = global-batch mean. ----
+    shards = _all_gather_obj(
+        {
+            "experts": {
+                (eid, topo.tp_rank): tuple(
+                    _detached(w) for w in (m.w_gate.weight, m.w_up.weight, m.w_down.weight)
+                )
+                for eid, m in zip(model.moe.local_expert_ids, model.moe.experts)
+            },
+            "rep": {
+                n: _detached(p)
+                for n, p in model.named_parameters()
+                if not n.startswith("moe.experts.")
+            },
+        }
+    )
+    parts = {}
+    for s in shards:
+        parts.update(s["experts"])
+    ref_experts = [
+        [
+            torch.cat([parts[(e, r)][0] for r in range(tp)], 0).requires_grad_(True),
+            torch.cat([parts[(e, r)][1] for r in range(tp)], 0).requires_grad_(True),
+            torch.cat([parts[(e, r)][2] for r in range(tp)], 1).requires_grad_(True),
+        ]
+        for e in range(E)
+    ]
+    rp = {n: t.clone().requires_grad_(True) for n, t in shards[0]["rep"].items()}
+
+    aux_sums = []  # per micro-batch (z, lb) of the dense MoE layer
+
+    def dense_model(xx):
+        h = torch.tanh(F.linear(xx, rp["inp.weight"], rp["inp.bias"]))
+        gg = torch.tanh(F.linear(h, rp["sp_w"]))
+        aux_sums.append(dense_aux_sums(gg.reshape(-1, H), rp["moe.router.gate_w"], K))
+        moe = dense_moe(gg.reshape(-1, H), rp["moe.router.gate_w"], ref_experts, K)
+        return F.linear(gg + moe.reshape(gg.shape), rp["out.weight"], rp["out.bias"])
+
+    loss_ref = 0.0
+    y_ref = []
+    for mb in range(_LMB):
+        ys = dense_model(X[mb])
+        y_ref.append(ys[mine].detach())
+        loss_ref = loss_ref + _token_loss_sum(ys, T[mb], M[mb])
+        if cfg.get("aux"):
+            # Auxiliary sums over every routed token of the whole micro-batch,
+            # with the micro-batch's global expert fractions; normalised by
+            # the same global loss-token count (ADR-011).
+            z, lb = aux_sums[-1]
+            loss_ref = loss_ref + _W_Z * z + _W_LB * lb
+    (loss_ref / n_global).backward()
+
+    max_norm = None
+    if cfg.get("clip"):
+        # Clip the dense gradients by their global norm (every parameter
+        # counted once, full tensors) to half of it, so clipping is active.
+        dense = [t for t in rp.values()] + [w for ex in ref_experts for w in ex]
+        ref_norm = float(
+            torch.sqrt(sum((t.grad.double() ** 2).sum() for t in dense if t.grad is not None))
+        )
+        max_norm = 0.5 * ref_norm
+        coef = min(1.0, max_norm / (ref_norm + 1e-6))
+        with torch.no_grad():
+            for t in dense:
+                if t.grad is not None:
+                    t.grad.mul_(coef)
+
+    chunk = Fd // tp
+    rows = slice(topo.tp_rank * chunk, (topo.tp_rank + 1) * chunk)
+
+    def ref_of(name, tensors_of):
+        if not name.startswith("moe.experts."):
+            return tensors_of(rp[name])
+        i, pname = name.split(".")[2], name.split(".")[3]
+        eid = model.moe.local_expert_ids[int(i)]
+        j = ("w_gate", "w_up", "w_down").index(pname)
+        full = tensors_of(ref_experts[eid][j])
+        return full[:, rows] if pname == "w_down" else full[rows]
+
+    def grad_of(t):
+        return t.grad if t.grad is not None else torch.zeros_like(t)
+
+    with torch.no_grad():
+        ref_grads = {n: ref_of(n, grad_of) for n, _ in model.named_parameters()}
+        ref_after = {
+            n: ref_of(n, lambda t: t - LR * grad_of(t)) for n, _ in model.named_parameters()
+        }
+
+    # ---- Engine path: FSDP2 over DP, then train.py's step structure. ----
+    # Each micro-batch backpropagates its local loss SUM; finalize_grads
+    # divides by the global token count once per step (ADR-011).
+    model = apply_fsdp2(model, topo)
+    checks = []
+    collect_aux_losses = None
+    if cfg.get("aux"):
+        try:
+            from pkg.distributed.moe_layer import collect_aux_losses
+        except ImportError as exc:
+            for kind in ("grad", "step"):
+                checks.append(check(kind, "engine collect_aux_losses", False, repr(exc)))
+    local_tokens = 0
+    for mb in range(_LMB):
+        y = model(X[mb][mine])
+        checks.append(compare("fwd", f"micro-batch {mb} output", y, y_ref[mb]))
+        loss = _token_loss_sum(y, T[mb][mine], M[mb][mine])
+        if collect_aux_losses is not None:
+            z, lb = collect_aux_losses(model)
+            loss = loss + _W_Z * z + _W_LB * lb
+        loss.backward()
+        local_tokens += int(M[mb][mine].sum())
+    n_engine = global_token_count(local_tokens, topo)
+    checks.append(
+        check("grad", "global_token_count", n_engine == n_global, f"{n_engine} vs {n_global}")
+    )
+    finalize_grads(model, topo, n_engine)
+    if max_norm is not None:
+        # F14: the norm must be global -- every parameter's full gradient
+        # counted once across DP, EP and TP shards.
+        total = float(clip_grad_norm_(model, max_norm, topo))
+        checks.append(
+            check(
+                "grad",
+                "clip: total grad norm",
+                abs(total - ref_norm) <= 1e-5 + 1e-4 * ref_norm,
+                f"engine {total:.6g} vs dense {ref_norm:.6g}",
+            )
+        )
+    for n, p in model.named_parameters():
+        grad = _full(p.grad) if p.grad is not None else None
+        checks.append(compare("grad", f"{n}.grad", grad, ref_grads[n]))
+    torch.optim.SGD(model.parameters(), lr=LR).step()
+    for n, p in model.named_parameters():
+        checks.append(compare("step", f"{n} after SGD step", _full(p.detach()), ref_after[n]))
+    return checks
+
+
+# (id, cfg, findings failing fwd, grad, step); world size = dp * ep * tp.
+_LAYOUT_CASES = [
+    ("single", dict(dp=1, ep=1, tp=1), (), (), ()),
+    ("dp2", dict(dp=2, ep=1, tp=1), (), (), ()),
+    ("ep2", dict(dp=1, ep=2, tp=1), (), (), ()),
+    ("sp2", dict(dp=1, ep=1, tp=2), (), (), ()),
+    ("dp2-ep2", dict(dp=2, ep=2, tp=1), (), (), ()),
+    ("dp2-sp2", dict(dp=2, ep=1, tp=2), (), (), ()),
+    ("ep2-sp2", dict(dp=1, ep=2, tp=2), (), (), ()),
+    # Same batch with the router auxiliary losses on (F5): expert fractions
+    # must be global over the micro-batch (DP x EP), never double-counted
+    # over TP.
+    ("aux-single", dict(dp=1, ep=1, tp=1, aux=True), (), (), ()),
+    ("aux-dp2", dict(dp=2, ep=1, tp=1, aux=True), (), (), ()),
+    ("aux-ep2", dict(dp=1, ep=2, tp=1, aux=True), (), (), ()),
+    ("aux-sp2", dict(dp=1, ep=1, tp=2, aux=True), (), (), ()),
+    ("aux-dp2-ep2", dict(dp=2, ep=2, tp=1, aux=True), (), (), ()),
+    # Same batch with gradient-norm clipping to half the global norm (F14):
+    # the engine's norm must cover every shard once (DP, EP, TP).
+    ("clip-single", dict(dp=1, ep=1, tp=1, clip=True), (), (), ()),
+    ("clip-dp2", dict(dp=2, ep=1, tp=1, clip=True), (), (), ()),
+    ("clip-ep2", dict(dp=1, ep=2, tp=1, clip=True), (), (), ()),
+    ("clip-sp2", dict(dp=1, ep=1, tp=2, clip=True), (), (), ()),
+    ("clip-dp2-ep2", dict(dp=2, ep=2, tp=1, clip=True), (), (), ()),
+    ("clip-dp2-sp2", dict(dp=2, ep=1, tp=2, clip=True), (), (), ()),
+    ("clip-ep2-sp2", dict(dp=1, ep=2, tp=2, clip=True), (), (), ()),
+]
+
+
+@functools.lru_cache(maxsize=None)
+def _layout_result(cid: str):
+    cfg = next(c for c in _LAYOUT_CASES if c[0] == cid)[1]
+    return run_multiprocess(_layout_worker, cfg["dp"] * cfg["ep"] * cfg["tp"], cfg)
+
+
+@pytest.mark.parametrize("cid", _params(_LAYOUT_CASES, 2))
+def test_layout_forward_matches_dense(cid):
+    _assert_kind(_layout_result(cid), "fwd")
+
+
+@pytest.mark.parametrize("cid", _params(_LAYOUT_CASES, 3))
+def test_layout_gradients_match_dense_global_mean(cid):
+    _assert_kind(_layout_result(cid), "grad")
+
+
+@pytest.mark.parametrize("cid", _params(_LAYOUT_CASES, 4))
+def test_layout_sgd_step_matches_dense_global_mean(cid):
+    _assert_kind(_layout_result(cid), "step")
 
 
 if __name__ == "__main__":

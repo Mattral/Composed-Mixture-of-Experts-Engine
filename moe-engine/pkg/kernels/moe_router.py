@@ -662,13 +662,22 @@ class MoERouter(torch.nn.Module):
 
         # Saved for z-loss / load-imbalance computation
         self._last_logits: Optional[torch.Tensor] = None
+        # When keep_logits is set (DistributedMoELayer does so for its
+        # auxiliary losses, F5), forward also returns the *differentiable*
+        # fp32 logits (x @ gate_w + bias) as a 4th output. They must be built
+        # inside the router's forward and returned from it: FSDP2 unshards
+        # the router's parameters only for its own forward, and re-unshards
+        # them for backward only when a gradient reaches one of its outputs.
+        self.keep_logits: bool = False
 
     def forward(
         self,
         tokens: torch.Tensor,
         force_reference: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Returns (topk_idx [N, K], topk_w [N, K], dispatch_cnt [E])."""
+        """Returns (topk_idx [N, K], topk_w [N, K], dispatch_cnt [E]), plus the
+        differentiable fp32 logits [N, E] as a 4th element when
+        ``keep_logits`` is set."""
         if tokens.dim() == 3:
             B, S, H = tokens.shape
             flat = tokens.reshape(B * S, H)
@@ -679,23 +688,28 @@ class MoERouter(torch.nn.Module):
         assert H == self.hidden_dim
 
         gate_w = self.gate_w
-        if self.bias is not None:
-            force_reference = True
 
         _router_report: dict = {}
-        idx, w = MoERouterAutograd.apply(flat, gate_w, self.top_k, force_reference, _router_report)
+        if self.bias is not None:
+            # MoERouterFunction (and the Triton kernel) route on x @ gate_w
+            # only. With a bias, route in differentiable fp64 PyTorch instead.
+            # (This used to recompute idx/w under no_grad after the Function
+            # call, so the combine weights carried no gradient at all: F23.)
+            logits64 = flat.to(torch.float64) @ gate_w.to(torch.float64) + self.bias.to(
+                torch.float64
+            )
+            topk_vals, idx = torch.topk(torch.softmax(logits64, dim=-1), k=self.top_k, dim=-1)
+            w = (topk_vals / topk_vals.sum(-1, keepdim=True)).to(tokens.dtype)
+        else:
+            idx, w = MoERouterAutograd.apply(
+                flat, gate_w, self.top_k, force_reference, _router_report
+            )
 
-        if self.bias is not None and force_reference:
-            with torch.no_grad():
-                logits = flat.to(torch.float32) @ gate_w.to(torch.float32) + self.bias.to(
-                    torch.float32
-                )
-                probs = torch.softmax(logits, dim=-1)
-                topk_vals, idx_new = torch.topk(probs, k=self.top_k, dim=-1)
-                w_new = (topk_vals / topk_vals.sum(-1, keepdim=True).clamp_min(1e-30)).to(
-                    tokens.dtype
-                )
-            idx, w = idx_new.to(torch.long), w_new
+        logits = None
+        if self.keep_logits:
+            logits = flat.float() @ gate_w.float()
+            if self.bias is not None:
+                logits = logits + self.bias.float()
 
         # Dispatch count + invariant check
         dispatch_cnt = torch.bincount(idx.reshape(-1), minlength=self.num_experts).to(torch.long)
@@ -754,4 +768,6 @@ class MoERouter(torch.nn.Module):
             expert_load_imbalance=float(load_imbalance),
             router_z_loss=float(z_loss),
         )
+        if logits is not None:
+            return idx, w, dispatch_cnt, logits
         return idx, w, dispatch_cnt

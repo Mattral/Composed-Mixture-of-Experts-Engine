@@ -22,31 +22,42 @@ Which parameters, over which groups
   data and hold identical gradients, so nothing else is reduced over TP
   (doing so would multiply those gradients by ``tp_size``).
 * **Never the DP group.** Data parallelism is owned by FSDP2
-  (:func:`~pkg.distributed.data_parallel.apply_fsdp2`), which reduces over
-  the DP mesh. The EP and TP groups share only the rank itself with the DP
-  group, so this module cannot double-reduce anything FSDP2 reduces. FSDP2
-  gradients are DTensors; their local shard is reduced.
+  (:func:`~pkg.distributed.data_parallel.apply_fsdp2`), which SUM-reduces
+  over the DP mesh. The EP and TP groups share only the rank itself with the
+  DP group, so this module cannot double-reduce anything FSDP2 reduces.
+  FSDP2 gradients are DTensors; their local shard is reduced.
 
-Loss-normalisation convention
------------------------------
-The global objective these reductions implement is::
+Training objective (ADR-011, F22)
+---------------------------------
+The objective is the **mean over the global batch's loss-bearing tokens**::
 
-    L = (1 / dp_size) * sum over all ranks r of L_r
+    L = (1 / N_global) * sum over loss-bearing tokens t of loss_t
 
-where ``L_r`` is whatever loss rank ``r`` computes on its own tokens (for
-example a mean over them). That is: a **sum** over EP ranks and over
-sequence-parallel shards, a **mean** over DP replicas (FSDP2 averages).
-Expert gradients already have exactly this form (the dispatch/combine
-backward sums over EP ranks; FSDP2 averages over DP), so all reductions here
-use ``SUM``. To train on the mean over EP ranks as well, divide each rank's
-loss by ``ep_size``.
+where the global batch is every micro-batch of one optimizer step on every
+data-distinct rank (DP x EP). TP ranks of one (dp, ep) position hold the
+same tokens and compute the loss on TP-replicated outputs, so each token
+counts once. It does not depend on the (dp, ep, tp/sp) layout, on how many
+loss-bearing tokens each rank holds, or on the accumulation count.
+
+How it is implemented:
+
+* each micro-batch backpropagates its rank's **sum** of per-token losses
+  (no division);
+* every cross-rank gradient reduction is a **SUM**: over EP and the TP group
+  here, over DP in FSDP2 (``apply_fsdp2`` sets a divide factor of 1);
+* once per step, :func:`finalize_grads` runs :func:`sync_replicated_grads`
+  and divides every gradient by ``N_global`` from :func:`global_token_count`.
+
+Expert gradients have the same form: the dispatch/combine backward sums over
+EP ranks and FSDP2 sums over DP.
 
 Usage
 -----
-Call :func:`sync_replicated_grads` once per optimizer step, after all
-micro-batch backward passes and before gradient clipping and
-``optimizer.step()`` (Megatron's ``finalize_model_grads`` position). Every
-rank must call it on the same model structure.
+Call :func:`finalize_grads` once per optimizer step, after all micro-batch
+backward passes and before gradient clipping and ``optimizer.step()``
+(Megatron's ``finalize_model_grads`` position). Every rank must call it on
+the same model structure. :func:`sync_replicated_grads` alone (no
+normalisation) is what it runs first.
 
 Initialisation (F14-init)
 -------------------------
@@ -68,6 +79,10 @@ Public API
 ----------
     mark_sequence_parallel(param)
     mark_tensor_parallel_shard(param)
+    sum_over_data_ranks(tensor, topology) -> tensor
+    global_token_count(local_count, topology) -> int
+    finalize_grads(model, topology, num_tokens)
+    clip_grad_norm_(model, max_norm, topology) -> total norm
     sync_replicated_grads(model, topology)
     broadcast_replicated_params(model, topology)
 """
@@ -90,6 +105,10 @@ except Exception:  # pragma: no cover
 __all__ = [
     "mark_sequence_parallel",
     "mark_tensor_parallel_shard",
+    "sum_over_data_ranks",
+    "global_token_count",
+    "finalize_grads",
+    "clip_grad_norm_",
     "sync_replicated_grads",
     "broadcast_replicated_params",
     "SEQUENCE_PARALLEL_ATTR",
@@ -169,6 +188,116 @@ def sync_replicated_grads(model: nn.Module, topology: ParallelTopology) -> None:
             dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=ep_group)
         if over_tp:
             dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=tp_group)
+
+
+def sum_over_data_ranks(t: torch.Tensor, topology: ParallelTopology) -> torch.Tensor:
+    """SUM-all-reduce ``t`` in place over the DP and EP groups, the ranks
+    that hold different tokens, and return it. Never over TP: TP ranks hold
+    the same tokens. One all-reduce per non-trivial group; a no-op when
+    ``torch.distributed`` is not initialised."""
+    if not dist.is_initialized():
+        return t
+    if topology.dp_size > 1:
+        if topology.mesh is None:
+            raise RuntimeError("sum_over_data_ranks: dp_size > 1 requires a DeviceMesh topology")
+        dist.all_reduce(t, op=dist.ReduceOp.SUM, group=topology.mesh["dp"].get_group())
+    ep_group = _ep_group(topology)
+    if ep_group is not None:
+        dist.all_reduce(t, op=dist.ReduceOp.SUM, group=ep_group)
+    return t
+
+
+def global_token_count(local_count: int, topology: ParallelTopology) -> int:
+    """Number of loss-bearing tokens in the global batch: ``local_count``
+    (this rank's count over all micro-batches of the step) summed over the
+    data-distinct ranks (:func:`sum_over_data_ranks`)."""
+    count = torch.tensor([int(local_count)], dtype=torch.int64, device=topology.device)
+    return int(sum_over_data_ranks(count, topology).item())
+
+
+def finalize_grads(model: nn.Module, topology: ParallelTopology, num_tokens: int) -> None:
+    """Turn accumulated per-token-loss **sums** into the gradient of the
+    global-batch mean (ADR-011): :func:`sync_replicated_grads`, then divide
+    every gradient by ``num_tokens`` (from :func:`global_token_count`).
+
+    Call once per optimizer step, after the last micro-batch's backward and
+    before clipping. A step with no loss-bearing tokens anywhere has zero
+    gradients and is left as is.
+    """
+    sync_replicated_grads(model, topology)
+    if num_tokens <= 0:
+        return
+    with torch.no_grad():
+        for p in model.parameters():
+            if p.grad is not None:
+                _local(p.grad).div_(num_tokens)
+
+
+def clip_grad_norm_(
+    model: nn.Module, max_norm: float, topology: ParallelTopology, eps: float = 1e-6
+) -> torch.Tensor:
+    """Clip gradients by their **global** L2 norm and return that norm (F14).
+
+    The norm is that of the full model's gradient with every parameter
+    counted once, whatever the layout. Each rank adds up the squared norms of
+    its local gradients by class, and each class is summed over exactly the
+    groups whose ranks hold different parts of it:
+
+    * over DP: FSDP2-sharded gradients (DTensors; each DP rank holds a slice);
+    * over EP: expert parameters (each EP rank holds different experts);
+    * over TP: parameters marked :func:`mark_tensor_parallel_shard`.
+
+    Everything else is replicated across that group (after
+    :func:`sync_replicated_grads`) and is counted once. The class sums take
+    at most three all-reduces of 8 numbers, and every rank issues the same
+    ones. All gradients are then scaled by ``min(1, max_norm / (norm + eps))``,
+    the same coefficient on every rank, like ``torch.nn.utils.clip_grad_norm_``.
+
+    Call after :func:`finalize_grads` (or :func:`sync_replicated_grads`) and
+    before ``optimizer.step()``. ``torch.nn.utils.clip_grad_norm_`` over
+    ``model.parameters()`` saw only each rank's own shards, so under EP or
+    TP every rank clipped with a different, too-small norm.
+    """
+    experts = _expert_param_ids(model)
+    groups = [
+        topology.mesh["dp"].get_group()
+        if dist.is_initialized() and topology.dp_size > 1 and topology.mesh is not None
+        else None,
+        _ep_group(topology) if dist.is_initialized() else None,
+        tp_process_group(topology) if topology.tp_size > 1 else None,
+    ]
+    sq = torch.zeros(8, dtype=torch.float64, device=topology.device)
+    grads = []
+    for p in model.parameters():
+        if p.grad is None:
+            continue
+        g = p.grad
+        sharded = (
+            DTensor is not None and isinstance(g, DTensor),
+            id(p) in experts,
+            bool(getattr(p, TENSOR_PARALLEL_SHARD_ATTR, False)),
+        )
+        local = _local(g)
+        key = sum(
+            int(flag and grp is not None) << i for i, (flag, grp) in enumerate(zip(sharded, groups))
+        )
+        sq[key] += local.detach().double().pow(2).sum()
+        grads.append(local)
+    keys = torch.arange(8, device=sq.device)
+    for i, grp in enumerate(groups):
+        if grp is None:
+            continue
+        mask = ((keys >> i) & 1).bool()
+        part = torch.where(mask, sq, torch.zeros_like(sq))
+        dist.all_reduce(part, op=dist.ReduceOp.SUM, group=grp)
+        sq = torch.where(mask, part, sq)
+    total = sq.sum().sqrt()
+    coef = max_norm / (float(total) + eps)
+    if coef < 1.0:
+        with torch.no_grad():
+            for g in grads:
+                g.mul_(coef)
+    return total
 
 
 def broadcast_replicated_params(model: nn.Module, topology: ParallelTopology) -> None:
