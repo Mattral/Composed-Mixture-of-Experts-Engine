@@ -108,6 +108,81 @@ def parse_args() -> argparse.Namespace:
 
 
 # ---------------------------------------------------------------------------
+# Data and the training step
+# ---------------------------------------------------------------------------
+
+
+def micro_batch(
+    seed: int,
+    step: int,
+    micro: int,
+    topology,
+    batch: int,
+    seq: int,
+    vocab: int,
+):
+    """Token ids and targets ``[batch, seq]`` for one micro-batch on this rank.
+
+    Drawn from a generator seeded by ``(seed, step, micro, data rank)``,
+    where the data rank is the (dp, ep) position. So every rank of a
+    tensor-parallel group gets the **same** tensors (TP splits the model,
+    not the data), different data ranks get different ones, and every
+    batch is reproducible. (F18: train.py drew unseeded ``torch.randint``
+    per rank, so TP peers trained on different tokens.) Synthetic data
+    until a real data path exists.
+    """
+    data_rank = topology.dp_rank * topology.ep_size + topology.ep_rank
+    key = (((int(seed) * 1_000_003 + step) * 10_007 + micro) * 4_099 + data_rank) % (2**63)
+    g = torch.Generator().manual_seed(key)
+    ids = torch.randint(0, vocab, (batch, seq), generator=g)
+    targets = torch.randint(0, vocab, (batch, seq), generator=g)
+    return ids.to(topology.device), targets.to(topology.device)
+
+
+def train_step(model, optimizer, topology, batches, cfg) -> float:
+    """One optimizer step over ``batches`` (one ``(ids, targets)`` per
+    micro-batch). Returns this rank's mean CE over its loss-bearing tokens.
+
+    Objective: mean CE over the global batch's loss-bearing tokens plus the
+    router auxiliary losses (ADR-011). Each micro-batch backpropagates its
+    local SUM; ``finalize_grads`` syncs replicated gradients and divides by
+    the global token count once; gradients are clipped by their global norm
+    (F14); then the optimizer steps.
+    """
+    vocab = cfg.model.vocab_size
+    z_w, lb_w = cfg.training.z_loss_weight, cfg.training.load_balance_weight
+    optimizer.zero_grad(set_to_none=True)
+    total_loss = 0.0
+    local_tokens = 0
+    for ids, targets in batches:
+        logits = model(ids)
+        ce_loss = torch.nn.functional.cross_entropy(
+            logits.view(-1, vocab).float(),
+            targets.view(-1),
+            reduction="sum",
+        )
+        local_tokens += int((targets != -100).sum())  # cross_entropy's ignore_index
+        # Router auxiliary losses from every MoE layer (F5): tensor sums over
+        # this rank's tokens, normalised with the CE sum by finalize_grads.
+        loss = ce_loss
+        if z_w > 0.0 or lb_w > 0.0:
+            z_sum, lb_sum = collect_aux_losses(model)
+            loss = loss + z_w * z_sum + lb_w * lb_sum
+        loss.backward()
+        total_loss += float(ce_loss.detach().item())  # log CE only
+
+    # Sum replicated params' grads over the EP ranks (and SP-marked params
+    # over TP), which saw different tokens (FSDP2 already summed over DP),
+    # then divide by the global token count. Must precede clipping.
+    finalize_grads(model, topology, global_token_count(local_tokens, topology))
+    # Global norm over every DP/EP/TP shard, one coefficient on every rank
+    # (F14); torch.nn.utils.clip_grad_norm_ saw only this rank's shards.
+    clip_grad_norm_(model, cfg.training.grad_clip, topology)
+    optimizer.step()
+    return total_loss / max(local_tokens, 1)
+
+
+# ---------------------------------------------------------------------------
 # LR schedule
 # ---------------------------------------------------------------------------
 
@@ -315,45 +390,10 @@ def main() -> None:
             pg["lr"] = step_lr
 
         mfu_acct.start_step()
-        optimizer.zero_grad(set_to_none=True)
-
-        # Objective: mean CE over the global batch's loss-bearing tokens
-        # (ADR-011). Each micro-batch backpropagates its local SUM;
-        # finalize_grads divides by the global token count once per step.
-        total_loss = 0.0
-        local_tokens = 0
-        for _acc_step in range(grad_accum):
-            ids = torch.randint(0, V, (B, S), device=topology.device)
-            targets = torch.randint(0, V, (B, S), device=topology.device)
-            logits = model(ids)
-            ce_loss = torch.nn.functional.cross_entropy(
-                logits.view(-1, V).float(),
-                targets.view(-1),
-                reduction="sum",
-            )
-            local_tokens += int((targets != -100).sum())  # cross_entropy's ignore_index
-
-            # Router auxiliary losses from every MoE layer (F5): tensor sums
-            # over this rank's tokens, normalised with the CE sum by
-            # finalize_grads (ADR-011). Weights from cfg.training.
-            loss = ce_loss
-            z_w, lb_w = cfg.training.z_loss_weight, cfg.training.load_balance_weight
-            if z_w > 0.0 or lb_w > 0.0:
-                z_sum, lb_sum = collect_aux_losses(model)
-                loss = loss + z_w * z_sum + lb_w * lb_sum
-            loss.backward()
-            total_loss += float(ce_loss.detach().item())  # log CE only
-
-        # Sum replicated params' grads over the EP ranks (and SP-marked
-        # params over TP), which saw different tokens (FSDP2 already summed
-        # over DP), then divide by the global token count. Must precede
-        # clipping. Convention: pkg/distributed/grad_sync.py, ADR-011.
-        finalize_grads(model, topology, global_token_count(local_tokens, topology))
-        total_loss /= max(local_tokens, 1)  # logged: this rank's mean CE
-        # Global norm over every DP/EP/TP shard, one coefficient on every rank
-        # (F14); torch.nn.utils.clip_grad_norm_ saw only this rank's shards.
-        clip_grad_norm_(model, cfg.training.grad_clip, topology)
-        optimizer.step()
+        batches = [
+            micro_batch(cfg.training.seed, step, a, topology, B, S, V) for a in range(grad_accum)
+        ]
+        total_loss = train_step(model, optimizer, topology, batches, cfg)
 
         mfu_res = mfu_acct.end_step(tokens=B * S * grad_accum)
 

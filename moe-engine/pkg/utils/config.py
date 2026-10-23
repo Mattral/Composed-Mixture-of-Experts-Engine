@@ -154,6 +154,13 @@ class TrainingConfig(BaseModel):
             "Override via MOE_TRAINING__Z_LOSS_WEIGHT=1e-3."
         ),
     )
+    seed: int = Field(
+        1234,
+        description=(
+            "Seed for train.py's synthetic batches: each micro-batch is drawn "
+            "from (seed, step, micro-batch, data rank), so TP ranks share data."
+        ),
+    )
     load_balance_weight: float = Field(
         1e-2,
         description=(
