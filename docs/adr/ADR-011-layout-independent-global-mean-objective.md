@@ -221,3 +221,63 @@ trained the router.
   `N_global`. With unnormalised accumulation (Decision 2), a second
   normaliser would need the step's total routed count before the first
   backward, the same look-ahead that Decision 2 avoids.
+
+## Expert capacity and token dropping (F12, added with item 3)
+
+**Context.**
+
+* With `capacity_dropping=True` the layer only zeroed the combine weights
+  of over-capacity (token, slot) pairs. Every pair was still dispatched and
+  computed, so dropping saved neither compute nor EP bandwidth. The audit
+  probe (E = 8, K = 2, N = 64, capacity factor 0.25) computed 128 expert
+  rows against a budget of 32.
+* Capacity was applied to each top-k slot column independently, so one
+  expert could accept `K × capacity` pairs. That contradicted the docstring
+  ("each expert accepts at most `capacity` tokens").
+* `cfg.model.capacity_dropping` never reached the layers: `ToyMoEBlock` did
+  not pass it.
+
+**Decision (owner, M2 plan D3).**
+
+* **Per expert, across all slots.** Each expert accepts at most
+  `capacity = ceil(capacity_factor · N · K / E)` (token, slot) pairs from
+  one sending rank's `N` tokens, counting all top-k slots together.
+* **Slot-major priority** (GShard / Switch): every slot-0 (first-choice)
+  pair is placed before any slot-1 pair, and so on; within a slot, tokens
+  are taken in batch order, first come first served.
+* **Per sending rank.** Each rank applies the budget to its own batch (a
+  GShard "group"). Under EP an expert therefore receives at most
+  `ep · capacity ≈ capacity_factor · N_global · K / E` pairs, the global
+  budget up to rounding. No extra collective is needed.
+* **Dropped before dispatch.** Dropped pairs are removed before
+  `send_counts` and the all-to-all, so they are neither sent nor computed.
+  Results are scattered back by position (`index_copy`); a dropped slot
+  contributes zero to its token. Combine weights are **not** renormalised.
+* **Config wiring:** `ToyMoEBlock` / `ToyMoEModel` pass
+  `cfg.model.capacity_dropping` to every layer.
+* **Test rewrite (owner-approved).**
+  `tests/test_capacity_dropping.py::test_multi_k_independent_per_slot`
+  pinned the per-slot behaviour. It is rewritten strictly to the new
+  semantics as `test_multi_k_capacity_is_per_expert_across_slots`, and
+  `test_multi_k_slot_major_priority` is added. The dense reference's
+  `per_slot_capacity_drop_mask` is replaced by `capacity_drop_mask`, a
+  plain-loop slot-major implementation.
+
+**Consequences.**
+
+* Expert compute and EP traffic are bounded by capacity. The probe now
+  computes 32 rows. `test_ep_capacity_dropping_bounds_expert_rows` requires,
+  at ep = 2 and 4 with E ∈ {8, 5, 10} and K ∈ {1, 2}, that every expert
+  computes exactly the kept pairs routed to it from all source ranks. Output
+  and gradients match the dense slot-major reference (CPU/Gloo).
+* **Capacity dropping depends on the layout** by construction: the budget
+  is per sending rank's batch, so the same global batch split differently
+  can drop different pairs. It is therefore excluded from the cross-layout
+  invariance tests (Decision 5).
+* For top-1 routing the new and old rules give the same outputs and
+  gradients; only the wasted compute goes away. For top-k > 1, outputs
+  change wherever an expert's slots collided.
+* The router auxiliary losses (F5 above) count assignments **before**
+  dropping, as Switch Transformer does.
+* `last_dropped_token_fraction` still reports dropped pairs / `N · K`. It
+  costs a host sync per forward (F13).
