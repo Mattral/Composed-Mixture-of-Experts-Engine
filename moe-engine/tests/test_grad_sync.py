@@ -369,3 +369,73 @@ def _count_worker(rank: int, ws: int, cfg: dict) -> list:
 def test_global_token_count_sums_over_data_ranks_only(dp, ep, tp, ws):
     """Summed over DP and EP (different tokens), never over TP (same tokens)."""
     _assert_ok(run_multiprocess(_count_worker, ws, dict(dp=dp, ep=ep, tp=tp)), "count")
+
+
+# ===========================================================================
+# FSDP2 root wrap: experts are expert-data-parallel over DP (F14-fsdp)
+# ===========================================================================
+
+
+def _edp_worker(rank: int, ws: int, cfg: dict) -> list:
+    """dp=2 x ep=2: three full engine steps (broadcast, apply_fsdp2,
+    backward, finalize_grads, clip_grad_norm_, SGD) on distinct per-rank data."""
+    from pkg.distributed.data_parallel import apply_fsdp2
+    from pkg.distributed.grad_sync import (
+        broadcast_replicated_params,
+        clip_grad_norm_,
+        finalize_grads,
+        global_token_count,
+    )
+
+    try:
+        from torch.distributed.tensor import DTensor
+    except ImportError:  # pragma: no cover
+        from torch.distributed._tensor import DTensor
+
+    topo = build_topology(dp_size=2, ep_size=2, tp_size=1, device_type="cpu")
+    torch.manual_seed(100 + rank)  # every parameter starts different on every rank
+    model = nn.Sequential(nn.Linear(4, 4), DistributedMoELayer(4, 8, 4, 2, topo))
+    broadcast_replicated_params(model, topo)
+    model = apply_fsdp2(model, topo)
+    opt = torch.optim.SGD(model.parameters(), lr=0.1)
+
+    checks = []
+    for name, p in model.named_parameters():
+        ok = isinstance(p, DTensor) and p.device_mesh.mesh_dim_names == ("dp",)
+        mesh = getattr(p, "device_mesh", None)
+        checks.append(check("edp", f"{name} sharded over DP", ok, f"mesh={mesh}"))
+
+    g = torch.Generator().manual_seed(7 + rank)  # different tokens on every rank
+    for _ in range(3):
+        x = torch.randn(6, 4, generator=g)
+        opt.zero_grad()
+        model(x).pow(2).sum().backward()
+        finalize_grads(model, topo, global_token_count(x.shape[0], topo))
+        clip_grad_norm_(model, 1.0, topo)
+        opt.step()
+
+    full = {n: p.full_tensor().detach() for n, p in model.named_parameters()}
+    everyone = [None] * ws
+    dist.all_gather_object(everyone, (topo.dp_rank, topo.ep_rank, full))
+    for name, t in full.items():
+        if name.startswith("1.experts."):
+            same = [f for dpr, epr, f in everyone if epr == topo.ep_rank]
+            diff = [f for dpr, epr, f in everyone if epr != topo.ep_rank]
+            ok = all(torch.equal(f[name], t) for f in same) and all(
+                not torch.equal(f[name], t) for f in diff
+            )
+            note = "identical across DP, distinct across EP"
+        else:
+            ok = all(torch.equal(f[name], t) for _, _, f in everyone)
+            note = "identical on every rank after 3 steps"
+        checks.append(check("edp", f"{name}: {note}", ok, ""))
+    return checks
+
+
+def test_fsdp2_root_wrap_makes_experts_expert_data_parallel():
+    """apply_fsdp2's root fully_shard manages the expert parameters too: they
+    are sharded over DP (expert-data-parallel; each DP group holds one EP
+    rank's experts), stay distinct across EP, and after real training steps
+    every replicated parameter -- router included -- is identical on every
+    rank (M2 done-when (c))."""
+    _assert_ok(run_multiprocess(_edp_worker, 4, {}), "edp")

@@ -4,9 +4,14 @@ pkg/distributed/data_parallel.py
 
 FSDP2 (Fully Sharded Data Parallel v2) wrapper utilities.
 
-Wraps model parameters with FSDP2 along the DP mesh axis.
-Expert weights (inside DistributedMoELayer) are explicitly excluded
-because they are already EP-sharded and must not be DP-wrapped.
+Wraps model parameters with FSDP2 along the DP mesh axis -- all of them,
+expert weights included. The DP mesh groups the ranks that share an EP (and
+TP) coordinate, so the expert weights each such group holds are one EP
+rank's experts: FSDP2 shards them over DP and sums their gradients over DP
+(expert-data-parallelism), while they stay EP-sharded across the EP axis
+(F14-fsdp; tested by tests/test_grad_sync.py::
+test_fsdp2_root_wrap_makes_experts_expert_data_parallel and the dp2 x ep2
+layouts in tests/test_differential.py).
 
 Public API
 ----------
@@ -54,9 +59,17 @@ def apply_fsdp2(
 ) -> nn.Module:
     """Wrap model parameters with FSDP2 along the DP mesh axis.
 
-    Expert parameters are **excluded** from FSDP2 wrapping.  They are already
-    sharded across the EP axis and FSDP2 wrapping them would shard them a
-    second time, corrupting the expert assignment logic.
+    Each router and each ``nn.Linear`` / ``nn.LayerNorm`` is its own FSDP2
+    unit; the root ``fully_shard(model)`` manages every remaining parameter,
+    **including the expert weights** of every ``DistributedMoELayer``. That
+    is expert-data-parallelism, and it is correct: the DP group of a rank
+    holds the same EP rank's experts, so FSDP2 shards them across DP ranks
+    that own the same experts and reduces their gradients over exactly those
+    ranks. (Until M2 this docstring said experts were excluded; they never
+    were. F14-fsdp.)
+
+    Gradient reduction over DP is a SUM (ADR-011), unused parameters reduce
+    zeros (F25), and grad_sync's parameter marks survive wrapping (F26).
 
     Parameters
     ----------
@@ -114,7 +127,8 @@ def apply_fsdp2(
 
     for name, module in model.named_modules():
         if isinstance(module, DistributedMoELayer):
-            # Only wrap the router inside the MoE layer — expert weights stay EP-sharded.
+            # The router is its own FSDP unit; the expert weights are left to
+            # the root wrap below (expert-data-parallel over DP).
             if fully_shard is not None:
                 fully_shard(module.router, mesh=dp_mesh, mp_policy=mp_policy)
         elif isinstance(module, (nn.Linear, nn.LayerNorm)) and name:
