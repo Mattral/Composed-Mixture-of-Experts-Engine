@@ -186,22 +186,23 @@ def dense_router(
     return idx, weights
 
 
-def per_slot_capacity_drop_mask(idx: torch.Tensor, capacity: int) -> torch.Tensor:
-    """First-come-first-served capacity per expert, applied independently to
-    each top-k slot column.
+def capacity_drop_mask(idx: torch.Tensor, capacity: int) -> torch.Tensor:
+    """Expert capacity with slot-major priority (ADR-011, F12): each expert
+    accepts at most ``capacity`` (token, slot) pairs in total, over all top-k
+    slots. Every slot-0 (first-choice) pair is considered before any slot-1
+    pair, and so on, each slot in token order, first come first served.
+    Returns ``[N, K]``, True where the pair is dropped.
 
-    This mirrors the engine's existing per-slot semantics (pinned by
-    ``test_capacity_dropping.py::test_multi_k_independent_per_slot``); it is
-    written as a plain Python loop so it shares no code with the engine.
+    A plain Python loop, so it shares no code with the engine.
     """
     N, K = idx.shape
     mask = torch.zeros(N, K, dtype=torch.bool)
+    taken: Dict[int, int] = {}
     for k in range(K):
-        seen: Dict[int, int] = {}
         for n in range(N):
             e = int(idx[n, k])
-            mask[n, k] = seen.get(e, 0) >= capacity
-            seen[e] = seen.get(e, 0) + 1
+            mask[n, k] = taken.get(e, 0) >= capacity
+            taken[e] = taken.get(e, 0) + 1
     return mask
 
 
@@ -241,7 +242,7 @@ def dense_moe(
     """
     idx, weights = dense_router(x, gate_w, k)
     if capacity is not None:
-        weights = weights.masked_fill(per_slot_capacity_drop_mask(idx, capacity), 0.0)
+        weights = weights.masked_fill(capacity_drop_mask(idx, capacity), 0.0)
     out = torch.zeros_like(x)
     for e, (wg, wu, wd) in enumerate(experts):
         rows, slots = (idx == e).nonzero(as_tuple=True)
