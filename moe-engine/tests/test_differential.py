@@ -276,7 +276,12 @@ def _ep_result(cid: str):
 
 # Finding ID -> xfail reason, for cases that currently fail. A new failing
 # case must add its finding here first.
-_FINDING_TEXT: dict = {}
+_FINDING_TEXT: dict = {
+    "F14": (
+        "F14: gradient-norm clipping uses each rank's local norm, not the global "
+        "norm over EP/TP/DP shards"
+    ),
+}
 
 
 def _params(cases, which):
@@ -887,6 +892,21 @@ def _layout_worker(rank: int, ws: int, cfg: dict) -> list:
             loss_ref = loss_ref + _W_Z * z + _W_LB * lb
     (loss_ref / n_global).backward()
 
+    max_norm = None
+    if cfg.get("clip"):
+        # Clip the dense gradients by their global norm (every parameter
+        # counted once, full tensors) to half of it, so clipping is active.
+        dense = [t for t in rp.values()] + [w for ex in ref_experts for w in ex]
+        ref_norm = float(
+            torch.sqrt(sum((t.grad.double() ** 2).sum() for t in dense if t.grad is not None))
+        )
+        max_norm = 0.5 * ref_norm
+        coef = min(1.0, max_norm / (ref_norm + 1e-6))
+        with torch.no_grad():
+            for t in dense:
+                if t.grad is not None:
+                    t.grad.mul_(coef)
+
     chunk = Fd // tp
     rows = slice(topo.tp_rank * chunk, (topo.tp_rank + 1) * chunk)
 
@@ -935,6 +955,25 @@ def _layout_worker(rank: int, ws: int, cfg: dict) -> list:
         check("grad", "global_token_count", n_engine == n_global, f"{n_engine} vs {n_global}")
     )
     finalize_grads(model, topo, n_engine)
+    if max_norm is not None:
+        # F14: the norm must be global -- every parameter's full gradient
+        # counted once across DP, EP and TP shards.
+        try:
+            from pkg.distributed.grad_sync import clip_grad_norm_
+        except ImportError:
+            # train.py's clipping before F14: a local norm per rank.
+            total = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+        else:
+            total = clip_grad_norm_(model, max_norm, topo)
+        total = float(_full(torch.as_tensor(total)))
+        checks.append(
+            check(
+                "grad",
+                "clip: total grad norm",
+                abs(total - ref_norm) <= 1e-5 + 1e-4 * ref_norm,
+                f"engine {total:.6g} vs dense {ref_norm:.6g}",
+            )
+        )
     for n, p in model.named_parameters():
         grad = _full(p.grad) if p.grad is not None else None
         checks.append(compare("grad", f"{n}.grad", grad, ref_grads[n]))
@@ -961,6 +1000,17 @@ _LAYOUT_CASES = [
     ("aux-ep2", dict(dp=1, ep=2, tp=1, aux=True), (), (), ()),
     ("aux-sp2", dict(dp=1, ep=1, tp=2, aux=True), (), (), ()),
     ("aux-dp2-ep2", dict(dp=2, ep=2, tp=1, aux=True), (), (), ()),
+    # Same batch with gradient-norm clipping to half the global norm (F14):
+    # the engine's norm must cover every shard once (DP, EP, TP). single and
+    # dp2 pass with torch's clip_grad_norm_ too (FSDP2 DTensor grads reduce
+    # their own norm over DP); EP and TP shards were each rank's local norm.
+    ("clip-single", dict(dp=1, ep=1, tp=1, clip=True), (), (), ()),
+    ("clip-dp2", dict(dp=2, ep=1, tp=1, clip=True), (), (), ()),
+    ("clip-ep2", dict(dp=1, ep=2, tp=1, clip=True), (), ("F14",), ("F14",)),
+    ("clip-sp2", dict(dp=1, ep=1, tp=2, clip=True), (), ("F14",), ("F14",)),
+    ("clip-dp2-ep2", dict(dp=2, ep=2, tp=1, clip=True), (), ("F14",), ("F14",)),
+    ("clip-dp2-sp2", dict(dp=2, ep=1, tp=2, clip=True), (), ("F14",), ("F14",)),
+    ("clip-ep2-sp2", dict(dp=1, ep=2, tp=2, clip=True), (), ("F14",), ("F14",)),
 ]
 
 
