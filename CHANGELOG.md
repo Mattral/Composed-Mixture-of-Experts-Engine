@@ -27,6 +27,15 @@ NCCL, or across multiple hosts unless it says so.
   `load_balance_weight` (default 1e-2). See ADR-011, "Router auxiliary
   losses".
 
+- **F12 — capacity dropping.** Over-capacity (token, slot) pairs are now
+  removed before dispatch, so they are neither sent nor computed. Before,
+  only their combine weights were zeroed, and every pair was still
+  dispatched and computed. Capacity is now per expert across all top-k slots
+  with slot-major priority (first choices before second choices), per
+  sending rank's batch, instead of per slot. `cfg.model.capacity_dropping`
+  now reaches every layer. `test_multi_k_independent_per_slot` was rewritten
+  to the new semantics. See ADR-011, "Expert capacity and token dropping".
+
 ### Removed
 - **F27 — `.github/workflows/signal-correctness.yml`.** It was invalid YAML
   from the day it was added (`d9cf60c`, 2026-02-24): an unquoted

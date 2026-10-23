@@ -260,13 +260,7 @@ def _ep_cases():
                             f"ep{ws}-E{E}-k{K}-{'imbal' if imbalanced else 'bal'}"
                             f"-{'drop' if drop else 'nodrop'}"
                         )
-                        # With top-1, per-slot capacity equals per-expert
-                        # capacity and zeroed weights give the dense output,
-                        # so only top-2 outputs/grads change with F12; every
-                        # drop case computed dropped pairs (rows).
-                        f12_out = ("F12",) if drop and K > 1 else ()
-                        f12_rows = ("F12",) if drop else ()
-                        cases.append((cid, ws, cfg, f12_out, f12_out, f12_rows))
+                        cases.append((cid, ws, cfg, (), (), ()))
     return cases
 
 
@@ -282,13 +276,7 @@ def _ep_result(cid: str):
 
 # Finding ID -> xfail reason, for cases that currently fail. A new failing
 # case must add its finding here first.
-_FINDING_TEXT: dict = {
-    "F12": (
-        "F12: capacity dropping only zeroes combine weights (every pair is "
-        "still dispatched and computed), and capacity is applied per top-k "
-        "slot instead of per expert across slots (slot-major priority)"
-    ),
-}
+_FINDING_TEXT: dict = {}
 
 
 def _params(cases, which):

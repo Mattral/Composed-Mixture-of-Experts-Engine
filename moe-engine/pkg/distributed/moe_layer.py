@@ -124,12 +124,16 @@ def compute_capacity_drop_mask(
 ) -> torch.Tensor:
     """Compute the capacity-drop mask for a routing assignment.
 
-    Follows Switch Transformer / GShard semantics: each expert accepts at
-    most ``capacity`` tokens, keeping the first ``capacity`` tokens (by
-    order of appearance in the batch) that selected it and dropping the
-    remainder. Dropped (token, k) pairs receive zero combine weight — the
-    expert FFN output for that slot is simply not added, so the token's
-    output for that top-k slot falls back to its other (non-dropped) slots.
+    Follows GShard / Switch Transformer semantics: each expert accepts at
+    most ``capacity`` (token, slot) pairs **in total over all top-k slots**,
+    with slot-major priority. Every slot-0 (first-choice) pair is placed
+    before any slot-1 pair, and so on; within a slot, tokens are taken in
+    batch order, first come first served. Pairs beyond an expert's capacity
+    are dropped. ``DistributedMoELayer`` neither dispatches nor computes them,
+    so the token's output gets nothing from that slot (ADR-011, F12).
+
+    Before F12 the capacity applied to each slot column independently, so one
+    expert could accept ``K * capacity`` pairs.
 
     Parameters
     ----------
@@ -150,11 +154,9 @@ def compute_capacity_drop_mask(
         capacity), ``False`` where it is kept.
     """
     N, K = idx.shape
-    drop_mask = torch.zeros(N, K, dtype=torch.bool, device=idx.device)
-    for k in range(K):
-        position_in_queue = _cumcount(idx[:, k])
-        drop_mask[:, k] = position_in_queue >= capacity
-    return drop_mask
+    # Slot-major order: (n=0..N-1, k=0), then (n=0..N-1, k=1), ...
+    position_in_queue = _cumcount(idx.t().reshape(-1))
+    return (position_in_queue >= capacity).reshape(K, N).t()
 
 
 def build_expert_rank_table(topology: ParallelTopology, num_experts: int) -> torch.Tensor:
@@ -377,32 +379,36 @@ class DistributedMoELayer(nn.Module):
             self.aux_z_sum, self.aux_lb_sum = self._aux_loss_sums(logits[0], idx)
 
         # ---- Capacity-based token dropping (optional, off by default) ----
-        # When enabled, enforces a hard per-expert token budget following
-        # Switch Transformer / GShard semantics: each expert accepts at most
-        # `capacity_factor * (N*K/E)` tokens, keeping the first arrivals and
-        # dropping the rest. Dropped slots get zero combine weight, so their
-        # contribution to the output is silently omitted for that slot (the
-        # token still receives contributions from its non-dropped top-k
-        # slots, if any). This bounds worst-case expert compute and EP
-        # bandwidth at the cost of some tokens being under-processed under
-        # imbalanced routing — the standard MoE capacity/quality trade-off.
+        # When enabled, each expert accepts at most
+        # capacity = ceil(capacity_factor * N * K / E) (token, slot) pairs from
+        # this rank's N tokens, over all top-k slots, first choices first
+        # (compute_capacity_drop_mask; ADR-011). Dropped pairs are removed
+        # *before* dispatch: they are neither sent nor computed, which is what
+        # bounds expert compute and EP bandwidth (F12: they used to be
+        # dispatched and computed, and only their combine weight was zeroed).
+        # A token gets nothing from a dropped slot; its other slots still
+        # contribute. Combine weights are not renormalised.
         self.last_dropped_token_fraction = 0.0
+        expert_ids_flat = idx.reshape(-1)  # [N*top_k], item i*top_k + k = (token i, slot k)
+        kept = None  # positions of the dispatched items; None = all of them
         if self.capacity_dropping:
             capacity = math.ceil(self.capacity_factor * N * self.top_k / self.num_experts)
             drop_mask = compute_capacity_drop_mask(idx, self.num_experts, capacity)
             if drop_mask.any():
-                weights = weights.masked_fill(drop_mask, 0.0)
+                kept = (~drop_mask).reshape(-1).nonzero(as_tuple=True)[0]
                 self.last_dropped_token_fraction = float(drop_mask.float().mean().item())
 
-        # ---- Flatten (token, k) pairs into independently-routable dispatch
-        #      items. Each of a token's top_k expert assignments can land on
-        #      a DIFFERENT EP rank -- the common case whenever top_k>1 and
-        #      ep_size>1 -- so dispatch construction must operate per-slot,
-        #      not per-token. See ADR-009. ----
-        expert_ids_flat = idx.reshape(-1)  # [N*top_k]
-        tokens_expanded = flat.repeat_interleave(self.top_k, dim=0)  # [N*top_k, H]
-        # tokens_expanded[i*top_k + k] is token i's embedding, independently
-        # paired with expert_ids_flat[i*top_k + k] = idx[i, k].
+        # ---- Flatten the kept (token, k) pairs into independently-routable
+        #      dispatch items. Each of a token's top_k expert assignments can
+        #      land on a DIFFERENT EP rank -- the common case whenever
+        #      top_k>1 and ep_size>1 -- so dispatch construction must operate
+        #      per-slot, not per-token. See ADR-009. ----
+        if kept is None:
+            item_tokens = flat.repeat_interleave(self.top_k, dim=0)  # [N*top_k, H]
+        else:
+            item_tokens = flat[kept // self.top_k]  # [n_kept, H]
+            expert_ids_flat = expert_ids_flat[kept]
+        # item_tokens[j] is the embedding paired with expert_ids_flat[j].
 
         # ---- Build per-EP-rank send counts (per dispatch ITEM, not per
         #      token) from the same ownership table that decided which
@@ -410,9 +416,9 @@ class DistributedMoELayer(nn.Module):
         send_counts = compute_send_counts(
             expert_ids_flat, self._expert_rank_table, self.topology.ep_size
         )
-        # send_counts.sum() == N * top_k always, by construction: every
-        # dispatch item has exactly one expert, hence contributes to exactly
-        # one rank's count. (The previous per-token "any slot in range"
+        # send_counts.sum() == number of dispatch items always, by
+        # construction: every item has exactly one expert, hence contributes
+        # to exactly one rank's count. (The previous per-token "any slot in range"
         # check double-counted tokens whose top_k experts spanned multiple
         # ranks, and the later E // ep_size range arithmetic counted the
         # remainder experts nowhere when E % ep_size != 0 -- both surfaced
@@ -422,8 +428,8 @@ class DistributedMoELayer(nn.Module):
         #      per-rank blocks (build_expert_rank_table guarantees ownership
         #      is non-decreasing in expert id, so sorting by global expert id
         #      also groups by destination rank) ----
-        sort_order = expert_ids_flat.argsort(stable=True)  # [N*top_k]
-        tokens_sorted = tokens_expanded[sort_order]
+        sort_order = expert_ids_flat.argsort(stable=True)  # [n_items]
+        tokens_sorted = item_tokens[sort_order]
         expert_ids_sorted = expert_ids_flat[sort_order]
 
         # ---- EP dispatch: tokens AND their expert ids. The tag is required
@@ -468,9 +474,10 @@ class DistributedMoELayer(nn.Module):
         # ---- Weighted scatter back to original token positions ----
         # combined_sorted is in `sort_order`'s order; invert the permutation
         # to place each dispatch item's result back at its (token, k) flat
-        # position, then apply combine weights and sum over k per token.
-        combined_flat = torch.empty_like(tokens_expanded)  # [N*top_k, H]
-        combined_flat[sort_order] = combined_sorted
+        # position (dropped pairs stay zero), then apply combine weights and
+        # sum over k per token.
+        positions = sort_order if kept is None else kept[sort_order]
+        combined_flat = flat.new_zeros(N * self.top_k, H).index_copy(0, positions, combined_sorted)
         combined = (combined_flat.reshape(N, self.top_k, H) * weights.unsqueeze(-1)).sum(dim=1)
 
         assert not torch.isnan(combined).any(), (

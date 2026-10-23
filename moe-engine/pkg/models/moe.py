@@ -98,6 +98,8 @@ class ToyMoEBlock(nn.Module):
     topology : ParallelTopology
     capacity_factor : float
     dtype : torch.dtype
+    aux_losses : bool          router auxiliary losses on (F5)
+    capacity_dropping : bool   drop pairs beyond expert capacity (F12)
     """
 
     def __init__(
@@ -110,6 +112,7 @@ class ToyMoEBlock(nn.Module):
         capacity_factor: float = 1.25,
         dtype: torch.dtype = torch.float32,
         aux_losses: bool = False,
+        capacity_dropping: bool = False,
     ):
         super().__init__()
         self.norm = RMSNorm(hidden_dim)
@@ -120,6 +123,7 @@ class ToyMoEBlock(nn.Module):
             top_k=top_k,
             topology=topology,
             capacity_factor=capacity_factor,
+            capacity_dropping=capacity_dropping,
             dtype=dtype,
             aux_losses=aux_losses,
         )
@@ -169,6 +173,7 @@ class ToyMoEModel(nn.Module):
                     capacity_factor=m.capacity_factor,
                     dtype=dtype,
                     aux_losses=aux_losses,
+                    capacity_dropping=m.capacity_dropping,
                 )
                 for _ in range(m.num_layers)
             ]

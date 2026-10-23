@@ -37,13 +37,6 @@ from tests._differential import capacity_drop_mask  # noqa: E402
 
 pytestmark = pytest.mark.cpu
 
-_F12 = (
-    "F12: capacity dropping only zeroes combine weights (every pair is still "
-    "dispatched and computed), and capacity is applied per top-k slot instead "
-    "of per expert across slots (slot-major priority)"
-)
-
-
 # ===========================================================================
 # _cumcount — the core primitive
 # ===========================================================================
@@ -141,7 +134,6 @@ class TestComputeCapacityDropMask:
         mask = compute_capacity_drop_mask(idx, num_experts=2, capacity=0)
         assert mask.all()
 
-    @pytest.mark.xfail(strict=True, reason=_F12)
     def test_multi_k_capacity_is_per_expert_across_slots(self):
         """Capacity bounds an expert's (token, slot) pairs over ALL top-k
         slots: at most ``capacity`` in total. (Replaces
@@ -154,7 +146,6 @@ class TestComputeCapacityDropMask:
         expected = torch.tensor([[False, True], [False, True]])
         assert torch.equal(mask, expected)
 
-    @pytest.mark.xfail(strict=True, reason=_F12)
     def test_multi_k_slot_major_priority(self):
         """First choices win over earlier tokens' second choices (GShard /
         Switch): every slot-0 pair is placed before any slot-1 pair."""
@@ -165,7 +156,6 @@ class TestComputeCapacityDropMask:
         expected = torch.tensor([[False, True], [False, True]])
         assert torch.equal(mask, expected)
 
-    @pytest.mark.xfail(strict=True, reason=_F12)
     @pytest.mark.parametrize("seed", range(5))
     def test_matches_slot_major_reference(self, seed):
         """Random routings against a plain-loop slot-major reference: no
@@ -348,7 +338,6 @@ def _dropping_layer(seed=0, H=16, Fd=32, E=8, K=2, cf=0.25):
 
 
 class TestDropBeforeDispatch:
-    @pytest.mark.xfail(strict=True, reason=_F12)
     def test_experts_compute_only_kept_pairs(self):
         """The audit probe's case (E=8, K=2, N=64, capacity_factor=0.25):
         experts used to compute all N*K = 128 rows. They must compute exactly
@@ -371,11 +360,7 @@ class TestDropBeforeDispatch:
         assert max(rows) <= capacity
         assert sum(rows) < 64 * 2
 
-    # k=1 passes before the fix too: with one slot, per-slot and per-expert
-    # capacity coincide, and zeroed weights give the same output as dropping.
-    @pytest.mark.parametrize(
-        "k", [1, pytest.param(2, marks=pytest.mark.xfail(strict=True, reason=_F12))]
-    )
+    @pytest.mark.parametrize("k", [1, 2])
     def test_output_and_grads_match_dense_reference(self, k):
         from tests._differential import dense_moe
 
@@ -405,7 +390,6 @@ class TestDropBeforeDispatch:
                 gref = wr.grad if wr.grad is not None else torch.zeros_like(wr)
                 torch.testing.assert_close(g, gref, atol=1e-5, rtol=1e-4)
 
-    @pytest.mark.xfail(strict=True, reason=_F12)
     def test_model_takes_capacity_dropping_from_config(self):
         """cfg.model.capacity_dropping must reach every MoE layer (ToyMoEBlock
         never passed it, so the config switch had no effect)."""
