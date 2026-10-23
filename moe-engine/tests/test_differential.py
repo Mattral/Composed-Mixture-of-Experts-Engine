@@ -80,10 +80,12 @@ from pkg.distributed.tensor_parallel import (  # noqa: E402
     RowParallelLinear,
 )
 from tests._differential import (  # noqa: E402
+    capacity_drop_mask,
     check,
     compare,
     dense_aux_sums,
     dense_moe,
+    dense_router,
     failures_for,
     run_multiprocess,
 )
@@ -187,10 +189,34 @@ def _ep_worker(rank: int, ws: int, cfg: dict) -> list:
                 rg if rg is not None else torch.zeros_like(ref_experts[eid][j])
             )
 
+    # Rows each expert must compute: with dropping, only the kept (token,
+    # slot) pairs, i.e. every source rank's kept pairs for that expert.
+    expected_rows = {}
+    for blk in shards:
+        idx_s, _ = dense_router(blk["x"], gate, K)
+        if capacity is not None:
+            idx_s = idx_s[~capacity_drop_mask(idx_s, capacity)]
+        for e, n in enumerate(torch.bincount(idx_s.reshape(-1), minlength=E).tolist()):
+            expected_rows[e] = expected_rows.get(e, 0) + n
+    rows = {eid: 0 for eid in layer.local_expert_ids}
+    for eid, m in zip(layer.local_expert_ids, layer.experts):
+        m.register_forward_hook(
+            lambda mod, inp, out, eid=eid: rows.__setitem__(eid, rows[eid] + inp[0].shape[0])
+        )
+
     # ---- Distributed run ----
     xd = x.clone().requires_grad_(True)
     y = layer(xd)
     checks = [compare("fwd", "output", y, y_ref)]
+    for eid, n in rows.items():
+        checks.append(
+            check(
+                "rows",
+                f"expert {eid} rows computed",
+                n == expected_rows[eid],
+                f"{n} computed, {expected_rows[eid]} kept pairs routed to it",
+            )
+        )
     if cfg["drop"]:
         frac = layer.last_dropped_token_fraction
         checks.append(
@@ -211,7 +237,7 @@ def _ep_worker(rank: int, ws: int, cfg: dict) -> list:
 
 
 def _ep_cases():
-    """(id, world_size, cfg, findings-that-fail-fwd, findings-that-fail-grad)."""
+    """(id, world_size, cfg, findings that fail fwd, grad, rows)."""
     cases = []
     # E=5 (ep=2, ep=4) and E=10 (ep=4) are the non-divisible cases that
     # crashed or deadlocked before the F4 fix; they are now plain regressions.
@@ -234,22 +260,35 @@ def _ep_cases():
                             f"ep{ws}-E{E}-k{K}-{'imbal' if imbalanced else 'bal'}"
                             f"-{'drop' if drop else 'nodrop'}"
                         )
-                        cases.append((cid, ws, cfg, (), ()))
+                        # With top-1, per-slot capacity equals per-expert
+                        # capacity and zeroed weights give the dense output,
+                        # so only top-2 outputs/grads change with F12; every
+                        # drop case computed dropped pairs (rows).
+                        f12_out = ("F12",) if drop and K > 1 else ()
+                        f12_rows = ("F12",) if drop else ()
+                        cases.append((cid, ws, cfg, f12_out, f12_out, f12_rows))
     return cases
 
 
 _EP_CASES = _ep_cases()
+_EP_DROP_CASES = [c for c in _EP_CASES if c[2]["drop"]]
 
 
 @functools.lru_cache(maxsize=None)
 def _ep_result(cid: str):
-    _, ws, cfg, _, _ = next(c for c in _EP_CASES if c[0] == cid)
+    _, ws, cfg, *_ = next(c for c in _EP_CASES if c[0] == cid)
     return run_multiprocess(_ep_worker, ws, cfg)
 
 
 # Finding ID -> xfail reason, for cases that currently fail. A new failing
 # case must add its finding here first.
-_FINDING_TEXT: dict = {}
+_FINDING_TEXT: dict = {
+    "F12": (
+        "F12: capacity dropping only zeroes combine weights (every pair is "
+        "still dispatched and computed), and capacity is applied per top-k "
+        "slot instead of per expert across slots (slot-major priority)"
+    ),
+}
 
 
 def _params(cases, which):
@@ -278,6 +317,14 @@ def test_ep_forward_matches_dense(cid):
 @pytest.mark.parametrize("cid", _params(_EP_CASES, 4))
 def test_ep_gradients_match_dense(cid):
     _assert_kind(_ep_result(cid), "grad")
+
+
+@pytest.mark.parametrize("cid", _params(_EP_DROP_CASES, 5))
+def test_ep_capacity_dropping_bounds_expert_rows(cid):
+    """F12: with capacity dropping, each expert computes exactly the kept
+    (token, slot) pairs routed to it -- dropped pairs are neither dispatched
+    nor computed -- so expert compute and EP traffic are bounded by capacity."""
+    _assert_kind(_ep_result(cid), "rows")
 
 
 # ---------------------------------------------------------------------------
