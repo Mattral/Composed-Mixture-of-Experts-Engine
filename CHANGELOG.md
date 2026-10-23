@@ -27,6 +27,20 @@ NCCL, or across multiple hosts unless it says so.
   `load_balance_weight` (default 1e-2). See ADR-011, "Router auxiliary
   losses".
 
+### Removed
+- **F27 — `.github/workflows/signal-correctness.yml`.** It was invalid YAML
+  from the day it was added (`d9cf60c`, 2026-02-24): an unquoted
+  `name: Alternative: ...` on line 25. GitHub could not parse it, so it never
+  ran a job and reported a failed run on every push to any branch. Its checks
+  either already run in `ci.yml` or were obsolete:
+  - numerics tests: `test_kernels_numerics.py` runs in the Tier-0 CPU job;
+  - token conservation: the `benchmark` job's conservation assertion, plus
+    `test_router.py` and `test_kernels.py` in Tier-0;
+  - Python syntax: `ruff check` in the lint job;
+  - "assertion guards" (greps for three source lines): obsolete, since none
+    of the three lines exists any more and grepping source text is not a
+    behavioural check.
+
 ### Fixed
 - **F23 — biased router.** `MoERouter(bias=True)` recomputed its routing
   under `no_grad`, so its combine weights carried no gradient.
