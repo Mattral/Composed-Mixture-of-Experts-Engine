@@ -44,6 +44,7 @@ After each forward pass the following attributes are set on the layer:
 Public API
 ----------
     DistributedMoELayer
+    collect_aux_losses(model) -> (z_sum, lb_sum)
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ import torch
 import torch.nn as nn
 
 from pkg.distributed.expert_parallel import all_to_all_combine, all_to_all_dispatch
+from pkg.distributed.grad_sync import sum_over_data_ranks
 from pkg.distributed.mesh import ParallelTopology
 from pkg.distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
 from pkg.kernels.moe_router import MoERouter
@@ -122,12 +124,16 @@ def compute_capacity_drop_mask(
 ) -> torch.Tensor:
     """Compute the capacity-drop mask for a routing assignment.
 
-    Follows Switch Transformer / GShard semantics: each expert accepts at
-    most ``capacity`` tokens, keeping the first ``capacity`` tokens (by
-    order of appearance in the batch) that selected it and dropping the
-    remainder. Dropped (token, k) pairs receive zero combine weight — the
-    expert FFN output for that slot is simply not added, so the token's
-    output for that top-k slot falls back to its other (non-dropped) slots.
+    Follows GShard / Switch Transformer semantics: each expert accepts at
+    most ``capacity`` (token, slot) pairs **in total over all top-k slots**,
+    with slot-major priority. Every slot-0 (first-choice) pair is placed
+    before any slot-1 pair, and so on; within a slot, tokens are taken in
+    batch order, first come first served. Pairs beyond an expert's capacity
+    are dropped. ``DistributedMoELayer`` neither dispatches nor computes them,
+    so the token's output gets nothing from that slot (ADR-011, F12).
+
+    Before F12 the capacity applied to each slot column independently, so one
+    expert could accept ``K * capacity`` pairs.
 
     Parameters
     ----------
@@ -148,11 +154,9 @@ def compute_capacity_drop_mask(
         capacity), ``False`` where it is kept.
     """
     N, K = idx.shape
-    drop_mask = torch.zeros(N, K, dtype=torch.bool, device=idx.device)
-    for k in range(K):
-        position_in_queue = _cumcount(idx[:, k])
-        drop_mask[:, k] = position_in_queue >= capacity
-    return drop_mask
+    # Slot-major order: (n=0..N-1, k=0), then (n=0..N-1, k=1), ...
+    position_in_queue = _cumcount(idx.t().reshape(-1))
+    return (position_in_queue >= capacity).reshape(K, N).t()
 
 
 def build_expert_rank_table(topology: ParallelTopology, num_experts: int) -> torch.Tensor:
@@ -198,7 +202,12 @@ def compute_send_counts(
     return torch.bincount(owner, minlength=ep_size)
 
 
-__all__ = ["DistributedMoELayer", "build_expert_rank_table", "compute_send_counts"]
+__all__ = [
+    "DistributedMoELayer",
+    "build_expert_rank_table",
+    "collect_aux_losses",
+    "compute_send_counts",
+]
 
 
 # ===========================================================================
@@ -282,6 +291,9 @@ class DistributedMoELayer(nn.Module):
     topology : ParallelTopology
     capacity_factor : float   EP buffer over-provision factor (default 1.25).
     dtype : torch.dtype       Expert parameter dtype.
+    aux_losses : bool         Compute the router auxiliary losses on every
+                              forward (see :meth:`_aux_loss_sums`); read them
+                              with :func:`collect_aux_losses`.
     """
 
     def __init__(
@@ -294,6 +306,7 @@ class DistributedMoELayer(nn.Module):
         capacity_factor: float = 1.25,
         capacity_dropping: bool = False,
         dtype: torch.dtype = torch.float32,
+        aux_losses: bool = False,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -302,6 +315,11 @@ class DistributedMoELayer(nn.Module):
         self.topology = topology
         self.capacity_factor = capacity_factor
         self.capacity_dropping = capacity_dropping
+        self.aux_losses = aux_losses
+        # Set by every forward when aux_losses is on (else None): 0-dim
+        # tensors in this forward's graph, sums over this rank's tokens.
+        self.aux_z_sum: "torch.Tensor | None" = None
+        self.aux_lb_sum: "torch.Tensor | None" = None
 
         self.local_expert_ids: List[int] = topology.experts_on_this_rank(num_experts)
         # expert id -> owning EP rank. Non-persistent: derived from the
@@ -354,35 +372,43 @@ class DistributedMoELayer(nn.Module):
         N = flat.shape[0]
 
         # ---- Router ----
-        idx, weights, dispatch_cnt = self.router(flat)
+        self.router.keep_logits = self.aux_losses
+        idx, weights, dispatch_cnt, *logits = self.router(flat)
+        self.aux_z_sum = self.aux_lb_sum = None
+        if self.aux_losses:
+            self.aux_z_sum, self.aux_lb_sum = self._aux_loss_sums(logits[0], idx)
 
         # ---- Capacity-based token dropping (optional, off by default) ----
-        # When enabled, enforces a hard per-expert token budget following
-        # Switch Transformer / GShard semantics: each expert accepts at most
-        # `capacity_factor * (N*K/E)` tokens, keeping the first arrivals and
-        # dropping the rest. Dropped slots get zero combine weight, so their
-        # contribution to the output is silently omitted for that slot (the
-        # token still receives contributions from its non-dropped top-k
-        # slots, if any). This bounds worst-case expert compute and EP
-        # bandwidth at the cost of some tokens being under-processed under
-        # imbalanced routing — the standard MoE capacity/quality trade-off.
+        # When enabled, each expert accepts at most
+        # capacity = ceil(capacity_factor * N * K / E) (token, slot) pairs from
+        # this rank's N tokens, over all top-k slots, first choices first
+        # (compute_capacity_drop_mask; ADR-011). Dropped pairs are removed
+        # *before* dispatch: they are neither sent nor computed, which is what
+        # bounds expert compute and EP bandwidth (F12: they used to be
+        # dispatched and computed, and only their combine weight was zeroed).
+        # A token gets nothing from a dropped slot; its other slots still
+        # contribute. Combine weights are not renormalised.
         self.last_dropped_token_fraction = 0.0
+        expert_ids_flat = idx.reshape(-1)  # [N*top_k], item i*top_k + k = (token i, slot k)
+        kept = None  # positions of the dispatched items; None = all of them
         if self.capacity_dropping:
             capacity = math.ceil(self.capacity_factor * N * self.top_k / self.num_experts)
             drop_mask = compute_capacity_drop_mask(idx, self.num_experts, capacity)
             if drop_mask.any():
-                weights = weights.masked_fill(drop_mask, 0.0)
+                kept = (~drop_mask).reshape(-1).nonzero(as_tuple=True)[0]
                 self.last_dropped_token_fraction = float(drop_mask.float().mean().item())
 
-        # ---- Flatten (token, k) pairs into independently-routable dispatch
-        #      items. Each of a token's top_k expert assignments can land on
-        #      a DIFFERENT EP rank -- the common case whenever top_k>1 and
-        #      ep_size>1 -- so dispatch construction must operate per-slot,
-        #      not per-token. See ADR-009. ----
-        expert_ids_flat = idx.reshape(-1)  # [N*top_k]
-        tokens_expanded = flat.repeat_interleave(self.top_k, dim=0)  # [N*top_k, H]
-        # tokens_expanded[i*top_k + k] is token i's embedding, independently
-        # paired with expert_ids_flat[i*top_k + k] = idx[i, k].
+        # ---- Flatten the kept (token, k) pairs into independently-routable
+        #      dispatch items. Each of a token's top_k expert assignments can
+        #      land on a DIFFERENT EP rank -- the common case whenever
+        #      top_k>1 and ep_size>1 -- so dispatch construction must operate
+        #      per-slot, not per-token. See ADR-009. ----
+        if kept is None:
+            item_tokens = flat.repeat_interleave(self.top_k, dim=0)  # [N*top_k, H]
+        else:
+            item_tokens = flat[kept // self.top_k]  # [n_kept, H]
+            expert_ids_flat = expert_ids_flat[kept]
+        # item_tokens[j] is the embedding paired with expert_ids_flat[j].
 
         # ---- Build per-EP-rank send counts (per dispatch ITEM, not per
         #      token) from the same ownership table that decided which
@@ -390,9 +416,9 @@ class DistributedMoELayer(nn.Module):
         send_counts = compute_send_counts(
             expert_ids_flat, self._expert_rank_table, self.topology.ep_size
         )
-        # send_counts.sum() == N * top_k always, by construction: every
-        # dispatch item has exactly one expert, hence contributes to exactly
-        # one rank's count. (The previous per-token "any slot in range"
+        # send_counts.sum() == number of dispatch items always, by
+        # construction: every item has exactly one expert, hence contributes
+        # to exactly one rank's count. (The previous per-token "any slot in range"
         # check double-counted tokens whose top_k experts spanned multiple
         # ranks, and the later E // ep_size range arithmetic counted the
         # remainder experts nowhere when E % ep_size != 0 -- both surfaced
@@ -402,8 +428,8 @@ class DistributedMoELayer(nn.Module):
         #      per-rank blocks (build_expert_rank_table guarantees ownership
         #      is non-decreasing in expert id, so sorting by global expert id
         #      also groups by destination rank) ----
-        sort_order = expert_ids_flat.argsort(stable=True)  # [N*top_k]
-        tokens_sorted = tokens_expanded[sort_order]
+        sort_order = expert_ids_flat.argsort(stable=True)  # [n_items]
+        tokens_sorted = item_tokens[sort_order]
         expert_ids_sorted = expert_ids_flat[sort_order]
 
         # ---- EP dispatch: tokens AND their expert ids. The tag is required
@@ -448,9 +474,10 @@ class DistributedMoELayer(nn.Module):
         # ---- Weighted scatter back to original token positions ----
         # combined_sorted is in `sort_order`'s order; invert the permutation
         # to place each dispatch item's result back at its (token, k) flat
-        # position, then apply combine weights and sum over k per token.
-        combined_flat = torch.empty_like(tokens_expanded)  # [N*top_k, H]
-        combined_flat[sort_order] = combined_sorted
+        # position (dropped pairs stay zero), then apply combine weights and
+        # sum over k per token.
+        positions = sort_order if kept is None else kept[sort_order]
+        combined_flat = flat.new_zeros(N * self.top_k, H).index_copy(0, positions, combined_sorted)
         combined = (combined_flat.reshape(N, self.top_k, H) * weights.unsqueeze(-1)).sum(dim=1)
 
         assert not torch.isnan(combined).any(), (
@@ -459,6 +486,38 @@ class DistributedMoELayer(nn.Module):
         )
 
         return combined.reshape(original_shape)
+
+    def _aux_loss_sums(self, logits: torch.Tensor, idx: torch.Tensor):
+        """Router auxiliary losses of this forward, as **sums** over this
+        rank's tokens (F5). ``logits`` are the router's differentiable fp32
+        logits, returned by its forward when ``keep_logits`` is set (built and
+        returned there so that FSDP2 unshards its parameters for them in
+        forward and backward). With ``l_t`` the logits of
+        token ``t``, ``p_t = softmax(l_t)`` and ``E`` experts::
+
+            z_sum  = sum_t logsumexp(l_t)^2                (ST-MoE z-loss)
+            lb_sum = E * sum_e f_e * sum_t p_te            (Switch load balance)
+
+        ``f_e`` is the fraction of the micro-batch's top-k assignments routed
+        to expert ``e`` (before any capacity dropping), counted over the
+        **global** micro-batch: one all-reduce of ``E + 1`` numbers over the
+        DP and EP groups, never TP (TP ranks route the same tokens). It is a
+        constant for autograd, as in Switch Transformer. Every rank of the
+        DP and EP groups must therefore run this forward.
+
+        The trainer divides these sums, like the main loss, by the global
+        loss-token count (ADR-011), which makes them layout-independent.
+        """
+        z_sum = (torch.logsumexp(logits, dim=-1) ** 2).sum()
+
+        stats = torch.zeros(self.num_experts + 1, dtype=torch.float64, device=logits.device)
+        stats[: self.num_experts] = torch.bincount(idx.reshape(-1), minlength=self.num_experts)
+        stats[self.num_experts] = logits.shape[0]
+        stats = sum_over_data_ranks(stats, self.topology)
+        f = stats[: self.num_experts] / (stats[self.num_experts] * self.top_k).clamp_min(1.0)
+        probs_sum = torch.softmax(logits, dim=-1).sum(dim=0)
+        lb_sum = self.num_experts * (f.to(probs_sum.dtype) * probs_sum).sum()
+        return z_sum, lb_sum
 
     def _expert_to_rank(self, expert_ids: torch.Tensor) -> torch.Tensor:
         """Map a tensor of expert indices to their owning EP rank.
@@ -478,3 +537,23 @@ class DistributedMoELayer(nn.Module):
         ``expert_ids``'s device.
         """
         return self._expert_rank_table.to(expert_ids.device)[expert_ids.long()]
+
+
+def collect_aux_losses(model: nn.Module):
+    """Sum the router auxiliary losses of the last forward over **every**
+    :class:`DistributedMoELayer` in ``model`` that has ``aux_losses`` on (F5).
+
+    Returns ``(z_sum, lb_sum)``: 0-dim tensors in the forward's graph, sums
+    over this rank's tokens (see :meth:`DistributedMoELayer._aux_loss_sums`).
+    Add ``z_weight * z_sum + lb_weight * lb_sum`` to the micro-batch's summed
+    main loss before ``backward()``; ``grad_sync.finalize_grads`` then divides
+    both by the global loss-token count (ADR-011). Call once per forward.
+    """
+    layers = [m for m in model.modules() if isinstance(m, DistributedMoELayer) and m.aux_losses]
+    if not layers:
+        raise ValueError("collect_aux_losses: no DistributedMoELayer has aux_losses enabled")
+    if any(m.aux_z_sum is None for m in layers):
+        raise RuntimeError("collect_aux_losses: call it after the model's forward pass")
+    z_sum = sum(m.aux_z_sum for m in layers)
+    lb_sum = sum(m.aux_lb_sum for m in layers)
+    return z_sum, lb_sum

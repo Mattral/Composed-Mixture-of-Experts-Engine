@@ -186,23 +186,42 @@ def dense_router(
     return idx, weights
 
 
-def per_slot_capacity_drop_mask(idx: torch.Tensor, capacity: int) -> torch.Tensor:
-    """First-come-first-served capacity per expert, applied independently to
-    each top-k slot column.
+def capacity_drop_mask(idx: torch.Tensor, capacity: int) -> torch.Tensor:
+    """Expert capacity with slot-major priority (ADR-011, F12): each expert
+    accepts at most ``capacity`` (token, slot) pairs in total, over all top-k
+    slots. Every slot-0 (first-choice) pair is considered before any slot-1
+    pair, and so on, each slot in token order, first come first served.
+    Returns ``[N, K]``, True where the pair is dropped.
 
-    This mirrors the engine's existing per-slot semantics (pinned by
-    ``test_capacity_dropping.py::test_multi_k_independent_per_slot``); it is
-    written as a plain Python loop so it shares no code with the engine.
+    A plain Python loop, so it shares no code with the engine.
     """
     N, K = idx.shape
     mask = torch.zeros(N, K, dtype=torch.bool)
+    taken: Dict[int, int] = {}
     for k in range(K):
-        seen: Dict[int, int] = {}
         for n in range(N):
             e = int(idx[n, k])
-            mask[n, k] = seen.get(e, 0) >= capacity
-            seen[e] = seen.get(e, 0) + 1
+            mask[n, k] = taken.get(e, 0) >= capacity
+            taken[e] = taken.get(e, 0) + 1
     return mask
+
+
+def dense_aux_sums(
+    x: torch.Tensor, gate_w: torch.Tensor, k: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """One MoE layer's auxiliary-loss sums over *all* tokens ``x`` of a
+    micro-batch (fp64): router z-loss ``sum_t logsumexp(l_t)^2`` and the
+    Switch load-balancing sum ``E * sum_e f_e * sum_t p_te``, where ``f_e``
+    is the fraction of the ``N * k`` top-k assignments that go to expert
+    ``e`` (not differentiable)."""
+    logits = x.to(torch.float64) @ gate_w.to(torch.float64)
+    n, e = logits.shape
+    probs = torch.softmax(logits, dim=-1)
+    idx = torch.topk(probs, k=k, dim=-1).indices
+    f = torch.bincount(idx.reshape(-1), minlength=e).to(torch.float64) / (n * k)
+    z = (torch.logsumexp(logits, dim=-1) ** 2).sum()
+    lb = e * (f * probs.sum(0)).sum()
+    return z, lb
 
 
 def swiglu(x: torch.Tensor, w_gate: torch.Tensor, w_up: torch.Tensor, w_down: torch.Tensor):
@@ -223,7 +242,7 @@ def dense_moe(
     """
     idx, weights = dense_router(x, gate_w, k)
     if capacity is not None:
-        weights = weights.masked_fill(per_slot_capacity_drop_mask(idx, capacity), 0.0)
+        weights = weights.masked_fill(capacity_drop_mask(idx, capacity), 0.0)
     out = torch.zeros_like(x)
     for e, (wg, wu, wd) in enumerate(experts):
         rows, slots = (idx == e).nonzero(as_tuple=True)

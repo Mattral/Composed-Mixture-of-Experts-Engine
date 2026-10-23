@@ -125,6 +125,7 @@ jobs:
             --ignore=tests/test_differential.py \
             --ignore=tests/test_comm_ops.py \
             --ignore=tests/test_grad_sync.py \
+            --ignore=tests/test_train_step.py \
             -m cpu \
             -k "not (2rank or multiprocess or distributed_invariants)" \
             --tb=short -q \
@@ -167,14 +168,20 @@ jobs:
           python-version: "3.11"
           cache: pip
 
+      # Pinned: apply_fsdp2 relies on version-dependent FSDP2 methods
+      # (set_force_sum_reduction_for_comms, set_gradient_divide_factor,
+      # set_reduce_scatter_unused_params), verified with this release
+      # (ADR-011). Re-verify before bumping.
       - name: Install dependencies (CPU-only torch)
         run: |
-          pip install torch --index-url https://download.pytorch.org/whl/cpu
+          pip install torch==2.14.1 --index-url https://download.pytorch.org/whl/cpu
           pip install -e ".[dev]"
+          python -c "import torch; print('torch', torch.__version__)"
 
       - name: Run differential suite
         run: |
           pytest tests/test_differential.py tests/test_comm_ops.py tests/test_grad_sync.py \
+            tests/test_train_step.py \
             -v -rxXfE --tb=short --timeout=600 \
             --junitxml=test-results/junit-differential.xml
 
