@@ -125,6 +125,7 @@ jobs:
             --ignore=tests/test_differential.py \
             --ignore=tests/test_comm_ops.py \
             --ignore=tests/test_grad_sync.py \
+            --ignore=tests/test_train_step.py \
             -m cpu \
             -k "not (2rank or multiprocess or distributed_invariants)" \
             --tb=short -q \
@@ -180,6 +181,7 @@ jobs:
       - name: Run differential suite
         run: |
           pytest tests/test_differential.py tests/test_comm_ops.py tests/test_grad_sync.py \
+            tests/test_train_step.py \
             -v -rxXfE --tb=short --timeout=600 \
             --junitxml=test-results/junit-differential.xml
 
