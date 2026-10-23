@@ -82,6 +82,7 @@ Public API
     sum_over_data_ranks(tensor, topology) -> tensor
     global_token_count(local_count, topology) -> int
     finalize_grads(model, topology, num_tokens)
+    clip_grad_norm_(model, max_norm, topology) -> total norm
     sync_replicated_grads(model, topology)
     broadcast_replicated_params(model, topology)
 """
@@ -107,6 +108,7 @@ __all__ = [
     "sum_over_data_ranks",
     "global_token_count",
     "finalize_grads",
+    "clip_grad_norm_",
     "sync_replicated_grads",
     "broadcast_replicated_params",
     "SEQUENCE_PARALLEL_ATTR",
@@ -229,6 +231,73 @@ def finalize_grads(model: nn.Module, topology: ParallelTopology, num_tokens: int
         for p in model.parameters():
             if p.grad is not None:
                 _local(p.grad).div_(num_tokens)
+
+
+def clip_grad_norm_(
+    model: nn.Module, max_norm: float, topology: ParallelTopology, eps: float = 1e-6
+) -> torch.Tensor:
+    """Clip gradients by their **global** L2 norm and return that norm (F14).
+
+    The norm is that of the full model's gradient with every parameter
+    counted once, whatever the layout. Each rank adds up the squared norms of
+    its local gradients by class, and each class is summed over exactly the
+    groups whose ranks hold different parts of it:
+
+    * over DP: FSDP2-sharded gradients (DTensors; each DP rank holds a slice);
+    * over EP: expert parameters (each EP rank holds different experts);
+    * over TP: parameters marked :func:`mark_tensor_parallel_shard`.
+
+    Everything else is replicated across that group (after
+    :func:`sync_replicated_grads`) and is counted once. The class sums take
+    at most three all-reduces of 8 numbers, and every rank issues the same
+    ones. All gradients are then scaled by ``min(1, max_norm / (norm + eps))``,
+    the same coefficient on every rank, like ``torch.nn.utils.clip_grad_norm_``.
+
+    Call after :func:`finalize_grads` (or :func:`sync_replicated_grads`) and
+    before ``optimizer.step()``. ``torch.nn.utils.clip_grad_norm_`` over
+    ``model.parameters()`` saw only each rank's own shards, so under EP or
+    TP every rank clipped with a different, too-small norm.
+    """
+    experts = _expert_param_ids(model)
+    groups = [
+        topology.mesh["dp"].get_group()
+        if dist.is_initialized() and topology.dp_size > 1 and topology.mesh is not None
+        else None,
+        _ep_group(topology) if dist.is_initialized() else None,
+        tp_process_group(topology) if topology.tp_size > 1 else None,
+    ]
+    sq = torch.zeros(8, dtype=torch.float64, device=topology.device)
+    grads = []
+    for p in model.parameters():
+        if p.grad is None:
+            continue
+        g = p.grad
+        sharded = (
+            DTensor is not None and isinstance(g, DTensor),
+            id(p) in experts,
+            bool(getattr(p, TENSOR_PARALLEL_SHARD_ATTR, False)),
+        )
+        local = _local(g)
+        key = sum(
+            int(flag and grp is not None) << i for i, (flag, grp) in enumerate(zip(sharded, groups))
+        )
+        sq[key] += local.detach().double().pow(2).sum()
+        grads.append(local)
+    keys = torch.arange(8, device=sq.device)
+    for i, grp in enumerate(groups):
+        if grp is None:
+            continue
+        mask = ((keys >> i) & 1).bool()
+        part = torch.where(mask, sq, torch.zeros_like(sq))
+        dist.all_reduce(part, op=dist.ReduceOp.SUM, group=grp)
+        sq = torch.where(mask, part, sq)
+    total = sq.sum().sqrt()
+    coef = max_norm / (float(total) + eps)
+    if coef < 1.0:
+        with torch.no_grad():
+            for g in grads:
+                g.mul_(coef)
+    return total
 
 
 def broadcast_replicated_params(model: nn.Module, topology: ParallelTopology) -> None:

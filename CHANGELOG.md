@@ -36,6 +36,14 @@ NCCL, or across multiple hosts unless it says so.
   now reaches every layer. `test_multi_k_independent_per_slot` was rewritten
   to the new semantics. See ADR-011, "Expert capacity and token dropping".
 
+- **F14 — gradient-norm clipping.** `train.py` clipped with
+  `torch.nn.utils.clip_grad_norm_(model.parameters())`. Under EP or TP that
+  is each rank's local norm, which misses the other ranks' expert and TP
+  shards. Ranks also clipped with different coefficients, so replicated
+  weights drifted apart. The new `grad_sync.clip_grad_norm_` computes the
+  global norm, each parameter counted once over DP, EP and TP shards, and
+  applies one coefficient on every rank.
+
 ### Removed
 - **F27 — `.github/workflows/signal-correctness.yml`.** It was invalid YAML
   from the day it was added (`d9cf60c`, 2026-02-24): an unquoted
