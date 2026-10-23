@@ -679,23 +679,22 @@ class MoERouter(torch.nn.Module):
         assert H == self.hidden_dim
 
         gate_w = self.gate_w
-        if self.bias is not None:
-            force_reference = True
 
         _router_report: dict = {}
-        idx, w = MoERouterAutograd.apply(flat, gate_w, self.top_k, force_reference, _router_report)
-
-        if self.bias is not None and force_reference:
-            with torch.no_grad():
-                logits = flat.to(torch.float32) @ gate_w.to(torch.float32) + self.bias.to(
-                    torch.float32
-                )
-                probs = torch.softmax(logits, dim=-1)
-                topk_vals, idx_new = torch.topk(probs, k=self.top_k, dim=-1)
-                w_new = (topk_vals / topk_vals.sum(-1, keepdim=True).clamp_min(1e-30)).to(
-                    tokens.dtype
-                )
-            idx, w = idx_new.to(torch.long), w_new
+        if self.bias is not None:
+            # MoERouterFunction (and the Triton kernel) route on x @ gate_w
+            # only. With a bias, route in differentiable fp64 PyTorch instead.
+            # (This used to recompute idx/w under no_grad after the Function
+            # call, so the combine weights carried no gradient at all: F23.)
+            logits64 = flat.to(torch.float64) @ gate_w.to(torch.float64) + self.bias.to(
+                torch.float64
+            )
+            topk_vals, idx = torch.topk(torch.softmax(logits64, dim=-1), k=self.top_k, dim=-1)
+            w = (topk_vals / topk_vals.sum(-1, keepdim=True)).to(tokens.dtype)
+        else:
+            idx, w = MoERouterAutograd.apply(
+                flat, gate_w, self.top_k, force_reference, _router_report
+            )
 
         # Dispatch count + invariant check
         dispatch_cnt = torch.bincount(idx.reshape(-1), minlength=self.num_experts).to(torch.long)
