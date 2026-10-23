@@ -205,6 +205,24 @@ def per_slot_capacity_drop_mask(idx: torch.Tensor, capacity: int) -> torch.Tenso
     return mask
 
 
+def dense_aux_sums(
+    x: torch.Tensor, gate_w: torch.Tensor, k: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """One MoE layer's auxiliary-loss sums over *all* tokens ``x`` of a
+    micro-batch (fp64): router z-loss ``sum_t logsumexp(l_t)^2`` and the
+    Switch load-balancing sum ``E * sum_e f_e * sum_t p_te``, where ``f_e``
+    is the fraction of the ``N * k`` top-k assignments that go to expert
+    ``e`` (not differentiable)."""
+    logits = x.to(torch.float64) @ gate_w.to(torch.float64)
+    n, e = logits.shape
+    probs = torch.softmax(logits, dim=-1)
+    idx = torch.topk(probs, k=k, dim=-1).indices
+    f = torch.bincount(idx.reshape(-1), minlength=e).to(torch.float64) / (n * k)
+    z = (torch.logsumexp(logits, dim=-1) ** 2).sum()
+    lb = e * (f * probs.sum(0)).sum()
+    return z, lb
+
+
 def swiglu(x: torch.Tensor, w_gate: torch.Tensor, w_up: torch.Tensor, w_down: torch.Tensor):
     return F.linear(F.silu(F.linear(x, w_gate)) * F.linear(x, w_up), w_down)
 
