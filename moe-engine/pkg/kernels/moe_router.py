@@ -662,13 +662,22 @@ class MoERouter(torch.nn.Module):
 
         # Saved for z-loss / load-imbalance computation
         self._last_logits: Optional[torch.Tensor] = None
+        # When keep_logits is set (DistributedMoELayer does so for its
+        # auxiliary losses, F5), forward also returns the *differentiable*
+        # fp32 logits (x @ gate_w + bias) as a 4th output. They must be built
+        # inside the router's forward and returned from it: FSDP2 unshards
+        # the router's parameters only for its own forward, and re-unshards
+        # them for backward only when a gradient reaches one of its outputs.
+        self.keep_logits: bool = False
 
     def forward(
         self,
         tokens: torch.Tensor,
         force_reference: bool = False,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Returns (topk_idx [N, K], topk_w [N, K], dispatch_cnt [E])."""
+        """Returns (topk_idx [N, K], topk_w [N, K], dispatch_cnt [E]), plus the
+        differentiable fp32 logits [N, E] as a 4th element when
+        ``keep_logits`` is set."""
         if tokens.dim() == 3:
             B, S, H = tokens.shape
             flat = tokens.reshape(B * S, H)
@@ -695,6 +704,12 @@ class MoERouter(torch.nn.Module):
             idx, w = MoERouterAutograd.apply(
                 flat, gate_w, self.top_k, force_reference, _router_report
             )
+
+        logits = None
+        if self.keep_logits:
+            logits = flat.float() @ gate_w.float()
+            if self.bias is not None:
+                logits = logits + self.bias.float()
 
         # Dispatch count + invariant check
         dispatch_cnt = torch.bincount(idx.reshape(-1), minlength=self.num_experts).to(torch.long)
@@ -753,4 +768,6 @@ class MoERouter(torch.nn.Module):
             expert_load_imbalance=float(load_imbalance),
             router_z_loss=float(z_loss),
         )
+        if logits is not None:
+            return idx, w, dispatch_cnt, logits
         return idx, w, dispatch_cnt

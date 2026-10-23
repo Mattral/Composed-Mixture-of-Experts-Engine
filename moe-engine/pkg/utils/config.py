@@ -149,9 +149,17 @@ class TrainingConfig(BaseModel):
     z_loss_weight: float = Field(
         0.0,
         description=(
-            "Auxiliary router z-loss weight (Switch Transformer style). "
+            "Auxiliary router z-loss weight (ST-MoE style). "
             "0.0 = disabled. Typical value: 1e-3. "
             "Override via MOE_TRAINING__Z_LOSS_WEIGHT=1e-3."
+        ),
+    )
+    load_balance_weight: float = Field(
+        1e-2,
+        description=(
+            "Switch-Transformer load-balancing loss weight "
+            "(E * sum_e f_e * P_e over every MoE layer). 0.0 = disabled. "
+            "Override via MOE_TRAINING__LOAD_BALANCE_WEIGHT."
         ),
     )
 

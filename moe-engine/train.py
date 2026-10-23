@@ -56,6 +56,7 @@ from pkg.distributed.grad_sync import (
     finalize_grads,
     global_token_count,
 )
+from pkg.distributed.moe_layer import collect_aux_losses
 from pkg.elastic.fault_monitor import (
     ElasticConfig as _ElasticRuntimeConfig,
 )
@@ -331,20 +332,14 @@ def main() -> None:
             )
             local_tokens += int((targets != -100).sum())  # cross_entropy's ignore_index
 
-            # Aux z-loss (P2.2 — advanced load balancing).
-            # Weight from cfg, default 0 (disabled). Enable with
-            # MOE_TRAINING__Z_LOSS_WEIGHT=1e-3 or in config YAML.
-            z_loss_weight = getattr(cfg.training, "z_loss_weight", 0.0)
-            z_loss_aux = 0.0
-            if z_loss_weight > 0.0:
-                try:
-                    p_info = model.blocks[0].moe.router.last_profile
-                    if p_info is not None:
-                        z_loss_aux = p_info.router_z_loss * z_loss_weight / grad_accum
-                except (AttributeError, IndexError):
-                    pass
-
-            loss = ce_loss + z_loss_aux
+            # Router auxiliary losses from every MoE layer (F5): tensor sums
+            # over this rank's tokens, normalised with the CE sum by
+            # finalize_grads (ADR-011). Weights from cfg.training.
+            loss = ce_loss
+            z_w, lb_w = cfg.training.z_loss_weight, cfg.training.load_balance_weight
+            if z_w > 0.0 or lb_w > 0.0:
+                z_sum, lb_sum = collect_aux_losses(model)
+                loss = loss + z_w * z_sum + lb_w * lb_sum
             loss.backward()
             total_loss += float(ce_loss.detach().item())  # log CE only
 

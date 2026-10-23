@@ -44,6 +44,7 @@ After each forward pass the following attributes are set on the layer:
 Public API
 ----------
     DistributedMoELayer
+    collect_aux_losses(model) -> (z_sum, lb_sum)
 """
 
 from __future__ import annotations
@@ -56,6 +57,7 @@ import torch
 import torch.nn as nn
 
 from pkg.distributed.expert_parallel import all_to_all_combine, all_to_all_dispatch
+from pkg.distributed.grad_sync import sum_over_data_ranks
 from pkg.distributed.mesh import ParallelTopology
 from pkg.distributed.tensor_parallel import ColumnParallelLinear, RowParallelLinear
 from pkg.kernels.moe_router import MoERouter
@@ -198,7 +200,12 @@ def compute_send_counts(
     return torch.bincount(owner, minlength=ep_size)
 
 
-__all__ = ["DistributedMoELayer", "build_expert_rank_table", "compute_send_counts"]
+__all__ = [
+    "DistributedMoELayer",
+    "build_expert_rank_table",
+    "collect_aux_losses",
+    "compute_send_counts",
+]
 
 
 # ===========================================================================
@@ -282,6 +289,9 @@ class DistributedMoELayer(nn.Module):
     topology : ParallelTopology
     capacity_factor : float   EP buffer over-provision factor (default 1.25).
     dtype : torch.dtype       Expert parameter dtype.
+    aux_losses : bool         Compute the router auxiliary losses on every
+                              forward (see :meth:`_aux_loss_sums`); read them
+                              with :func:`collect_aux_losses`.
     """
 
     def __init__(
@@ -294,6 +304,7 @@ class DistributedMoELayer(nn.Module):
         capacity_factor: float = 1.25,
         capacity_dropping: bool = False,
         dtype: torch.dtype = torch.float32,
+        aux_losses: bool = False,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
@@ -302,6 +313,11 @@ class DistributedMoELayer(nn.Module):
         self.topology = topology
         self.capacity_factor = capacity_factor
         self.capacity_dropping = capacity_dropping
+        self.aux_losses = aux_losses
+        # Set by every forward when aux_losses is on (else None): 0-dim
+        # tensors in this forward's graph, sums over this rank's tokens.
+        self.aux_z_sum: "torch.Tensor | None" = None
+        self.aux_lb_sum: "torch.Tensor | None" = None
 
         self.local_expert_ids: List[int] = topology.experts_on_this_rank(num_experts)
         # expert id -> owning EP rank. Non-persistent: derived from the
@@ -354,7 +370,11 @@ class DistributedMoELayer(nn.Module):
         N = flat.shape[0]
 
         # ---- Router ----
-        idx, weights, dispatch_cnt = self.router(flat)
+        self.router.keep_logits = self.aux_losses
+        idx, weights, dispatch_cnt, *logits = self.router(flat)
+        self.aux_z_sum = self.aux_lb_sum = None
+        if self.aux_losses:
+            self.aux_z_sum, self.aux_lb_sum = self._aux_loss_sums(logits[0], idx)
 
         # ---- Capacity-based token dropping (optional, off by default) ----
         # When enabled, enforces a hard per-expert token budget following
@@ -460,6 +480,38 @@ class DistributedMoELayer(nn.Module):
 
         return combined.reshape(original_shape)
 
+    def _aux_loss_sums(self, logits: torch.Tensor, idx: torch.Tensor):
+        """Router auxiliary losses of this forward, as **sums** over this
+        rank's tokens (F5). ``logits`` are the router's differentiable fp32
+        logits, returned by its forward when ``keep_logits`` is set (built and
+        returned there so that FSDP2 unshards its parameters for them in
+        forward and backward). With ``l_t`` the logits of
+        token ``t``, ``p_t = softmax(l_t)`` and ``E`` experts::
+
+            z_sum  = sum_t logsumexp(l_t)^2                (ST-MoE z-loss)
+            lb_sum = E * sum_e f_e * sum_t p_te            (Switch load balance)
+
+        ``f_e`` is the fraction of the micro-batch's top-k assignments routed
+        to expert ``e`` (before any capacity dropping), counted over the
+        **global** micro-batch: one all-reduce of ``E + 1`` numbers over the
+        DP and EP groups, never TP (TP ranks route the same tokens). It is a
+        constant for autograd, as in Switch Transformer. Every rank of the
+        DP and EP groups must therefore run this forward.
+
+        The trainer divides these sums, like the main loss, by the global
+        loss-token count (ADR-011), which makes them layout-independent.
+        """
+        z_sum = (torch.logsumexp(logits, dim=-1) ** 2).sum()
+
+        stats = torch.zeros(self.num_experts + 1, dtype=torch.float64, device=logits.device)
+        stats[: self.num_experts] = torch.bincount(idx.reshape(-1), minlength=self.num_experts)
+        stats[self.num_experts] = logits.shape[0]
+        stats = sum_over_data_ranks(stats, self.topology)
+        f = stats[: self.num_experts] / (stats[self.num_experts] * self.top_k).clamp_min(1.0)
+        probs_sum = torch.softmax(logits, dim=-1).sum(dim=0)
+        lb_sum = self.num_experts * (f.to(probs_sum.dtype) * probs_sum).sum()
+        return z_sum, lb_sum
+
     def _expert_to_rank(self, expert_ids: torch.Tensor) -> torch.Tensor:
         """Map a tensor of expert indices to their owning EP rank.
 
@@ -478,3 +530,23 @@ class DistributedMoELayer(nn.Module):
         ``expert_ids``'s device.
         """
         return self._expert_rank_table.to(expert_ids.device)[expert_ids.long()]
+
+
+def collect_aux_losses(model: nn.Module):
+    """Sum the router auxiliary losses of the last forward over **every**
+    :class:`DistributedMoELayer` in ``model`` that has ``aux_losses`` on (F5).
+
+    Returns ``(z_sum, lb_sum)``: 0-dim tensors in the forward's graph, sums
+    over this rank's tokens (see :meth:`DistributedMoELayer._aux_loss_sums`).
+    Add ``z_weight * z_sum + lb_weight * lb_sum`` to the micro-batch's summed
+    main loss before ``backward()``; ``grad_sync.finalize_grads`` then divides
+    both by the global loss-token count (ADR-011). Call once per forward.
+    """
+    layers = [m for m in model.modules() if isinstance(m, DistributedMoELayer) and m.aux_losses]
+    if not layers:
+        raise ValueError("collect_aux_losses: no DistributedMoELayer has aux_losses enabled")
+    if any(m.aux_z_sum is None for m in layers):
+        raise RuntimeError("collect_aux_losses: call it after the model's forward pass")
+    z_sum = sum(m.aux_z_sum for m in layers)
+    lb_sum = sum(m.aux_lb_sum for m in layers)
+    return z_sum, lb_sum

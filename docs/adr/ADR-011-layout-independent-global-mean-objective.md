@@ -151,3 +151,73 @@ test exposed were fixed:
 * **A non-FSDP DP path for testing.** It is not needed: FSDP2 runs at dp = 2
   on CPU/Gloo once F24 and F25 are fixed, so the tests exercise the real
   path.
+
+## Router auxiliary losses (F5, added with item 2)
+
+**Context.** The router z-loss was a detached Python float
+(`RouterProfile.router_z_loss`). `train.py` read it from block 0 only and
+added it as a constant, and no load-balancing loss existed, so neither
+trained the router.
+
+**Decision.**
+
+* Every `DistributedMoELayer` with `aux_losses=True` exposes, after each
+  forward, two 0-dim tensors in the graph. They are **sums over the rank's
+  routed tokens**, matching the main loss's convention above:
+
+      aux_z_sum  = Σ_t logsumexp(l_t)²                 (ST-MoE router z-loss)
+      aux_lb_sum = E · Σ_e f_e · Σ_t softmax(l_t)_e    (Switch load balancing)
+
+  * `l_t` are the router's fp32 logits (`x @ gate_w + bias`).
+  * They are built inside `MoERouter.forward` and returned as a 4th output
+    when `keep_logits` is set. FSDP2 unshards the router's parameters only
+    for its own forward, and unshards them again for backward only when a
+    gradient reaches one of the router's outputs. A side attribute broke
+    backward at dp = 2: `gate_w` storage was already freed.
+* `f_e` is the fraction of the micro-batch's top-k assignments routed to
+  expert `e`. Assignments are counted before any capacity dropping, and the
+  counts are **global over the micro-batch**: one all-reduce of `E + 1`
+  numbers over the DP and EP groups per layer per forward, never TP. `f_e`
+  is a constant for autograd, as in Switch Transformer.
+* `pkg.distributed.moe_layer.collect_aux_losses(model)` sums both terms over
+  **every** MoE layer. `train.py` adds
+  `z_loss_weight · z_sum + load_balance_weight · lb_sum` to each
+  micro-batch's CE sum. `finalize_grads` then divides everything by
+  `N_global`, the global count of loss-bearing tokens.
+* **Defaults (D4):** `load_balance_weight = 1e-2` (Switch's α);
+  `z_loss_weight` stays `0.0` (opt-in; ST-MoE uses 1e-3). `ToyMoEModel`
+  turns the losses on in every layer when either weight is non-zero.
+
+**Consequences.**
+
+* The auxiliary losses train the router, and the gradients they produce
+  don't depend on the layout. `tests/test_differential.py::test_layout_*[aux-*]`
+  checks this for single, dp2, ep2, sp2 (tp2) and dp2×ep2 against a dense
+  reference with global per-micro-batch `f_e` (CPU/Gloo).
+* With every token loss-bearing, the objective is
+  `CE mean + w_z · mean_t lse² + w_lb · Σ_m (R_m / R) · LB_m`, where `R_m`
+  is micro-batch `m`'s routed-token count and `R = Σ_m R_m`. That is the
+  standard per-micro-batch Switch loss, averaged over accumulation steps
+  weighted by token count. It reduces to the plain average when
+  micro-batches are the same size.
+* **With masking, padding or packing, `N_global` < routed tokens.** Each
+  routed token still counts once in the auxiliary sums, but the sums are
+  divided by the loss-token count, so the effective auxiliary weight grows
+  by `routed / loss-bearing`. This is deliberate: it keeps one normaliser
+  for the whole objective. Lower the weights, or keep padding out of the
+  router, if that matters.
+* **Cost:** one extra `[N, H] × [H, E]` matmul for the differentiable
+  logits (the routing path computes its own), plus one small all-reduce per
+  MoE layer per micro-batch at dp > 1 or ep > 1.
+* **Not supported:** an MoE layer *inside* a sequence-parallel region,
+  where TP ranks would route different tokens. The `f_e` reduction assumes
+  TP ranks route the same tokens.
+
+**Alternatives rejected.**
+
+* **Per-rank `f_e`** (Switch's per-device statistic). This makes the loss
+  depend on the layout, which is what this ADR removes.
+* **Normalising the auxiliary sums by the routed-token count** instead of
+  `N_global`. With unnormalised accumulation (Decision 2), a second
+  normaliser would need the step's total routed count before the first
+  backward, the same look-ahead that Decision 2 avoids.

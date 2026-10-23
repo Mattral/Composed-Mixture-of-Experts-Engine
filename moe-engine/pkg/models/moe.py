@@ -109,6 +109,7 @@ class ToyMoEBlock(nn.Module):
         topology: ParallelTopology,
         capacity_factor: float = 1.25,
         dtype: torch.dtype = torch.float32,
+        aux_losses: bool = False,
     ):
         super().__init__()
         self.norm = RMSNorm(hidden_dim)
@@ -120,6 +121,7 @@ class ToyMoEBlock(nn.Module):
             topology=topology,
             capacity_factor=capacity_factor,
             dtype=dtype,
+            aux_losses=aux_losses,
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -152,6 +154,10 @@ class ToyMoEModel(nn.Module):
         H = m.hidden_dim
 
         self.embed = nn.Embedding(m.vocab_size, H, dtype=dtype)
+        # Router auxiliary losses on every MoE layer when either weight is set
+        # (F5); train.py collects them with collect_aux_losses.
+        t = cfg.training
+        aux_losses = t.z_loss_weight > 0.0 or t.load_balance_weight > 0.0
         self.blocks = nn.ModuleList(
             [
                 ToyMoEBlock(
@@ -162,6 +168,7 @@ class ToyMoEModel(nn.Module):
                     topology=topology,
                     capacity_factor=m.capacity_factor,
                     dtype=dtype,
+                    aux_losses=aux_losses,
                 )
                 for _ in range(m.num_layers)
             ]
