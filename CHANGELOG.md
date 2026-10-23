@@ -44,6 +44,15 @@ NCCL, or across multiple hosts unless it says so.
   global norm, each parameter counted once over DP, EP and TP shards, and
   applies one coefficient on every rank.
 
+- **F14 — FSDP2 and expert weights (documentation).** `apply_fsdp2` said
+  expert weights were excluded from FSDP2. They never were: the root
+  `fully_shard` shards them over DP. That is expert-data-parallelism, and it
+  is correct, because each DP group holds one EP rank's experts. The
+  docstring and comments now say so, and a 4-rank test pins it: experts are
+  sharded over DP, identical across DP and distinct across EP, and after
+  three full engine steps every replicated weight, router included, is
+  identical on every rank. No behaviour change.
+
 ### Removed
 - **F27 — `.github/workflows/signal-correctness.yml`.** It was invalid YAML
   from the day it was added (`d9cf60c`, 2026-02-24): an unquoted
