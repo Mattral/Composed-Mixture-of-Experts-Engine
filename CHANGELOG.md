@@ -53,6 +53,15 @@ NCCL, or across multiple hosts unless it says so.
   three full engine steps every replicated weight, router included, is
   identical on every rank. No behaviour change.
 
+- **F18 — training data under tensor parallelism.** `train.py` drew every
+  micro-batch with unseeded `torch.randint` on each rank, so the ranks of a
+  tensor-parallel group trained on different tokens. `train.micro_batch` now
+  draws from a generator seeded by `(training.seed, step, micro-batch, data
+  rank)`: TP peers share data, other DP×EP ranks get different data, and
+  every batch is reproducible. The step body is now `train.train_step`, and
+  a tp = 2 step is tested against a dense reference. The data is still
+  synthetic.
+
 ### Removed
 - **F27 — `.github/workflows/signal-correctness.yml`.** It was invalid YAML
   from the day it was added (`d9cf60c`, 2026-02-24): an unquoted

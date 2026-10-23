@@ -43,11 +43,6 @@ from tests._differential import (  # noqa: E402
 
 pytestmark = pytest.mark.cpu
 
-_F18 = (
-    "F18: train.py draws each rank's batch with unseeded torch.randint, so the "
-    "ranks of a tensor-parallel group train on different tokens"
-)
-
 
 def _assert_ok(results, kind):
     fails = failures_for(results, kind)
@@ -94,7 +89,6 @@ def _batch_worker(rank: int, ws: int, cfg: dict) -> list:
     ]
 
 
-@pytest.mark.xfail(strict=True, reason=_F18)
 @pytest.mark.parametrize("dp,ep,tp", [(2, 1, 2), (1, 2, 2)], ids=["dp2-tp2", "ep2-tp2"])
 def test_tp_ranks_get_identical_batches(dp, ep, tp):
     _assert_ok(run_multiprocess(_batch_worker, dp * ep * tp, dict(dp=dp, ep=ep, tp=tp)), "batch")
@@ -192,7 +186,6 @@ def _step_worker(rank: int, ws: int, cfg_in: dict) -> list:
     return checks
 
 
-@pytest.mark.xfail(strict=True, reason=_F18)
 @pytest.mark.parametrize("clip", [0.05, 1e9], ids=["clipped", "unclipped"])
 def test_tp2_train_step_matches_dense(clip):
     """train.py's step at tp = 2 with 2 micro-batches and the router
