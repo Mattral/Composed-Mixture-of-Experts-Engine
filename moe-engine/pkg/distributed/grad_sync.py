@@ -79,6 +79,7 @@ Public API
 ----------
     mark_sequence_parallel(param)
     mark_tensor_parallel_shard(param)
+    sum_over_data_ranks(tensor, topology) -> tensor
     global_token_count(local_count, topology) -> int
     finalize_grads(model, topology, num_tokens)
     sync_replicated_grads(model, topology)
@@ -103,6 +104,7 @@ except Exception:  # pragma: no cover
 __all__ = [
     "mark_sequence_parallel",
     "mark_tensor_parallel_shard",
+    "sum_over_data_ranks",
     "global_token_count",
     "finalize_grads",
     "sync_replicated_grads",
@@ -186,24 +188,29 @@ def sync_replicated_grads(model: nn.Module, topology: ParallelTopology) -> None:
             dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=tp_group)
 
 
+def sum_over_data_ranks(t: torch.Tensor, topology: ParallelTopology) -> torch.Tensor:
+    """SUM-all-reduce ``t`` in place over the DP and EP groups, the ranks
+    that hold different tokens, and return it. Never over TP: TP ranks hold
+    the same tokens. One all-reduce per non-trivial group; a no-op when
+    ``torch.distributed`` is not initialised."""
+    if not dist.is_initialized():
+        return t
+    if topology.dp_size > 1:
+        if topology.mesh is None:
+            raise RuntimeError("sum_over_data_ranks: dp_size > 1 requires a DeviceMesh topology")
+        dist.all_reduce(t, op=dist.ReduceOp.SUM, group=topology.mesh["dp"].get_group())
+    ep_group = _ep_group(topology)
+    if ep_group is not None:
+        dist.all_reduce(t, op=dist.ReduceOp.SUM, group=ep_group)
+    return t
+
+
 def global_token_count(local_count: int, topology: ParallelTopology) -> int:
     """Number of loss-bearing tokens in the global batch: ``local_count``
     (this rank's count over all micro-batches of the step) summed over the
-    DP and EP groups, the ranks that hold different tokens. Never over TP:
-    TP ranks hold the same tokens. One int64 all-reduce per non-trivial
-    group; returns ``local_count`` when ``torch.distributed`` is not
-    initialised."""
-    if not dist.is_initialized():
-        return int(local_count)
+    data-distinct ranks (:func:`sum_over_data_ranks`)."""
     count = torch.tensor([int(local_count)], dtype=torch.int64, device=topology.device)
-    if topology.dp_size > 1:
-        if topology.mesh is None:
-            raise RuntimeError("global_token_count: dp_size > 1 requires a DeviceMesh topology")
-        dist.all_reduce(count, op=dist.ReduceOp.SUM, group=topology.mesh["dp"].get_group())
-    ep_group = _ep_group(topology)
-    if ep_group is not None:
-        dist.all_reduce(count, op=dist.ReduceOp.SUM, group=ep_group)
-    return int(count.item())
+    return int(sum_over_data_ranks(count, topology).item())
 
 
 def finalize_grads(model: nn.Module, topology: ParallelTopology, num_tokens: int) -> None:

@@ -18,7 +18,18 @@ NCCL, or across multiple hosts unless it says so.
   The CI differential job pins `torch==2.14.1`, because the FSDP2 methods
   this relies on depend on the torch version.
 
+- **F5 — router auxiliary losses.** The router z-loss was a detached float
+  read from block 0 only, and there was no load-balancing loss, so neither
+  trained the router. Every MoE layer now produces tensor-valued z-loss and
+  Switch load-balancing sums. The expert fractions are global over the
+  micro-batch (DP × EP). `collect_aux_losses` gathers them from every layer,
+  and `train.py` adds them with `z_loss_weight` (default 0.0) and the new
+  `load_balance_weight` (default 1e-2). See ADR-011, "Router auxiliary
+  losses".
+
 ### Fixed
+- **F23 — biased router.** `MoERouter(bias=True)` recomputed its routing
+  under `no_grad`, so its combine weights carried no gradient.
 - **F24 — FSDP2 without mixed precision.** `apply_fsdp2` passed
   `mp_policy=None`, so FSDP2 raised at the first forward of every fp32 run at
   dp > 1.
@@ -35,7 +46,11 @@ NCCL, or across multiple hosts unless it says so.
 - `tests/test_differential.py::test_layout_*`: one global batch with unequal
   loss masks and 2 micro-batches, run under single, dp2, ep2, sp2, dp2×ep2,
   dp2×sp2 and ep2×sp2 and compared against a dense global-mean reference
-  (CPU/Gloo; FSDP2 at dp = 2 on CPU/Gloo only).
+  (CPU/Gloo; FSDP2 at dp = 2 on CPU/Gloo only). The `aux-*` variants add the
+  router auxiliary losses.
+- `tests/test_router_losses.py` (Tier-0): biased-router gradients (F23);
+  auxiliary-loss values and gradients against a dense reference,
+  aggregation over every layer, and config defaults (F5).
 
 ## Unreleased — M1: correct gradients under EP/TP/SP (October 2026)
 

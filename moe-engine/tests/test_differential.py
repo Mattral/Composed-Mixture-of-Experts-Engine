@@ -249,12 +249,7 @@ def _ep_result(cid: str):
 
 # Finding ID -> xfail reason, for cases that currently fail. A new failing
 # case must add its finding here first.
-_FINDING_TEXT: dict = {
-    "F5": (
-        "F5: the router z-loss is a detached Python float and there is no "
-        "load-balancing loss, so neither trains the router"
-    ),
-}
+_FINDING_TEXT: dict = {}
 
 
 def _params(cases, which):
@@ -926,11 +921,11 @@ _LAYOUT_CASES = [
     # Same batch with the router auxiliary losses on (F5): expert fractions
     # must be global over the micro-batch (DP x EP), never double-counted
     # over TP.
-    ("aux-single", dict(dp=1, ep=1, tp=1, aux=True), (), ("F5",), ("F5",)),
-    ("aux-dp2", dict(dp=2, ep=1, tp=1, aux=True), (), ("F5",), ("F5",)),
-    ("aux-ep2", dict(dp=1, ep=2, tp=1, aux=True), (), ("F5",), ("F5",)),
-    ("aux-sp2", dict(dp=1, ep=1, tp=2, aux=True), (), ("F5",), ("F5",)),
-    ("aux-dp2-ep2", dict(dp=2, ep=2, tp=1, aux=True), (), ("F5",), ("F5",)),
+    ("aux-single", dict(dp=1, ep=1, tp=1, aux=True), (), (), ()),
+    ("aux-dp2", dict(dp=2, ep=1, tp=1, aux=True), (), (), ()),
+    ("aux-ep2", dict(dp=1, ep=2, tp=1, aux=True), (), (), ()),
+    ("aux-sp2", dict(dp=1, ep=1, tp=2, aux=True), (), (), ()),
+    ("aux-dp2-ep2", dict(dp=2, ep=2, tp=1, aux=True), (), (), ()),
 ]
 
 

@@ -37,11 +37,6 @@ from pkg.kernels.moe_router import MoERouter  # noqa: E402
 
 pytestmark = pytest.mark.cpu
 
-_F5 = (
-    "F5: the router z-loss is a detached Python float and there is no "
-    "load-balancing loss, so neither trains the router"
-)
-
 
 def _dense_aux_sums(x, gate_w, k):
     """Dense fp64 reference for one layer's auxiliary sums over its tokens:
@@ -66,7 +61,6 @@ def _layer(seed=0, H=8, Fd=16, E=6, K=2):
         pytest.fail(f"DistributedMoELayer has no aux losses: {exc}")
 
 
-@pytest.mark.xfail(strict=True, reason=_F5)
 @pytest.mark.parametrize("k", [1, 2])
 def test_layer_aux_sums_and_grads_match_dense(k):
     layer = _layer(K=k)
@@ -87,7 +81,6 @@ def test_layer_aux_sums_and_grads_match_dense(k):
     )
 
 
-@pytest.mark.xfail(strict=True, reason=_F5)
 def test_aux_losses_change_router_gradients():
     """M2 done-when (a): adding the auxiliary losses changes the router's
     gradient (a detached float could not)."""
@@ -114,7 +107,6 @@ class _TwoLayers(nn.Module):
         return self.b(self.a(x))
 
 
-@pytest.mark.xfail(strict=True, reason=_F5)
 def test_collect_aux_losses_sums_every_layer():
     """The trainer must see every MoE layer's auxiliary losses, not only the
     first block's (train.py read block 0 alone)."""
@@ -131,7 +123,6 @@ def test_collect_aux_losses_sums_every_layer():
         assert g is not None and g.abs().sum() > 0, f"layer {name}: no aux gradient"
 
 
-@pytest.mark.xfail(strict=True, reason=_F5)
 def test_training_config_aux_weights_and_model_wiring():
     """D4: load-balancing weight defaults to 1e-2, z-loss stays opt-in (0.0);
     the model enables the auxiliary losses on every layer when either
