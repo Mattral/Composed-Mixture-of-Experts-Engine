@@ -70,7 +70,7 @@ torch 2.14.1.
 
 ### Removed
 - **F27 — `.github/workflows/signal-correctness.yml`.** It was invalid YAML
-  from the day it was added (`d9cf60c`, 2026-02-24): an unquoted
+  from the day it was added (`37d3215`, 2026-02-24): an unquoted
   `name: Alternative: ...` on line 25. GitHub could not parse it, so it never
   ran a job and reported a failed run on every push to any branch. Its checks
   either already run in `ci.yml` or were obsolete:
