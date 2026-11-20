@@ -5,9 +5,9 @@
 # Job tiers and when they run:
 #
 #   lint          every push + PR          ruff + mypy
-#   test-cpu      every push + PR          319 Tier-0 CPU tests
-#   test-differential every push + PR      multi-process Gloo: EP/TP/SP vs dense reference
-#   test-config   every push + PR          34 config system tests
+#   test-cpu      every push + PR          Tier-0: 416 passed, 3 skipped, 16 deselected, 1 xfailed
+#   test-differential every push + PR      243 passed (not part of test-cpu)
+#   test-config   every push + PR          38 passed (also included in test-cpu)
 #   benchmark     every push + PR          CPU benchmark + conservation
 #   docker        workflow_dispatch only   Docker CPU-stage build + smoke
 #   test-gpu      workflow_dispatch only   Tier-1 Triton kernel tests
@@ -99,7 +99,7 @@ jobs:
 # Job: test-cpu  (every push + PR — the gate that must always be green)
 # ---------------------------------------------------------------------------
   test-cpu:
-    name: "Tier-0 CPU tests (319 expected)"
+    name: "Tier-0 CPU tests"
     runs-on: ubuntu-22.04
     needs: lint
 
@@ -197,7 +197,7 @@ jobs:
 # Job: test-config  (every push + PR — dedicated config validation gate)
 # ---------------------------------------------------------------------------
   test-config:
-    name: "Config system (34 tests)"
+    name: "Config system"
     runs-on: ubuntu-22.04
     needs: lint
 

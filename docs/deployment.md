@@ -328,7 +328,10 @@ python scripts/cli.py validate configs/default.yaml
 # 2. Smoke test the image / environment
 python train.py --config configs/smoke.yaml --smoke
 
-# 3. Run the Tier-0 CPU test suite (393 tests expected)
+# 3. CPU tests. This command matches `make test-cpu` (wider than CI Tier-0).
+#    The CI Tier-0 job also ignores the four differential files and reports
+#    416 passed, 3 skipped, 16 deselected, 1 xfailed.
+#    The differential job reports 243 passed.
 pytest tests/ -m cpu \
   -k "not (2rank or multiprocess or distributed_invariants)" \
   --ignore=tests/test_chaos.py --ignore=tests/test_smoke_e2e.py -v

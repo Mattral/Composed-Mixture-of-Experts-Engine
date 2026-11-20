@@ -4,7 +4,7 @@
 # Run from: moe-engine/   (the directory containing pyproject.toml)
 #
 # Targets:
-#   test-cpu        Tier-0 CPU suite (235 tests, ~60s, no GPU needed)
+#   test-cpu        CPU suite, wider than the CI Tier-0 job (also runs the differential files)
 #   test-gpu        Tier-1 GPU suite (requires CUDA + Triton)
 #   smoke           Single-rank smoke run (CPU, ~5s)
 #   benchmark       CPU benchmark sweep → /tmp/moe_bench_cpu.json
@@ -35,7 +35,7 @@ help:
 	@echo ""
 	@echo "moe-engine v0.3.3 — Make targets"
 	@echo "=================================="
-	@echo "  test-cpu        Tier-0 CPU suite (235 tests, ~60s)"
+	@echo "  test-cpu        CPU suite (wider than the CI Tier-0 job)"
 	@echo "  test-gpu        Tier-1 GPU suite (requires CUDA + Triton)"
 	@echo "  smoke           Single-rank smoke run (~5s, CPU)"
 	@echo "  benchmark       CPU benchmark sweep"
@@ -51,10 +51,15 @@ help:
 	@echo ""
 
 # ---------------------------------------------------------------------------
-# Tier 0: CPU-only (235 tests, ~60s — run on every commit)
+# CPU suite. Wider than CI's Tier-0 job, which also ignores
+# test_differential.py, test_comm_ops.py, test_grad_sync.py, and
+# test_train_step.py. That narrower job last reported:
+#   416 passed, 3 skipped, 16 deselected, 1 xfailed
+# The four differential files, as their own job, last reported 243 passed.
+# The 38 config tests are inside the Tier-0 count.
 # ---------------------------------------------------------------------------
 test-cpu:
-	@echo "==> Tier-0 CPU suite"
+	@echo "==> CPU suite (includes differential files; CI Tier-0 does not)"
 	$(PYTEST) tests/ \
 	  --ignore=tests/test_chaos.py \
 	  --ignore=tests/test_smoke_e2e.py \
@@ -62,7 +67,8 @@ test-cpu:
 	  -k "not (2rank or multiprocess or distributed_invariants)" \
 	  -q $(PYTEST_OPTS)
 	@echo ""
-	@echo "==> Tier-0 complete. Expected: 235 passed, 1 skipped, 1 flaky."
+	@echo "==> Done. CI Tier-0: 416 passed, 3 skipped, 16 deselected, 1 xfailed."
+	@echo "    Differential files alone: 243 passed. This target runs both selections."
 
 # ---------------------------------------------------------------------------
 # Tier 1: GPU (requires CUDA + Triton)

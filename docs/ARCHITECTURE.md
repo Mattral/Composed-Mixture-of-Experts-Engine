@@ -21,13 +21,13 @@ decision flows from that premise.
 
 | Component | Status | Detail |
 |---|---|---|
-| **Triton router kernel — forward** | ✅ CI-verified | Fused matmul+softmax+topK+renorm; single HBM pass; SRAM tile 64×64 |
-| **Triton router kernel — backward** | ✅ CI-verified | Analytic ∂/∂logits through softmax→topK→renorm; `atol=rtol=1e-5` |
-| **Token conservation invariant** | ✅ CI-verified | `sum(dispatch_cnt) == N×K` asserted every forward; 100-seed sweep |
+| **Triton router kernel — forward** | ✅ CPU path in push CI | Fused matmul+softmax+topK+renorm; single HBM pass; SRAM tile 64×64. The Triton GPU job is `workflow_dispatch` only and was skipped on the latest push. |
+| **Triton router kernel — backward** | ✅ CPU path in push CI | Analytic ∂/∂logits through softmax→topK→renorm; `atol=rtol=1e-5` on the CPU reference path. The GPU job did not run on the latest push. |
+| **Token conservation invariant** | ✅ CPU benchmark in push CI | `sum(dispatch_cnt) == N×K` asserted every forward. The latest push benchmark reported `violations=0/100`. The GPU sweep is not part of push CI. |
 | **Expert load imbalance metric** | ✅ v0.2 | `max_load / mean_load` tracked per step; logged to telemetry |
 | **Router z-loss** | ✅ v0.2 | Auxiliary regularisation signal; emitted per step |
 | **DP+EP device mesh** | ✅ CI-verified | `init_device_mesh` (PyTorch 2.5+); degenerate 1-rank fallback |
-| **EP all-to-all (dispatch + combine)** | ✅ CI-verified | Non-blocking `all_to_all_single`; dedicated CUDA stream; event sync |
+| **EP all-to-all (dispatch + combine)** | ✅ CPU differential job | Non-blocking `all_to_all_single` on Gloo (243 passed). Dedicated CUDA-stream overlap is not part of push CI. |
 | **Compute-comm overlap** | ✅ | Expert FFN runs on default stream while a2a is in flight |
 | **Comm/compute overlap ratio** | ✅ v0.3 | `dispatch_ms / expert_compute_ms`; emitted in `collective` telemetry block |
 | **FSDP2 sharding** | ✅ | `fully_shard` along DP axis; per-param DTensor; MixedPrecision |
@@ -44,10 +44,10 @@ decision flows from that premise.
 | **TorchElastic state machine** | ✅ CI-verified | Evict → reshard (round-robin) → reload → resume |
 | **Etcd rendezvous** | ✅ v0.2 | `ElasticTrainerHarness` backend selector; c10d (<100 nodes) / etcd (>100) |
 | **Prometheus metrics** | ✅ v0.3 | Optional in-process `/metrics` endpoint; 10 gauges (incl. `expert_compute_ms`, `comm_compute_overlap_ratio`) |
-| **Docker + docker-compose** | ✅ v0.2 | Multi-stage image; 1/4/8-GPU compose targets; monitoring stack |
+| **Docker + docker-compose** | ✅ v0.2 | Multi-stage image; 1/4/8-GPU compose targets; monitoring stack. The Docker CI job is `workflow_dispatch` only and was skipped on the latest push. |
 | **Kubernetes manifests** | ✅ v0.2 | Single-node Job + multi-node Indexed Job; PVC; etcd rendezvous |
 | **Benchmark suite** | ✅ v0.2 | `benchmarks/run_benchmark.py`; CPU+GPU sweeps; JSON/CSV output |
-| **Chaos: storage stall (Scenario B)** | ✅ CI-verified | 10s injected stall; queue drains; no deadlock; **100% pass rate** |
+| **Chaos: storage stall (Scenario B)** | Manual | 10s injected stall. The Chaos job is `workflow_dispatch` only and was skipped on the latest push. The recorded result in RESULTS.md is 10/10. |
 | **Chaos: node kill + recovery (Scenario A)** | ⚠️ Flaky | ~85% pass rate; Gloo `connectFullMesh` timeout on 4-rank restart |
 | **Nsight/CUPTI integration** | ❌ Planned v0.4 | Requires GPU hardware |
 | **Real multi-node benchmark data** | ❌ Planned v0.4 | Requires sustained cluster access |

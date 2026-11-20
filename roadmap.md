@@ -73,12 +73,12 @@ This release addressed all P0 and P1 items from MOE instructions v2.1.
 
 | Item | Status | Detail |
 |---|---|---|
-| `@pytest.mark.cpu` on all CPU test files | ✅ | 16 test files decorated |
+| `@pytest.mark.cpu` on all CPU test files | ✅ | 27 test modules marked `cpu` (`test_chaos.py` is marked `chaos`) |
 | `@pytest.mark.gpu`, `@pytest.mark.chaos` registered | ✅ | `pyproject.toml` with `--strict-markers` |
-| `test_config.py` | ✅ | 34 new tests for full `MoEConfig` system |
+| `test_config.py` | ✅ | 38 tests in the current file; all 38 run inside the Tier-0 job |
 | `test_mock_dist.py` / `mock_dist.py` | ✅ | 17 tests; `MockTopology`, `MockDistEnv` |
 | `test_properties.py` | ✅ | 9 property-based tests (Hypothesis); token conservation, expert ownership, config invariants |
-| **Total: 260 tests passing** | ✅ | Up from 201 (v0.3.1) |
+| **Push CI pytest** | ✅ | Tier-0: 416 passed, 3 skipped, 16 deselected, 1 xfailed. Differential: 243 passed. The 38 config tests are inside the Tier-0 count. |
 | Real GPU data in all docs | ✅ | `gpu_results.json` → `RESULTS.md`, `BENCHMARKS.md` |
 
 ### P0.3 — Basic DX ✅
@@ -178,12 +178,14 @@ the remaining CPU-doable P2.2 gap (advanced load balancing).
 
 ### 2-Rank CI Blind Spot (found August 2026, see ADR-007, ADR-008, ADR-009)
 
-Every job in `.github/workflows/ci.yml` filters `2rank or multiprocess or
-distributed_invariants` out of its pytest invocation, and no other job —
-scheduled or otherwise — runs them. This tier has never actually executed
-in CI. Fixing the Sequence Parallelism bugs in ADR-007 required running it
-directly, which surfaced these failures. Three of five are now fixed
-(ADR-008, ADR-009); two remain open:
+The Tier-0 job filters `2rank or multiprocess or distributed_invariants`
+out of its pytest invocation (16 deselected on the current tree). The
+differential job does not use that filter. It runs `tests/test_differential.py`,
+`tests/test_comm_ops.py`, `tests/test_grad_sync.py`, and
+`tests/test_train_step.py` (243 passed) and does not run the named tests
+below. No push job runs those named tests. Fixing the Sequence Parallelism
+bugs in ADR-007 required running them directly, which surfaced these
+failures. Three of five are now fixed (ADR-008, ADR-009); two remain open:
 
 | Test | File | Symptom | Status |
 |---|---|---|---|
@@ -209,7 +211,8 @@ plausibly its own investigation, comparable in scope to ADR-007/008/009.
 - All parallelism scheduling logic (1F1B, TP/EP/PP/SP)
 - Config validation, async checkpointing, telemetry, fault state machine
 - Expert capacity dropping (`_cumcount`, `compute_capacity_drop_mask`) — 25 tests
-- 393 passing tests, 0 lint errors, 0 format violations (CI-verified)
+- Push CI pytest: Tier-0 `416 passed, 3 skipped, 16 deselected, 1 xfailed` (includes 38 config tests); differential job `243 passed`
+- ruff check and `ruff format --check` passed on the latest push (74 files already formatted). mypy is `continue-on-error` and reported errors on that run; the lint job still succeeded
 
 **Proven at 2-rank `mp.spawn` on CPU:**
 - TP numerical correctness (Column/RowParallel)

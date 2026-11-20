@@ -8,9 +8,9 @@
 ## Philosophy
 
 Tests are written for reality: most contributors do not have constant access
-to a multi-GPU cluster. 90% of the test suite runs on a single CPU core in
-under 60 seconds. GPU and multi-process tests exist and pass, but they are
-opt-in and clearly separated from the fast Tier-0 suite.
+to a multi-GPU cluster. The Tier-0 job finishes in about 10 seconds on CPU.
+The differential job also runs on every push and takes several minutes.
+GPU and chaos jobs are manual.
 
 The four-tier model matches the four-tier benchmark strategy in `docs/benchmarks.md`.
 
@@ -28,18 +28,27 @@ The four-tier model matches the four-tier benchmark strategy in `docs/benchmarks
 ### Tier 0: CPU-only (must pass on every commit)
 
 ```bash
-# All 393 CPU tests
-make test-cpu
-
-# Equivalent manual command
+# CI Tier-0 job. `make test-cpu` is wider: it does not ignore the four
+# differential files below.
 pytest tests/ \
   --ignore=tests/test_chaos.py \
   --ignore=tests/test_smoke_e2e.py \
+  --ignore=tests/test_differential.py \
+  --ignore=tests/test_comm_ops.py \
+  --ignore=tests/test_grad_sync.py \
+  --ignore=tests/test_train_step.py \
   -m cpu \
   -k "not (2rank or multiprocess or distributed_invariants)" \
   -q
 
-# Expected: 393 passed, 3 skipped (Triton GPU; 2 more in test_gpu_portability.py needing real/multi CUDA — see ADR-006), 1 xfailed (seed=2 routing, documented statistical edge case)
+# 416 passed, 3 skipped, 16 deselected, 1 xfailed
+# The 3 skips are the Triton GPU path and two CUDA-only tests in
+# test_gpu_portability.py. The xfail is seed=2 in test_routing_quality.py.
+# The 38 config tests are included in the 416 passed.
+
+# Differential job (separate; 243 passed). Also runs on every push.
+GLOO_SOCKET_IFNAME=lo pytest tests/test_differential.py tests/test_comm_ops.py \
+  tests/test_grad_sync.py tests/test_train_step.py -q
 ```
 
 ### Tier 1: GPU (Triton kernel, real CUDA)
@@ -57,13 +66,12 @@ pytest tests/test_kernels.py tests/test_kernels_numerics.py -m gpu -v
 
 ### Tier 2: Multi-process (2-rank mp.spawn)
 
-These are **not actually run by any CI job** — every job in
-`.github/workflows/ci.yml` filters `2rank or multiprocess or
-distributed_invariants` out of its pytest invocation, with nothing else in
-the pipeline picking them up. (This section previously said they "run
-automatically in the full suite," which was not true — found and corrected
-during the ADR-007 investigation, August 2026.) Run them manually with
-loopback networking (`GLOO_SOCKET_IFNAME=lo`):
+The Tier-0 job filters `2rank or multiprocess or distributed_invariants`
+out of its invocation (16 deselected). The differential job does not use
+that filter. It runs `test_differential.py`, `test_comm_ops.py`,
+`test_grad_sync.py`, and `test_train_step.py` (243 passed) and does not
+include the named tests in this section. Run those named tests manually
+with loopback networking (`GLOO_SOCKET_IFNAME=lo`):
 
 ```bash
 GLOO_SOCKET_IFNAME=lo pytest tests/ \
@@ -76,13 +84,13 @@ Tests covered, with known status as of ADR-009 (August 2026):
 - `test_sequence_parallel_v03.py::test_sp_fused_2rank_numerically_correct` — ✅ fixed, see ADR-007
 - `test_distributed_invariants.py::test_token_conservation_distributed` — ✅ fixed, see ADR-009
 
-See `roadmap.md`'s "2-Rank CI Blind Spot" section for the full list (six
-failing tests across four files) and recommended next steps.
+See `roadmap.md`'s "2-Rank CI Blind Spot" section for the full list. Two of those tests remain open.
 
 ### Tier 3: Chaos (fault injection)
 
 ```bash
-# Scenario B: storage stall (10s I/O delay) — expect 10/10 = 100%
+# Scenario B: storage stall (10s I/O delay). Recorded 10/10 in RESULTS.md.
+# The Chaos CI job is workflow_dispatch only and did not run on the latest push.
 make chaos-b
 
 # Scenario A: node kill + recovery — expect ~85% (Gloo race, known)
@@ -95,26 +103,38 @@ make chaos-a
 
 | File | Tier | Tests | What it covers |
 |------|------|------:|----------------|
-| `test_config.py` | 0 | 38 | Full `MoEConfig` Pydantic system, incl. `large_scale.yaml` |
-| `test_kernels.py` | 0/1 | 7 | Router invariants (conservation, NaN, bounds, constexpr) |
-| `test_kernels_numerics.py` | 0/1 | 13 | `atol=rtol=1e-5` vs fp64 ref; 30 `(H,E,K)` configs |
-| `test_routing_quality.py` | 0 | 12 | Load imbalance, z-loss; stochastic seed sweep |
-| `test_tensor_parallel.py` | 0/2 | 25 | Column/Row parallel at tp=1 incl. gather_output modes (ADR-008); 5 genuinely-verified 2-rank checks |
-| `test_pipeline_parallel.py` | 0/2 | 16 | 1F1B scheduling; 2-rank `mp.spawn` activation flow |
-| `test_sequence_parallel_v03.py` | 0/2 | 26 | SP scatter/gather incl. non-divisible-length padding; fused `next_weight` path (zero collectives, ADR-007); 5 genuinely-verified 2-rank checks |
-| `test_distributed.py` | 0 | 4 | `DistributedMoELayer` expert-to-rank mapping |
+| `test_config.py` | 0 | 38 | Full `MoEConfig` Pydantic system, incl. `large_scale.yaml`. Included in the Tier-0 passed count. |
+| `test_router.py` | 0 | 39 | `MoERouterInterface` |
+| `test_router_losses.py` | 0 | 7 | Aux router losses |
+| `test_registry.py` | 0 | 20 | Model registry and factory |
+| `test_capacity_dropping.py` | 0 | 35 | Expert capacity dropping |
+| `test_mock_dist.py` | 0 | 17 | Mocked collective backend |
+| `test_properties.py` | 0 | 9 | Hypothesis property tests |
+| `test_kernels.py` | 0/1 | 11 | Router invariants (conservation, NaN, bounds, constexpr) |
+| `test_kernels_numerics.py` | 0/1 | 31 | `atol=rtol=1e-5` vs fp64 ref; 30 `(H,E,K)` configs |
+| `test_routing_quality.py` | 0 | 16 | Load imbalance, z-loss; stochastic seed sweep |
+| `test_tensor_parallel.py` | 0/2 | 25 | Column/Row parallel at tp=1 incl. gather_output modes (ADR-008); 2-rank checks |
+| `test_pipeline_parallel.py` | 0/2 | 27 | 1F1B scheduling; 2-rank `mp.spawn` activation flow |
+| `test_sequence_parallel_v03.py` | 0/2 | 26 | SP scatter/gather incl. non-divisible-length padding; fused `next_weight` path (ADR-007) |
+| `test_distributed.py` | 0 | 5 | `DistributedMoELayer` expert-to-rank mapping |
 | `test_distributed_invariants.py` | 2 | 2 | Token conservation + backward NaN (4-process Gloo) — ✅ ADR-009 |
-| `test_moe_layer.py` | 0/2 | 14 | DistributedMoELayer per-token correctness (ADR-009): reference comparison, gradient routing, send_counts arithmetic, 2-rank EP |
+| `test_moe_layer.py` | 0/2 | 18 | DistributedMoELayer per-token correctness (ADR-009) |
 | `test_elastic.py` | 0 | 7 | Async checkpointing core (NVMe + S3 mock) |
-| `test_elastic_v02.py` | 0 | 10 | Expert resharding after node drop |
+| `test_elastic_v02.py` | 0 | 30 | Expert resharding after node drop |
 | `test_mfu.py` | 0 | 6 | MFU formula correctness |
-| `test_mfu_v02.py` | 0 | 15 | `MFUAccountant` streaming tracker |
-| `test_telemetry.py` | 0 | 22 | `StructuredLogger` JSONL output; overlap ratio field |
-| `test_smoke_e2e.py` | 0 | 3 | End-to-end smoke: config → topology → model → step |
+| `test_mfu_v02.py` | 0 | 17 | `MFUAccountant` streaming tracker |
+| `test_telemetry.py` | 0 | 28 | `StructuredLogger` JSONL output; overlap ratio field |
+| `test_smoke_e2e.py` | 0 | 3 | End-to-end smoke: config → topology → model → step. Ignored by the Tier-0 job. |
 | `test_gpu_portability.py` | 0/1 | 22 | ADR-005's three A100 fixes + ADR-006's device-coercion correction; CPU logic/source tests, 2 hardware-gated `gpu`-tier tests |
-| `test_chaos.py` | 3 | 3 | Scenario A (node kill) + Scenario B (storage stall) |
+| `test_differential.py` | differential | 215 | Multi-process EP/TP/SP vs a dense reference |
+| `test_comm_ops.py` | differential | 9 | Collective forward and VJP checks |
+| `test_grad_sync.py` | differential | 15 | Gradient sync checks |
+| `test_train_step.py` | differential | 4 | Train-step checks vs a dense reference |
+| `test_chaos.py` | 3 | 3 | Scenario A (node kill) + Scenario B (storage stall). Manual CI job. |
 
-**Total Tier-0 CPU: 393 passing** (v0.3.3, July 2026)
+Counts are `pytest --collect-only` items, including parametrized cases. Summing this table is not a passing total: Tier-0 deselects 16 items, skips 3, and xfails 1, and it does not run the differential, smoke, or chaos files.
+
+**Tier-0 job: 416 passed, 3 skipped, 16 deselected, 1 xfailed.** The 38 `test_config.py` items are inside that passed count. **Differential job: 243 passed.** Full collection is 685 items in 28 files.
 
 ---
 
@@ -134,7 +154,7 @@ markers = [
 Usage:
 
 ```bash
-pytest tests/ -m cpu          # 393 tests, ~20s
+pytest tests/ -m cpu          # marker only; not the Tier-0 job command
 pytest tests/ -m gpu          # requires CUDA + Triton
 pytest tests/ -m chaos        # requires torchrun + Gloo
 pytest tests/ -m "cpu or gpu" # both tiers
@@ -156,19 +176,19 @@ avoid splitting multi-line `from X import (...)` blocks.
 # Config system only (38 tests, ~0.3s)
 pytest tests/test_config.py -v
 
-# Router correctness (7 tests, ~2s on CPU)
+# Router correctness (11 collected items)
 pytest tests/test_kernels.py -v
 
-# Full numerics sweep (13 tests, ~15s on CPU)
+# Full numerics sweep (31 collected items)
 pytest tests/test_kernels_numerics.py -v
 
-# Pipeline scheduling (16 tests including 2-rank)
+# Pipeline scheduling (27 collected items, including 2-rank)
 pytest tests/test_pipeline_parallel.py -v
 
-# Elastic/checkpointing (17 tests)
+# Elastic/checkpointing (37 collected items)
 pytest tests/test_elastic.py tests/test_elastic_v02.py -v
 
-# Telemetry (22 tests)
+# Telemetry (28 collected items)
 pytest tests/test_telemetry.py -v
 
 # Single test by name
@@ -188,7 +208,7 @@ codebase and is present in the original repo's CI. It does not reflect a bug
 in the refactored code.
 
 Status: **non-blocking**. Marked `xfail(strict=False)` with the mechanism
-documented inline; excluded from the 393-passing count when counting
+documented inline; it is the 1 xfailed in the Tier-0 summary, not one of the 416 passed, when counting
 stable tests. Tracked as a known issue.
 
 ### Multi-process tests (`2rank`, `multiprocess`, `distributed_invariants`)

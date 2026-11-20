@@ -147,9 +147,10 @@ python train.py --config configs/smoke.yaml --smoke
 ## Running the Full Test Suite
 
 ```bash
-# Tier-0 CPU suite (319 tests, ~10s), no GPU needed:
+# CI Tier-0 job: 416 passed, 3 skipped, 16 deselected, 1 xfailed
+# (includes 38 config tests). Differential job: 243 passed.
+# `make test-cpu` also runs the differential files.
 make test-cpu
-# or: pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" -q
 
 # Single test file:
 pytest tests/test_tensor_parallel.py -v

@@ -105,24 +105,33 @@ Outputs in `/tmp/moe-engine/logs/step.jsonl` and `/tmp/moe-engine/ckpts/`.
 ## Step 4 — Run the test suite
 
 ```bash
-make test-cpu
-# or: pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" -q
+# Same selection as the CI Tier-0 job
+pytest tests/ \
+  --ignore=tests/test_chaos.py \
+  --ignore=tests/test_smoke_e2e.py \
+  --ignore=tests/test_differential.py \
+  --ignore=tests/test_comm_ops.py \
+  --ignore=tests/test_grad_sync.py \
+  --ignore=tests/test_train_step.py \
+  -m cpu \
+  -k "not (2rank or multiprocess or distributed_invariants)" \
+  -q
 ```
 
-Expected:
+Expected for that command:
 
 ```
-1 xfailed, 393 passed, 3 skipped in ~20s
+416 passed, 3 skipped, 16 deselected, 1 xfailed
 ```
 
-- **393 passed**
-- **3 skipped**: Triton GPU path (no CUDA in this environment — expected);
+- **416 passed**, including the 38 config tests
+- **3 skipped**: Triton GPU path (no CUDA in this environment);
   plus two hardware-gated tests in `test_gpu_portability.py` that need a
-  real CUDA GPU and 2+ CUDA devices respectively (see ADR-006) — all three
-  skips are expected on a CPU-only machine, not failures.
-- **1 xfailed**: `test_routing_quality::test_uniform_init_lower_imbalance[2]`  
-  Marked `xfail` — a documented statistical edge case at seed=2, not a code
-  bug. See `docs/testing.md` for the full mechanism explanation.
+  real CUDA GPU and 2+ CUDA devices respectively (see ADR-006)
+- **16 deselected** by the `-k` filter (`2rank`, `multiprocess`, `distributed_invariants`)
+- **1 xfailed**: `test_routing_quality::test_uniform_init_lower_imbalance[2]`
+- The differential job is separate and reports **243 passed**
+- `make test-cpu` also runs the four differential files, so its summary is not the Tier-0 line above
 
 ---
 

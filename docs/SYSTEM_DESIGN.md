@@ -435,7 +435,7 @@ StepRecord → StructuredLogger (JSONL + TensorBoard + Prometheus + WandB)
 
 ## Validation and Testing
 
-Verify with: `pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" --ignore=tests/test_chaos.py --ignore=tests/test_smoke_e2e.py`
+Verify with the CI Tier-0 invocation: `pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" --ignore=tests/test_chaos.py --ignore=tests/test_smoke_e2e.py --ignore=tests/test_differential.py --ignore=tests/test_comm_ops.py --ignore=tests/test_grad_sync.py --ignore=tests/test_train_step.py`
 
 | Test file | What it verifies |
 |---|---|
@@ -443,9 +443,9 @@ Verify with: `pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed
 | `test_kernels.py` | Router fwd/bwd shapes, token conservation, NaN checks, `K: tl.constexpr` |
 | `test_kernels_numerics.py` | 30 configs, Triton vs fp64 `atol=rtol=1e-5` |
 | `test_routing_quality.py` | load_imbalance math, z_loss invariants, `RouterProfile` |
-| `test_router.py` | `MoERouterInterface`: construction, invariants, `capacity_budget`, backward pass (33 tests) |
-| `test_registry.py` | Model registry: registration, duplicate detection, factory dispatch (20 tests) |
-| `test_capacity_dropping.py` | `_cumcount`, `compute_capacity_drop_mask`, layer integration (22 tests) |
+| `test_router.py` | `MoERouterInterface`: construction, invariants, `capacity_budget`, backward pass (39 collected items) |
+| `test_registry.py` | Model registry: registration, duplicate detection, factory dispatch (20 collected items) |
+| `test_capacity_dropping.py` | `_cumcount`, `compute_capacity_drop_mask`, layer integration (35 collected items) |
 | `test_tensor_parallel.py` | Column/Row shape+grad+dtype+numerical incl. gather_output modes (ADR-008); 2-rank `mp.spawn`, genuinely verified |
 | `test_pipeline_parallel.py` | 1F1B schedule; single-process invariants; 2-rank `mp.spawn` PP |
 | `test_sequence_parallel_v03.py` | SP fused `next_weight` path (zero collectives, ADR-007); non-divisible sequence length; 2-rank `mp.spawn` SP, genuinely verified |
@@ -459,14 +459,9 @@ Verify with: `pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed
 | `test_properties.py` | Hypothesis property-based tests: conservation, ownership, config invariants |
 | `test_gpu_portability.py` | Permanent coverage for ADR-005's three A100 fixes + ADR-006's device-coercion correction; CPU-runnable logic/source tests plus honestly-skipped `gpu`-marked hardware tests |
 | `test_smoke_e2e.py` | Full `train.py` loop, all telemetry envelope keys, S3 mock |
-| `test_chaos.py` | Scenario B ✅ 100%; Scenario A ⚠️ ~85% |
+| `test_chaos.py` | Scenario B recorded 10/10 in RESULTS.md; the Chaos job is manual and was skipped on the latest push. Scenario A ⚠️ ~85% |
 
-**Total: 393 passing tests** (23 test files), 3 skips (1 pre-existing:
-Triton GPU path, no CUDA in this environment; 2 new in
-`test_gpu_portability.py`, requiring real CUDA / 2+ CUDA devices
-respectively — see ADR-006), 1 `xfail` (documented statistical edge case
-in `test_routing_quality.py`, seed=2). 0 lint errors, 0 format violations
-(`ruff check` / `ruff format --check`).
+**Tier-0 job: 416 passed, 3 skipped, 16 deselected, 1 xfailed** (28 test files collect 685 items). The 3 skips are the Triton GPU path and two CUDA-only tests in `test_gpu_portability.py` (see ADR-006). The xfail is the documented seed=2 case in `test_routing_quality.py`. The 38 `test_config.py` items are inside the 416 passed. **Differential job: 243 passed** (`test_differential.py`, `test_comm_ops.py`, `test_grad_sync.py`, `test_train_step.py`), not included in Tier-0. On the latest push, `ruff check` and `ruff format --check` passed (74 files already formatted). mypy is `continue-on-error` and reported errors; the lint job still succeeded. The GPU, Docker, and Chaos jobs were skipped.
 
 ---
 

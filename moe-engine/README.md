@@ -7,9 +7,9 @@
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/LICENSE)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.5%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Triton](https://img.shields.io/badge/Triton-3.x-9333ea.svg)](https://triton-lang.org/)
-[![Tests](https://img.shields.io/badge/tests-260%20passing-brightgreen)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/moe-engine/tests/)
+[![Tests](https://img.shields.io/badge/tests-416%20passed%20%2B%20243%20differential-brightgreen)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/moe-engine/tests/)
 [![GPU Validated](https://img.shields.io/badge/GPU-T4%20%2B%20A100%20validated-blue)](docs/adr/ADR-005-gpu-architecture-portability.md)
-[![Chaos B](https://img.shields.io/badge/Chaos%20B-10%2F10%20%E2%9C%85-brightgreen)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/RESULTS.md#fault-tolerance--chaos-test-results)
+[![Chaos B](https://img.shields.io/badge/Chaos%20B-recorded%2010%2F10%20%28manual%20job%29-yellow)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/RESULTS.md#fault-tolerance--chaos-test-results)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/pulls)
 [![Version](https://img.shields.io/badge/version-v0.3.3-orange)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/releases)
 
@@ -199,12 +199,12 @@ See **[`RESULTS.md`](RESULTS.md)** for every real number with exact reproduction
 
 | Component                              | Status          | Detail |
 |----------------------------------------|-----------------|--------|
-| **Triton router — forward**            | ✅ CI-verified  | Fused matmul+softmax+topK+renorm; single HBM pass; SRAM 64×64; 80.1× over CPU at N=4096 |
-| **Triton router — backward**           | ✅ CI-verified  | Analytic Jacobian; `atol=rtol=1e-5` vs fp64 ref; 30+ configs tested |
-| **Token conservation invariant**       | ✅ CI-verified  | `sum(dispatch_cnt) == N×K` every forward; 100-seed sweep (CPU + GPU) |
+| **Triton router — forward**            | ✅ CPU path in push CI | Fused matmul+softmax+topK+renorm; single HBM pass; SRAM 64×64; 80.1× over CPU at N=4096. The Triton GPU job is manual and was skipped on the latest push. |
+| **Triton router — backward**           | ✅ CPU path in push CI | Analytic Jacobian; `atol=rtol=1e-5` vs fp64 ref; 30+ configs tested. The GPU job did not run on the latest push. |
+| **Token conservation invariant**       | ✅ CPU benchmark in push CI | `sum(dispatch_cnt) == N×K` every forward. The latest push benchmark reported `violations=0/100`. The GPU sweep is not part of push CI. |
 | **Expert load imbalance metric**       | ✅ Verified     | `max/mean` load per step; emitted in telemetry |
 | **Router z-loss**                      | ✅ Verified     | Auxiliary regulariser emitted per step |
-| **EP all-to-all (dispatch + combine)** | ✅ CI-verified  | `all_to_all_single` on dedicated CUDA stream; CUDA event sync |
+| **EP all-to-all (dispatch + combine)** | ✅ CPU differential job | `all_to_all_single` on Gloo in the differential job (243 passed). Dedicated CUDA-stream overlap is not part of push CI. |
 | **Compute-comm overlap**               | ✅ Verified     | Expert FFN (default stream) overlaps a2a (dedicated stream) |
 | **Overlap ratio telemetry**            | ✅ v0.3         | `dispatch_ms / expert_compute_ms` recorded every step |
 | **DP via FSDP2**                       | ✅ Verified     | `fully_shard` along DP axis; expert weights excluded from sharding |
@@ -212,16 +212,16 @@ See **[`RESULTS.md`](RESULTS.md)** for every real number with exact reproduction
 | **Sequence Parallelism + fusion**      | ✅ v0.3         | `scatter/gather`; `next_weight` param halves SP collectives; 2-rank verified |
 | **Pipeline Parallelism (multi-proc)**  | ✅ v0.3         | `run_1f1b_distributed` with activation tagging; real `dist.send/recv`; 2-rank verified |
 | **MFU accounting**                     | ✅ v0.2         | MoE-sparse formula `(K/E)×P_expert`; streaming `MFUAccountant` |
-| **Pydantic `MoEConfig`**               | ✅ v0.3.2       | Validated hierarchy; env-var overrides; field-level errors; 34 tests |
+| **Pydantic `MoEConfig`**               | ✅ v0.3.2       | Validated hierarchy; env-var overrides; field-level errors; 38 tests, included in the Tier-0 count |
 | **Async two-tier checkpointing**       | ✅ CI-verified  | NVMe (`O_DIRECT`, atomic rename) → S3/MinIO mirror; background threads |
-| **TorchElastic recovery**              | ✅ CI-verified  | SIGKILL → reshard (round-robin) → reload → resume without full restart |
+| **TorchElastic recovery**              | ✅ CPU unit tests in push CI | Evict → reshard (round-robin) → reload. The SIGKILL chaos scenario is not part of push CI. |
 | **Structured JSONL + multi-sink telemetry** | ✅ Verified | Thread-safe; TensorBoard + Prometheus `/metrics` + WandB (gated, zero-cost when disabled) |
 | **WandB integration**                  | ✅ v0.3         | `WANDB_API_KEY` env; `--wandb-project`; `log_config()` records full YAML |
-| **Docker + docker-compose**            | ✅ v0.2         | Multi-stage image; 1/4/8-GPU targets + monitoring stack |
+| **Docker + docker-compose**            | ✅ v0.2         | Multi-stage image; 1/4/8-GPU targets + monitoring stack. The Docker CI job is manual and was skipped on the latest push. |
 | **Kubernetes manifests**               | ✅ v0.2         | Single-node Job + multi-node Indexed Job with etcd rendezvous; PVC for checkpoints |
 | **Benchmark suite**                    | ✅ v0.2         | CPU + GPU sweeps; JSON/CSV output; chart generation |
 | **Typer CLI**                          | ✅ v0.3.2       | `moe train / benchmark / validate / info` |
-| **Chaos Scenario B (storage stall)**   | ✅ CI-verified  | 100% pass rate (10/10) |
+| **Chaos Scenario B (storage stall)**   | Manual          | Recorded 10/10 in RESULTS.md. The Chaos job is `workflow_dispatch` only and was skipped on the latest push. |
 | **Chaos Scenario A (node kill)**       | ⚠️ Flaky        | ~85% pass rate; Gloo race; fix planned v0.4 |
 | **Nsight/CUPTI profiling**             | ❌ Planned v0.4 | Requires GPU hardware + sustained runs |
 | **Real sustained multi-node data**     | ❌ Planned v0.4 | Requires large cluster access |
@@ -258,13 +258,13 @@ python train.py --config configs/smoke.yaml --smoke
 ```
 Expected: 2 steps, JSONL telemetry at `/tmp/moe-engine/logs/step.jsonl`.
 
-### 4. Full CPU Test Suite (~60 s)
+### 4. CPU tests
 ```bash
 make test-cpu
-# or
-pytest tests/ -v --ignore=tests/test_chaos.py
 ```
-260 tests passing (core CPU suite).
+`make test-cpu` is wider than the push CI Tier-0 job: it does not ignore `test_differential.py`, `test_comm_ops.py`, `test_grad_sync.py`, or `test_train_step.py`.
+
+The Tier-0 job reports `416 passed, 3 skipped, 16 deselected, 1 xfailed`. That count includes the 38 config tests. The differential job reports `243 passed`.
 
 ### 5. Using the Typer CLI
 ```bash
@@ -376,27 +376,39 @@ More rationale lives in `docs/DESIGN.md` and the original engineering lessons se
 ## Test Suite
 
 ```bash
-# Fast Tier-0 CPU suite (235 tests, ~60 s, no GPU)
-make test-cpu
-# or
-pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)"
+# CI Tier-0 CPU job — 416 passed, 3 skipped, 16 deselected, 1 xfailed
+# (includes the 38 config tests)
+pytest tests/ \
+  --ignore=tests/test_chaos.py \
+  --ignore=tests/test_smoke_e2e.py \
+  --ignore=tests/test_differential.py \
+  --ignore=tests/test_comm_ops.py \
+  --ignore=tests/test_grad_sync.py \
+  --ignore=tests/test_train_step.py \
+  -m cpu \
+  -k "not (2rank or multiprocess or distributed_invariants)"
 
-# GPU kernel tests (requires CUDA + Triton)
+# Differential job — 243 passed (not included above)
+GLOO_SOCKET_IFNAME=lo pytest tests/test_differential.py tests/test_comm_ops.py \
+  tests/test_grad_sync.py tests/test_train_step.py
+
+# GPU kernel tests (manual CI job; requires CUDA + Triton)
 make test-gpu
-# or
-pytest tests/test_kernels.py -m gpu -v
 
-# Chaos tests (requires torchrun)
-make chaos-b          # Scenario B — expect 10/10
+# Chaos tests (manual CI job; requires torchrun)
+make chaos-b          # Scenario B — recorded 10/10; not run on push CI
 make chaos-a          # Scenario A — expect ~85%
 ```
+
+`make test-cpu` runs the Tier-0 selection and the four differential files together.
 
 Key test files:
 - `test_kernels*.py` — router numerics + invariants (30+ configs vs fp64)
 - `test_*parallel*.py` — 2-rank `mp.spawn` correctness for TP, SP fusion, PP with tagging
 - `test_elastic*.py` + `test_chaos.py` — async checkpointing + fault injection
-- `test_config.py` — 34 tests for the full `MoEConfig` system (new in v0.3.2)
-- `test_smoke_e2e.py` — full `train.py` loop regression test
+- `test_config.py` — 38 tests for the full `MoEConfig` system, included in Tier-0
+- `test_differential.py`, `test_comm_ops.py`, `test_grad_sync.py`, `test_train_step.py` — differential job, 243 passed
+- `test_smoke_e2e.py` — full `train.py` loop regression test; ignored by the Tier-0 job
 
 ---
 
@@ -447,11 +459,11 @@ moe-engine/                          # installable package root
 │   ├── docker/                      # Multi-stage Dockerfile + docker-compose (smoke/4gpu/8gpu + monitoring)
 │   └── k8s/                         # namespace, pvc, single-node Job, multi-node IndexedJob + etcd
 │
-├── tests/                           # 14–15 test modules, 235+ tests
+├── tests/                           # 28 test modules, 685 collected items
 │   ├── test_kernels*.py
 │   ├── test_*parallel*.py
 │   ├── test_elastic*.py + test_chaos.py
-│   ├── test_config.py               # 34 new tests in v0.3.2
+│   ├── test_config.py               # 38 tests; included in the Tier-0 job
 │   └── ...
 │
 │
@@ -491,9 +503,9 @@ Open in Colab with a T4 to reproduce:
 - `pkg/models/moe.py` extracted; `build_model()` factory added
 
 **Testing & validation**
-- `test_config.py`: 34 new tests for the full `MoEConfig` system
+- `test_config.py`: 38 tests for the full `MoEConfig` system, included in the Tier-0 count
 - `@pytest.mark.cpu` / `@pytest.mark.gpu` markers on all relevant tests
-- Total: **260 tests passing**
+- Push CI: **416 passed, 3 skipped, 16 deselected, 1 xfailed** in Tier-0, plus **243 passed** in the differential job
 - Every illustrative number replaced with real T4 measurements
 
 **Developer experience**

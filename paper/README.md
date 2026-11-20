@@ -62,7 +62,7 @@ Every number in both documents traces to a file in this repository:
 | 80.1× GPU speedup at N=4096 | `RESULTS.md`, `benchmarks/BENCHMARKS.md`, `benchmarks/gpu_results.json` |
 | Chaos B 10/10 (100%) | `RESULTS.md`, `tests/test_chaos.py` |
 | Chaos A ~85% | `roadmap.md`, `docs/SYSTEM_DESIGN.md` Known Limitations |
-| 348 passing tests, 21 files | `docs/SYSTEM_DESIGN.md`, verified via `pytest --collect-only` |
+| Tier-0: 416 passed, 3 skipped, 16 deselected, 1 xfailed. Differential: 243 passed. 28 files, 685 collected items. The 38 config tests are inside the Tier-0 count. | `docs/SYSTEM_DESIGN.md`, `docs/testing.md`. GPU, Docker, and Chaos jobs are manual and were skipped on the latest push. |
 | `constexpr` defect | `docs/adr/ADR-001-triton-router-kernel.md` |
 | Pydantic silent-degradation bug | `pkg/utils/config.py` history, this session's CI-fix work |
 | `_cumcount` / capacity dropping | `pkg/distributed/moe_layer.py`, `tests/test_capacity_dropping.py` |

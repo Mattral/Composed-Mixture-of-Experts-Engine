@@ -212,9 +212,25 @@ until the NCCL migration is complete.
 ## Test Suite Summary (v0.3.3)
 
 ```bash
-pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" \
-  --ignore=tests/test_chaos.py --ignore=tests/test_smoke_e2e.py
-# → 393 passed, 3 skipped (1 GPU Triton; 2 more in test_gpu_portability.py — see ADR-006), 1 xfailed (documented statistical edge case)
+# CI Tier-0 job
+pytest tests/ \
+  --ignore=tests/test_chaos.py \
+  --ignore=tests/test_smoke_e2e.py \
+  --ignore=tests/test_differential.py \
+  --ignore=tests/test_comm_ops.py \
+  --ignore=tests/test_grad_sync.py \
+  --ignore=tests/test_train_step.py \
+  -m cpu \
+  -k "not (2rank or multiprocess or distributed_invariants)"
+# → 416 passed, 3 skipped, 16 deselected, 1 xfailed
+# The 38 config tests are inside the 416 passed.
+# 3 skipped: Triton GPU path, plus two CUDA-only tests in test_gpu_portability.py (ADR-006).
+# 1 xfailed: documented statistical edge case in test_routing_quality.py, seed=2.
+
+# Differential job (not included above)
+GLOO_SOCKET_IFNAME=lo pytest tests/test_differential.py tests/test_comm_ops.py \
+  tests/test_grad_sync.py tests/test_train_step.py
+# → 243 passed
 ```
 
 | File | Tests | Tier | Result |
@@ -225,7 +241,7 @@ pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" 
 | `test_routing_quality.py` | 16 | Tier-0 CPU | ✅ (seed=2: documented `xfail`, statistical edge case) |
 | `test_router.py` | 39 | Tier-0 CPU | ✅ `MoERouterInterface` — new in v0.3.2 |
 | `test_registry.py` | 20 | Tier-0 CPU | ✅ Model registry/factory — new in v0.3.2 |
-| `test_capacity_dropping.py` | 25 | Tier-0 CPU | ✅ Expert capacity dropping — new in v0.3.3 |
+| `test_capacity_dropping.py` | 35 | Tier-0 CPU | ✅ Expert capacity dropping — new in v0.3.3 |
 | `test_mock_dist.py` | 17 | Tier-0 CPU | ✅ Mocked collective backend — new in v0.3.2 |
 | `test_properties.py` | 9 | Tier-0 CPU | ✅ Hypothesis property-based tests — new in v0.3.2 |
 | `test_gpu_portability.py` | 22 | Tier-0 CPU / Tier-1 GPU | ✅ (2 skips: real/multi CUDA — see ADR-006) — new in v0.3.3 |
@@ -234,9 +250,9 @@ pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" 
 | `test_sequence_parallel_v03.py` | 26 | Tier-0 CPU / Tier-2 2-rank | ✅ ADR-007: fixed a broken fused-path algorithm + a batch-corrupting gather bug, added non-divisible sequence length support |
 | `test_distributed.py` | 5 | Tier-0 CPU | ✅ |
 | `test_distributed_invariants.py` | 2 | Tier-2 4-process Gloo | ✅ ADR-009: fixed three compounding DistributedMoELayer dispatch bugs |
-| `test_moe_layer.py` | 14 | Tier-0 CPU / Tier-2 2-rank | ✅ ADR-009, new file — first per-token numerical correctness coverage for DistributedMoELayer |
+| `test_moe_layer.py` | 18 | Tier-0 CPU / Tier-2 2-rank | ✅ ADR-009, new file — first per-token numerical correctness coverage for DistributedMoELayer |
 | `test_elastic.py` | 7 | Tier-0 CPU | ✅ |
-| `test_elastic_v02.py` | 28 | Tier-0 CPU | ✅ Now includes schema-version checks |
+| `test_elastic_v02.py` | 30 | Tier-0 CPU | ✅ Now includes schema-version checks |
 | `test_mfu.py` | 6 | Tier-0 CPU | ✅ |
 | `test_mfu_v02.py` | 17 | Tier-0 CPU | ✅ |
 | `test_telemetry.py` | 28 | Tier-0 CPU | ✅ v0.3.3 fields: `dropped_token_fraction`, etc. |
@@ -244,11 +260,13 @@ pytest tests/ -m cpu -k "not (2rank or multiprocess or distributed_invariants)" 
 | `test_chaos.py` | 3 | Tier-3 cluster | ✅ Scenario B / ⚠️ Scenario A |
 
 Per-file counts above are full `pytest --collect-only` totals (including
-2-rank `mp.spawn` tests and GPU-only tests skipped without CUDA).
-The headline **393 passed** figure at the top of this document excludes
-`test_chaos.py`, `test_smoke_e2e.py`, and the 2-rank/multiprocess/
-distributed-invariants tests via `-k` filtering — this is the fast
-Tier-0-only subset, not the full collection sum shown per-file here.
+2-rank `mp.spawn` tests and GPU-only tests skipped without CUDA) where
+those files were re-counted. The current Tier-0 summary is
+**416 passed, 3 skipped, 16 deselected, 1 xfailed**. That job also ignores
+`test_differential.py`, `test_comm_ops.py`, `test_grad_sync.py`, and
+`test_train_step.py`. Those four files are the differential job:
+**243 passed**. The 38 config tests are inside the Tier-0 passed count.
+Full collection is 685 items in 28 files. Summing the table is not that total.
 
 > Note (found during the July 2026 handoff audit, not fixed here to avoid
 > scope creep on an otherwise-unrelated pass): this table's per-file counts
@@ -417,3 +435,10 @@ routing) affected every forward pass regardless of parallelism
 configuration, not just the distributed cases that surfaced this
 investigation. Two "2-Rank CI Blind Spot" items remain open
 (`test_pipeline_parallel.py`'s pair) — see `roadmap.md`.
+
+**Current push CI (measured on this tree):** Tier-0
+`416 passed, 3 skipped, 16 deselected, 1 xfailed`; differential job
+`243 passed`. The 38 config tests are inside the Tier-0 count. The GPU,
+Docker, and Chaos jobs are `workflow_dispatch` only and were skipped on
+the latest push. The rows above are the release-by-release history, not
+the current total.

@@ -103,7 +103,7 @@ services:
     ports:
       - "9102:9102"   # Prometheus metrics
 
-  # ---- Pytest CPU test suite (Tier-0, 319 tests) -----------------
+  # ---- Pytest CPU test suite (same selection as `make test-cpu`) --
   test:
     <<: *moe-base-cpu
     command: >
