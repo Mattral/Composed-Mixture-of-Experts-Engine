@@ -119,9 +119,9 @@ def _torchrun_session(
     ):
         full_env.pop(var, None)
     full_env.update(env)
-    # Enable fault-tolerant collectives in the worker for CI runs so
-    # transient Gloo connect failures are retried locally. This is a test-
-    # only mitigation and can be disabled by overriding the env var.
+    # Retry collectives in the worker for CI runs so transient Gloo
+    # connect failures are retried locally. This is a test-only mitigation
+    # and can be disabled by overriding the env var.
     full_env.setdefault("CHAOS_FAULT_TOLERANT", "1")
     full_env.setdefault("MASTER_ADDR", "127.0.0.1")
     full_env.setdefault("MASTER_PORT", str(_find_free_port()))

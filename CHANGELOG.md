@@ -6,13 +6,15 @@ NCCL, or across multiple hosts unless it says so.
 
 ## Unreleased — Documentation
 
-Claim wording in the docs now matches what the repository shows. No new measurements were added. Code, benchmarks, workflows, Makefiles, and compose files were not changed.
+Claim wording in the docs now matches what the repository shows. No new measurements were added. Workflows, Makefiles, and compose files were not changed.
 
 - **Speedups.** On first mention, 80.1× (T4) and 56.0× (A100) are versus the CPU reference path. There is no GPU baseline comparison yet. The CPU baseline differs by host (0.056 M tok/s in the T4 table, 0.183 M tok/s in the A100 table). The 80.1× figure matches the unrounded `tokens_per_sec` ratio in `moe-engine/benchmarks/gpu_results_t4.json` (4,454,377 / 55,599). Dividing the rounded T4 cells (4.454 / 0.056) gives about 79.5×. The A100 router cells are the rounded `tokens_per_sec` values in `moe-engine/benchmarks/gpu_results_a100.json`: forward at N=4096 is 56.0× (CPU 0.183 M tok/s, GPU 10.240 M tok/s); forward+backward at that shape is 38.4×; the smaller forward rows are 1.80×, 5.65×, and 11.80×. T4 figures are unchanged.
 - **Not yet validated.** A superlinear speedup claim, a ~40% collective-cost reduction at EP=8, a ~2.7× lower memory-traffic claim, and a zero-cost telemetry claim are marked not yet validated where the living docs stated them as results. The speedup paragraph in `moe-engine/benchmarks/BENCHMARKS.md` says the table is versus the CPU reference path, with no GPU baseline comparison yet. The GPU badge is scoped to single-GPU router kernels (T4, A100). `configs/default.yaml` is a production-scale shape (H=4096, E=64, dp=8, ep=8) and has not been run.
 - **Chaos.** Scenario A is recorded as recovering in ~17 of 20 runs. Failures are attributed to a Gloo race in containers. Scenario B is recorded at 10/10 from a manual run. The Chaos job is `workflow_dispatch` only and does not run on push CI.
 - **CI.** The GPU, Docker, and Chaos jobs are `workflow_dispatch` only and were skipped on the latest push. Push CI is the CPU suite (Tier-0 416 passed, 3 skipped, 16 deselected, 1 xfailed; differential 243 passed, run 41009438945). mypy is `continue-on-error` and reported errors on that run.
 - **Validation scope.** Current validation is single-GPU (T4, A100) and 2-rank CPU. Multi-node and 8+ GPU runs remain open.
+- **A100 chart.** `moe-engine/benchmarks/router_throughput_A100.png` is replotted from `moe-engine/benchmarks/gpu_results_a100.json`. The N=4096 forward callout is 56× versus the CPU reference path. The subtitle dates the run July 2026. The JSON was not edited.
+- **Scale notes.** The 10K-GPU sentence in `moe-engine/pkg/elastic/fault_monitor.py` is a design target. That scale has not been run.
 - A preprint was previously deposited at 10.5281/zenodo.20688837 and is superseded by the current docs.
 
 ## Unreleased — M2: MoE semantics (October 2026)

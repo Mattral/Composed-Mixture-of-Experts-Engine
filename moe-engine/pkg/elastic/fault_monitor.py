@@ -17,8 +17,8 @@ Components
 * `ElasticTrainerHarness` – wires the above to TorchElastic so workers can
   be added or removed from the run without operator intervention.
 
-All of this is written to keep a 10K-GPU run alive when nodes inevitably
-die: at that scale you see a node drop every few minutes.
+Design target: keep a 10K-GPU run alive when nodes drop. At that scale a
+node drop every few minutes is expected. That scale has not been run.
 """
 
 from __future__ import annotations
