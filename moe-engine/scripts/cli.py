@@ -63,7 +63,7 @@ from typing import Optional  # noqa: E402
 app = typer.Typer(
     name="moe",
     help=(
-        "moe-engine CLI — fault-tolerant MoE training at hyperscale.\n\n"
+        "moe-engine CLI — MoE training runtime (research prototype).\n\n"
         "Run 'moe COMMAND --help' for command-specific options."
     ),
     add_completion=False,

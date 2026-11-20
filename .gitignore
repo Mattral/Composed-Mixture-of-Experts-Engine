@@ -51,6 +51,7 @@ __pycache__/
 *pyc*
 venv/
 .venv/
+moe_engine.egg-info/
 
 # Development tools
 chainlit.md

@@ -52,7 +52,7 @@ serves as ground truth for numerical correctness testing at `atol=rtol=1e-5`.
 
 **Positive:**
 - Single HBM pass for the entire routing computation.
-- 80.1× throughput improvement over CPU reference at N=4096, H=2048 (T4 validation).
+- 80.1× versus the CPU reference path at N=4096, H=2048 (T4 validation). There is no GPU baseline comparison yet.
 - Analytically correct backward via `MoERouterFunction` (autograd.Function).
 - Validated against fp64 reference across 30 `(H, E, K)` configurations.
 

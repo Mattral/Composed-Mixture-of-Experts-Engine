@@ -92,11 +92,7 @@ Path: Triton fused kernel (single HBM pass)
 | 2048 | 1024 | 64 | 2 |         0.236 |        4.832 |   **20.4×** |
 | 4096 | 2048 | 64 | 4 |         0.056 |        4.454 |   **80.1×** |
 
-The speedup increases superlinearly with problem size because:
-- The Triton kernel amortises launch overhead over larger matrices.
-- HBM bandwidth efficiency (measured as fraction of T4's 320 GB/s peak)
-  improves as the working set grows relative to L2 cache.
-- The CPU fp64 reference path is single-threaded and not vectorised.
+Speedup in this table is versus the CPU reference path on the T4 host. There is no GPU baseline comparison yet.
 
 The 80× figure at N=4096, H=2048 is the most production-relevant data point:
 it corresponds to a realistic MoE router at Mixtral-style scale.

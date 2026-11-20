@@ -261,7 +261,7 @@ def reproduce_gpu() -> List[ReproResult]:
                 ReproResult(
                     target="gpu",
                     status="SKIP",
-                    claim="80.1× GPU speedup at N=4096 (RESULTS.md)",
+                    claim="80.1× versus the CPU reference path at N=4096 (RESULTS.md); no GPU baseline comparison yet",
                     measured="CUDA not available",
                     tolerance="±20%",
                     notes="Run on T4 or H100 with CUDA + Triton installed",
@@ -318,7 +318,7 @@ def reproduce_gpu() -> List[ReproResult]:
                             ReproResult(
                                 target="gpu",
                                 status="PASS" if ok else "FAIL",
-                                claim=f"N={d['N']},H={d['H']}: {expected:.1f}× speedup (RESULTS.md)",
+                                claim=f"N={d['N']},H={d['H']}: {expected:.1f}× versus the CPU reference path (RESULTS.md); no GPU baseline comparison yet",
                                 measured=f"{speedup:.1f}× ({gpu_tps / 1e6:.3f}M tok/s)",
                                 tolerance="±30% of published speedup",
                             )

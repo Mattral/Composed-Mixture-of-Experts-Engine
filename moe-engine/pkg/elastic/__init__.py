@@ -1,4 +1,4 @@
-"""Elastic, fault-tolerant infrastructure layer."""
+"""MoE training runtime (research prototype)."""
 
 from pkg.elastic.fault_monitor import (
     AsyncCheckpointer,

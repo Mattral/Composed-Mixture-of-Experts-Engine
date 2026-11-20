@@ -2,7 +2,7 @@
 pkg/elastic/fault_monitor.py
 ============================
 
-Fault-tolerant, elastic infrastructure layer for hyperscale MoE training.
+MoE training runtime (research prototype).
 
 Components
 ----------
