@@ -34,7 +34,7 @@
 
 **This is not a model definition.** It is the systems layer (Triton kernels + 4D parallelism + checkpoint and recovery code + observability) that a real MoE model runs on.
 
-Documented router speedup at N=4096, H=2048, E=64, K=4 is **80.1× (T4) / 58.7× (A100) versus the CPU reference path; no GPU baseline comparison yet**. The CPU baseline differs by host (0.056 M tok/s in the T4 table, 0.175 M tok/s in the A100 table).
+Documented router speedup at N=4096, H=2048, E=64, K=4 is **80.1× (T4) / 56.0× (A100) versus the CPU reference path; no GPU baseline comparison yet**. The CPU baseline differs by host (0.056 M tok/s in the T4 table, 0.183 M tok/s in the A100 table).
 
 Core capabilities:
 - Fused **Triton router kernel** (single HBM pass, analytic backward pass). Push CI runs the CPU path. The Triton GPU job is `workflow_dispatch` only and was skipped on the latest push.
@@ -154,25 +154,23 @@ Source: `benchmarks/gpu_results_a100.json`, July 2026 validation run.*
 
 #### Router throughput — CPU vs A100
 
-Speedup here is versus the CPU reference path on the A100 host (0.175 M tok/s at N=4096 in this table, versus 0.056 M tok/s in the T4 table). There is no GPU baseline comparison yet.
+Speedup here is versus the CPU reference path on the A100 host (0.183 M tok/s at N=4096 in this table, versus 0.056 M tok/s in the T4 table). There is no GPU baseline comparison yet. Cells are the `tokens_per_sec` values in `moe-engine/benchmarks/gpu_results_a100.json`, rounded to 3 decimals for M tok/s.
 
 | Config | CPU (M tok/s) | A100 (M tok/s) | Speedup |
 |--------|:-------------:|:--------------:|:-------:|
-| N=512, H=256, E=16, K=2 | 1.168 | 2.031 | 1.7× |
-| N=1024, H=512, E=32, K=2 | 0.826 | 4.006 | 4.8× |
-| N=2048, H=1024, E=64, K=2 | 0.776 | 5.934 | 7.6× |
-| N=4096, H=2048, E=64, K=4 | 0.175 | 10.271 | **58.7×** |
+| N=512, H=256, E=16, K=2 | 1.138 | 2.048 | 1.80× |
+| N=1024, H=512, E=32, K=2 | 0.697 | 3.938 | 5.65× |
+| N=2048, H=1024, E=64, K=2 | 0.496 | 5.851 | 11.80× |
+| N=4096, H=2048, E=64, K=4 | 0.183 | 10.240 | **56.0×** |
 
 #### Router forward+backward — CPU vs A100
 
 | Config | CPU (M tok/s) | A100 (M tok/s) | Speedup |
 |--------|:-------------:|:--------------:|:-------:|
-| N=512, H=256, E=16, K=2 | 0.435 | 0.572 | 1.3× |
-| N=1024, H=512, E=32, K=2 | 0.456 | 1.097 | 2.4× |
-| N=2048, H=1024, E=64, K=2 | 0.312 | 2.034 | 6.5× |
-| N=4096, H=2048, E=64, K=4 | 0.101 | 3.721 | 37.0× |
-
-These A100 cells, including 58.7× and 37.0×, are the documented values. They were not reproduced from `moe-engine/benchmarks/gpu_results_a100.json` and are left unchanged.
+| N=512, H=256, E=16, K=2 | 0.416 | 0.575 | 1.38× |
+| N=1024, H=512, E=32, K=2 | 0.352 | 1.101 | 3.13× |
+| N=2048, H=1024, E=64, K=2 | 0.289 | 2.028 | 7.02× |
+| N=4096, H=2048, E=64, K=4 | 0.097 | 3.724 | **38.4×** |
 
 Reproduce with
 [`moe-engine/notebooks/moe_engine_A100_validation.ipynb`](moe-engine/notebooks/moe_engine_A100_validation.ipynb).

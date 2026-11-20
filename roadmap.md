@@ -234,8 +234,8 @@ plausibly its own investigation, comparable in scope to ADR-007/008/009.
   dimension guard, explicit device placement in the fp64 reference path,
   and a single-source-of-truth fix for `used_triton` telemetry (previously
   capable of misreporting which path actually ran)
-- 58.7× versus the CPU reference path at N=4096 (router forward-only); no GPU baseline comparison yet. The A100 table's CPU baseline is 0.175 M tok/s, which differs from the T4 host's 0.056 M tok/s.
-  37.0× at the same config for forward+backward. These A100 cells were not reproduced from `moe-engine/benchmarks/gpu_results_a100.json` and are left unchanged.
+- 56.0× versus the CPU reference path at N=4096 (router forward-only); no GPU baseline comparison yet. The A100 table's CPU baseline is 0.183 M tok/s, which differs from the T4 host's 0.056 M tok/s.
+  38.4× at the same config for forward+backward. These cells are the rounded `tokens_per_sec` values in `moe-engine/benchmarks/gpu_results_a100.json`. The smaller forward rows are 1.80×, 5.65×, and 11.80×.
 - Router throughput measured across 4 configs from N=512 to N=4096 (see
   `benchmarks/gpu_results_a100.json`, `RESULTS.md`)
 

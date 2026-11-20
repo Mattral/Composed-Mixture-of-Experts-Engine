@@ -480,7 +480,7 @@ deterministic and fast. Real GPU throughput numbers require at least Tier 1.
 The June 2026 T4 validation confirmed the Triton kernel is functionally correct
 at production-like shapes. These numbers are in `moe-engine/benchmarks/BENCHMARKS.md`.
 
-**Headline: 80.1× versus the CPU reference path at N=4096, H=2048, E=64, K=4 on the T4 host. There is no GPU baseline comparison yet. The CPU baseline in this table is 0.056 M tok/s, which differs from the A100 table's 0.175 M tok/s.**
+**Headline: 80.1× versus the CPU reference path at N=4096, H=2048, E=64, K=4 on the T4 host. There is no GPU baseline comparison yet. The CPU baseline in this table is 0.056 M tok/s, which differs from the A100 table's 0.183 M tok/s.**
 
 | Config | CPU (M tok/s) | T4 (M tok/s) | Speedup |
 |--------|:---:|:---:|:---:|
@@ -511,4 +511,4 @@ If you run a benchmark on real hardware, contribute the results to
 6. **Caveats:** numa binding, CPU affinity, any non-default environment settings
 
 All GPU numbers in `BENCHMARKS.md` currently come from the T4 validation run.
-Single-GPU A100 router cells are in the README. They were not reproduced from `moe-engine/benchmarks/gpu_results_a100.json` and were left unchanged. Multi-node and 8+ GPU runs remain open.
+Single-GPU A100 router cells in the README are the rounded `tokens_per_sec` values from `moe-engine/benchmarks/gpu_results_a100.json` (forward 56.0× at N=4096, CPU 0.183 M tok/s; forward+backward 38.4×). Multi-node and 8+ GPU runs remain open.

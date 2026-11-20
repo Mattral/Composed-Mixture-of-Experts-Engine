@@ -419,7 +419,7 @@ All telemetry values come from real measurements: CUDA events for collective
 latency, `torch.cuda.memory_stats()` for peak memory, `time.perf_counter()` for
 CPU-path timing, actual elapsed wall-clock time for step duration.
 The T4 router table in RESULTS.md comes from `moe-engine/benchmarks/gpu_results_t4.json`.
-Claims marked not yet validated are not measurements. The A100 table cells in the README were not reproduced from `moe-engine/benchmarks/gpu_results_a100.json` and are left unchanged.
+Claims marked not yet validated are not measurements. The A100 table cells in the README are the rounded `tokens_per_sec` values from `moe-engine/benchmarks/gpu_results_a100.json`.
 
 **Fail-fast on invariants.**
 Token conservation, index bounds, weight normalisation, config constraints, and
