@@ -3,8 +3,9 @@
 **Version:** v0.3.3  
 **Last updated:** July 2026
 
-moe-engine is a research-grade runtime for fault-tolerant MoE training at
-hyperscale. Contributions should improve correctness, observability,
+moe-engine is a research-grade runtime for Mixture-of-Experts training.
+Validation is currently single-GPU (T4, A100) and 2-rank CPU. Multi-node and
+8+ GPU runs remain open. Contributions should improve correctness, observability,
 reproducibility, or operational resilience — or reduce the structural and DX
 debt identified in MOE instructions v2.1.
 
@@ -54,7 +55,7 @@ No GPU. No Docker. No cluster. You're ready to develop.
 make test-cpu                # must pass before any PR
 make smoke                   # must pass
 make validate-config         # if you changed configs/ or pkg/utils/config.py
-make lint                    # ruff + mypy
+make lint                    # ruff is required. mypy is continue-on-error in CI and reported errors on the latest push.
 ```
 
 ### Before opening a PR
@@ -62,7 +63,7 @@ make lint                    # ruff + mypy
 ```bash
 make format                  # auto-fix formatting
 make test-cpu                # wider than the CI Tier-0 job
-make lint                    # zero ruff errors
+make lint                    # zero ruff errors. mypy is continue-on-error in CI and reported errors on the latest push.
 make validate-config         # configs valid
 python scripts/cli.py info   # environment summary for PR description
 ```

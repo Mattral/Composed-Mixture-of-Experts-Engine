@@ -1,6 +1,6 @@
 # Commit SHAs
 
-On 2026-10-30 the commit history was rebuilt. Files at the branch tip were unchanged. Commit SHAs changed. Use this map when an older note cites a SHA from before that date.
+On 2026-10-30 the commit history was rewritten. Files at the branch tip were unchanged. Commit SHAs changed. Use this map when an older note cites a SHA from before that date.
 
 | Old | New | Where |
 |---|---|---|

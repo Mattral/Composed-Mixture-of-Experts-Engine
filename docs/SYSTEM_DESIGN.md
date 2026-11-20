@@ -11,15 +11,18 @@ and can be verified by running the commands shown.
 
 ## System Scope
 
-`moe-engine` is a distributed training runtime for MoE language models at
-hyperscale. Its responsibilities:
+`moe-engine` is a distributed training runtime for MoE language models.
+The design target is large clusters. Validation is currently single-GPU
+(T4, A100) and 2-rank CPU. Multi-node and 8+ GPU runs remain open.
+
+Its responsibilities:
 
 - Correct sparse token routing (Triton kernel + invariant enforcement)
 - 4D parallel tensor distribution (DP × TP × PP × EP)
 - Expert-capacity enforcement with bounded token dropping (v0.3.3)
-- Fault-tolerant checkpointing (async two-tier NVMe → S3, schema-versioned)
-- Elastic recovery without operator intervention (evict → reshard → resume)
-- Observable, accurate telemetry (JSONL + TensorBoard + Prometheus + WandB)
+- Async two-tier checkpointing (NVMe → S3, schema-versioned), covered by the CPU test suite
+- Scenario A recovers in ~17 of 20 runs (failures attributed to a Gloo race in containers). Scenario B is recorded at 10/10 and runs via `workflow_dispatch` only, not on push CI.
+- Observable telemetry (JSONL, plus optional TensorBoard, Prometheus, and WandB). A zero-cost claim for disabled sinks is not yet validated.
 - Validated configuration (Pydantic v2, fails loudly and immediately on bad input)
 
 It is explicitly **not** a model definition. A real model (e.g., Mixtral)
@@ -459,7 +462,7 @@ Verify with the CI Tier-0 invocation: `pytest tests/ -m cpu -k "not (2rank or mu
 | `test_properties.py` | Hypothesis property-based tests: conservation, ownership, config invariants |
 | `test_gpu_portability.py` | Permanent coverage for ADR-005's three A100 fixes + ADR-006's device-coercion correction; CPU-runnable logic/source tests plus honestly-skipped `gpu`-marked hardware tests |
 | `test_smoke_e2e.py` | Full `train.py` loop, all telemetry envelope keys, S3 mock |
-| `test_chaos.py` | Scenario B recorded 10/10 in RESULTS.md; the Chaos job is manual and was skipped on the latest push. Scenario A ⚠️ ~85% |
+| `test_chaos.py` | Scenario B recorded 10/10 in RESULTS.md. The Chaos job is `workflow_dispatch` only and was skipped on the latest push. Scenario A recovers in ~17 of 20 runs (failures attributed to a Gloo race in containers). |
 
 **Tier-0 job: 416 passed, 3 skipped, 16 deselected, 1 xfailed** (28 test files collect 685 items). The 3 skips are the Triton GPU path and two CUDA-only tests in `test_gpu_portability.py` (see ADR-006). The xfail is the documented seed=2 case in `test_routing_quality.py`. The 38 `test_config.py` items are inside the 416 passed. **Differential job: 243 passed** (`test_differential.py`, `test_comm_ops.py`, `test_grad_sync.py`, `test_train_step.py`), not included in Tier-0. On the latest push, `ruff check` and `ruff format --check` passed (74 files already formatted). mypy is `continue-on-error` and reported errors; the lint job still succeeded. The GPU, Docker, and Chaos jobs were skipped.
 
@@ -469,7 +472,7 @@ Verify with the CI Tier-0 invocation: `pytest tests/ -m cpu -k "not (2rank or mu
 
 | Limitation | Root Cause | Planned Fix |
 |---|---|---|
-| Chaos Scenario A ~85% pass rate | Gloo `connectFullMesh` socket race after SIGKILL | v0.4 (NCCL, needs GPU) |
+| Chaos Scenario A recovers in ~17 of 20 runs | Failures are attributed to a Gloo `connectFullMesh` socket race after SIGKILL in containers. Not a push CI job. | v0.4 (NCCL, needs GPU) |
 | No multi-node benchmark data yet | Two single-GPU architectures now validated (T4, A100); no multi-node/multi-GPU cluster data yet | v0.4 |
 | SP `sequence_length % tp_size == 0` required | No padding for non-divisible lengths | v0.4 |
 | PP `run_1f1b_distributed` not in chaos tests | `_chaos_worker.py` uses a dense model | v0.4 |

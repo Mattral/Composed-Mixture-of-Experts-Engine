@@ -5,10 +5,12 @@
 **Status:** P0, P1 complete. P2.2 (advanced load balancing) complete. Remaining P2 items require GPU cluster access.
 
 ## Legend
-- ✅ Complete + CI-verified  
-- ⚠️ Partial / known issue  
-- ❌ Not started  
+- ✅ Complete + CI-verified
+- ⚠️ Partial / known issue
+- ❌ Not started
 - 🔜 In progress
+
+GPU, Docker, and Chaos jobs are `workflow_dispatch` only and were skipped on the latest push. Push CI is the CPU suite. mypy is `continue-on-error` and reported errors on that run.
 
 ---
 
@@ -39,9 +41,9 @@ Key fixes in v0.2.x:
 | PP 2-rank `mp.spawn` tests | ✅ | activation flow + micro-batch count verified |
 | SP `next_weight` all-gather fusion | ✅ | zero collectives (replicated-weight case), genuinely 2-rank verified — see ADR-007. Previously claimed "halves collectives; 2-rank verified"; the 2-rank test had never actually run in CI and the algorithm was wrong (spurious all_reduce). Also fixed in the same pass: `gather_from_sequence_parallel` was broken for any batch size > 1, uncovered while adding this coverage. |
 | Comm/compute overlap ratio telemetry | ✅ | `dispatch_ms / expert_compute_ms` in every step record |
-| WandB `WandBSink` + `log_config()` | ✅ | zero-cost when `WANDB_API_KEY` absent |
+| WandB `WandBSink` + `log_config()` | ✅ | inactive when `WANDB_API_KEY` is absent. A zero-cost claim is not yet validated. |
 | Prometheus `/metrics` (10 gauges) | ✅ | optional, port-configurable |
-| T4 GPU validation | ✅ | Triton kernel verified; 80.1× speedup at N=4096; Chaos B 10/10 |
+| T4 GPU validation | ✅ single-GPU router | 80.1× versus the CPU reference path at N=4096; no GPU baseline comparison yet. Chaos B 10/10 is a manual run (`workflow_dispatch` only, not push CI). |
 | Triton `K: tl.constexpr` fix (v0.3.2) | ✅ | Bug that prevented all real-GPU runs since v0.1 |
 | Real GPU numbers in all docs | ✅ | All "illustrative" entries replaced with real T4 measurements |
 
@@ -79,7 +81,7 @@ This release addressed all P0 and P1 items from MOE instructions v2.1.
 | `test_mock_dist.py` / `mock_dist.py` | ✅ | 17 tests; `MockTopology`, `MockDistEnv` |
 | `test_properties.py` | ✅ | 9 property-based tests (Hypothesis); token conservation, expert ownership, config invariants |
 | **Push CI pytest** | ✅ | Tier-0: 416 passed, 3 skipped, 16 deselected, 1 xfailed. Differential: 243 passed. The 38 config tests are inside the Tier-0 count. |
-| Real GPU data in all docs | ✅ | `gpu_results.json` → `RESULTS.md`, `BENCHMARKS.md` |
+| Real GPU data in all docs | ✅ | Committed T4 file is `moe-engine/benchmarks/gpu_results_t4.json` → `RESULTS.md`, `BENCHMARKS.md` |
 
 ### P0.3 — Basic DX ✅
 
@@ -221,9 +223,9 @@ plausibly its own investigation, comparable in scope to ADR-007/008/009.
 
 **Proven on single T4 GPU** (June 2026, Google Colab):
 - Triton kernel compiles and runs at H ∈ {256, 512, 1024, 2048}, E ∈ {16, 32, 64}
-- 80.1× GPU speedup over CPU reference at N=4096
+- 80.1× versus the CPU reference path at N=4096; no GPU baseline comparison yet. The T4 host CPU baseline in that table is 0.056 M tok/s.
 - Token conservation: `violations=0/100` on CUDA
-- Chaos Scenario B: 100% pass rate (10/10)
+- Chaos Scenario B: recorded 10/10. The Chaos job is `workflow_dispatch` only and does not run on push CI.
 
 **Proven on single A100-SXM4-80GB GPU** (July 2026, Lightning AI Studio,
 `torch==2.8.0+cu128` — see ADR-005 for full writeup):
@@ -232,9 +234,8 @@ plausibly its own investigation, comparable in scope to ADR-007/008/009.
   dimension guard, explicit device placement in the fp64 reference path,
   and a single-source-of-truth fix for `used_triton` telemetry (previously
   capable of misreporting which path actually ran)
-- 58.7× GPU speedup over CPU reference at N=4096 (router forward-only);
-  37.0× at the same config for forward+backward — both *lower* than T4's
-  80.1×, an honest open question (see ADR-005, not yet explained)
+- 58.7× versus the CPU reference path at N=4096 (router forward-only); no GPU baseline comparison yet. The A100 table's CPU baseline is 0.175 M tok/s, which differs from the T4 host's 0.056 M tok/s.
+  37.0× at the same config for forward+backward. These A100 cells were not reproduced from `moe-engine/benchmarks/gpu_results_a100.json` and are left unchanged.
 - Router throughput measured across 4 configs from N=512 to N=4096 (see
   `benchmarks/gpu_results_a100.json`, `RESULTS.md`)
 
@@ -242,9 +243,7 @@ plausibly its own investigation, comparable in scope to ADR-007/008/009.
 - End-to-end MFU at 8+ GPUs — needs a genuine multi-process/multi-GPU
   notebook (single-GPU notebooks, T4 and A100 alike, exercise exactly one
   GPU each regardless of a config's requested topology)
-- Chaos Scenario A at NCCL (still Gloo, ~85%) — the chaos harness has never
-  run with a real multi-rank NCCL backend; this is unwritten engineering
-  work, not something multi-GPU access alone unlocks
+- Scenario A recovers in ~17/20 runs (failures attributed to a Gloo race in containers). The chaos harness has not been run on NCCL.
 - Production throughput at H=4096 with EP=8, DP=8
 - E=256 fine-grained MoE at real hardware scale (config validated, wiring
   tested at toy dimensions; full-scale GPU throughput not yet measured —

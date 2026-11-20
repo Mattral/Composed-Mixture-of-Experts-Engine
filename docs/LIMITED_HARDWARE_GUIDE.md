@@ -50,7 +50,7 @@ make validate-config              # Pydantic validation, ~0.3s
 make smoke                        # end-to-end smoke run, ~5s
 
 # Before committing:
-make lint                         # ruff + mypy
+make lint                         # ruff is required. mypy is continue-on-error in CI and reported errors on the latest push.
 make format                       # ruff format auto-fix
 ```
 
@@ -115,15 +115,17 @@ real GPU hardware.
 
 ### Interpreting T4 numbers
 
-T4 peak is 65 TFLOPS BF16. MFU will be very low (~0.1–0.5%). This is expected — T4 is an inference card, not a training accelerator. The T4 validates **correctness and relative performance** (CPU vs GPU speedup), not absolute production MFU.
+T4 peak is 65 TFLOPS BF16. MFU will be very low (~0.1–0.5%). This is expected — T4 is an inference card, not a training accelerator. The T4 run checks correctness and speedup versus the CPU reference path. There is no GPU baseline comparison yet. It is not an absolute production MFU result.
 
-For absolute MFU targets, use H100 SXM5 (989 TFLOPS BF16, ~40–55% MFU at `H=4096, B=8, S=4096, EP=8`). See `docs/benchmarks.md`.
+The H100 SXM5 figures cited as targets (989 TFLOPS BF16, ~40–55% MFU at `H=4096, B=8, S=4096, EP=8`) have not been measured in this repo. See `docs/benchmarks.md`.
 
 ---
 
 ## Tier 2: 4-GPU local node (if available)
 
 With 4 × RTX 3090 / 4090 or similar:
+
+`configs/default.yaml` is a production-scale shape (H=4096, E=64, dp=8, ep=8). That configuration has not been run.
 
 ```bash
 torchrun --standalone --nproc_per_node=4 \

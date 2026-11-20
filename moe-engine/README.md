@@ -2,13 +2,13 @@
 
 # `moe-engine` · Composed Mixture-of-Experts Engine
 
-**A research-grade fault-tolerant runtime for hyperscale Mixture-of-Experts training**
+**A research-grade runtime for Mixture-of-Experts training**
 
 [![Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/LICENSE)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.5%2B-ee4c2c.svg)](https://pytorch.org/)
 [![Triton](https://img.shields.io/badge/Triton-3.x-9333ea.svg)](https://triton-lang.org/)
 [![Tests](https://img.shields.io/badge/tests-416%20passed%20%2B%20243%20differential-brightgreen)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/moe-engine/tests/)
-[![GPU Validated](https://img.shields.io/badge/GPU-T4%20%2B%20A100%20validated-blue)](docs/adr/ADR-005-gpu-architecture-portability.md)
+[![GPU Validated](https://img.shields.io/badge/GPU-single--GPU%20router%20%28T4%2C%20A100%29-blue)](docs/adr/ADR-005-gpu-architecture-portability.md)
 [![Chaos B](https://img.shields.io/badge/Chaos%20B-recorded%2010%2F10%20%28manual%20job%29-yellow)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/RESULTS.md#fault-tolerance--chaos-test-results)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/pulls)
 [![Version](https://img.shields.io/badge/version-v0.3.3-orange)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/releases)
@@ -21,6 +21,8 @@
 > Min Htet Myet, June 2026  
 > [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20688837.svg)](https://doi.org/10.5281/zenodo.20688837)  
 > [Read on Zenodo](https://zenodo.org/records/20688837) · [PDF](https://zenodo.org/records/20688837/files/moe-engine-preprint-v2.pdf)
+>
+> Superseded by this README and the Documentation entry in `CHANGELOG.md`: the preprint's fault-tolerance wording, its superlinear speedup wording, its Scenario A pass-rate wording, and its test-count wording.
 
 > **v0.3.2 (June 2026)**: Fixed Triton kernel compile-time crash that prevented all real-GPU runs since v0.2 (undetected by CPU-only CI). Added real dense-baseline measurements. Fixed `train.py` config crash. See `benchmarks/BENCHMARKS.md` for full patch notes.
 
@@ -28,19 +30,19 @@
 
 ## What this is
 
-`moe-engine` is a **research-grade infrastructure runtime** for training large Mixture-of-Experts (MoE) language models at hyperscale. It is designed around one realistic constraint: **at 10K+ GPUs, nodes die continuously**. The system must keep training alive end-to-end — routing tokens correctly, checkpointing durably to NVMe then S3, and recovering automatically with expert resharding, without operator intervention.
+`moe-engine` is a **research-grade infrastructure runtime** for training large Mixture-of-Experts (MoE) language models. The design target is large clusters. Validation is currently single-GPU (T4, A100) and 2-rank CPU. Multi-node and 8+ GPU runs remain open.
 
-**This is not a model definition.** It is the systems layer (Triton kernels + 4D parallelism + elastic harness + observability) that a real MoE model runs on.
+**This is not a model definition.** It is the systems layer (Triton kernels + 4D parallelism + checkpoint and recovery code + observability) that a real MoE model runs on.
+
+Documented router speedup at N=4096, H=2048, E=64, K=4 is **80.1× (T4) / 58.7× (A100) versus the CPU reference path; no GPU baseline comparison yet**. The CPU baseline differs by host (0.056 M tok/s in the T4 table, 0.175 M tok/s in the A100 table).
 
 Core capabilities:
-- Fused **Triton router kernel** (single HBM pass, analytic backward pass)
+- Fused **Triton router kernel** (single HBM pass, analytic backward pass). Push CI runs the CPU path. The Triton GPU job is `workflow_dispatch` only and was skipped on the latest push.
 - **4D parallelism** — Data (FSDP2) × Expert (all-to-all) × Tensor (Column/RowParallel + SP fusion) × Pipeline (tagged 1F1B)
 - Strict mathematical invariants (token conservation, NaN guards, index validity)
-- **Elastic fault tolerance** with automatic expert resharding on node failure
-- **Async two-tier checkpointing** (pinned-host → NVMe O_DIRECT → S3/MinIO with atomic rename)
-- Rich **MoE-aware telemetry** with real CUDA-event timing and comm/compute overlap ratio
-
-Most components are verified at 2-rank `mp.spawn` or single-T4 level. Sustained multi-node hyperscale runs and full end-to-end MFU at 8+ GPUs are tracked in `roadmap.md` as v0.4 work.
+- Scenario A (node kill) recovers in ~17/20 runs (failures attributed to a Gloo race in containers). Scenario B (storage stall) is recorded at 10/10 and runs via `workflow_dispatch` only, not on push CI.
+- **Async two-tier checkpointing** (pinned-host → NVMe O_DIRECT → S3/MinIO with atomic rename), covered by the CPU test suite
+- MoE-aware telemetry (JSONL, plus optional TensorBoard, Prometheus, and WandB sinks)
 
 ---
 
@@ -98,7 +100,7 @@ See `docs/ARCHITECTURE.md` for the detailed internal data-flow diagram (Triton r
 
 ## T4 GPU Validation (June 2026) — Key Results
 
-All numbers below are **real measurements** from `gpu_results.json`.  
+All numbers below are **real measurements** from `benchmarks/gpu_results_t4.json`.  
 Reproduce everything: see [`notebooks/moe_engine_v032_T4_validation.ipynb`](notebooks/moe_engine_v032_T4_validation.ipynb) (13 sections, open in Colab with T4).
 
 ### Router throughput — CPU vs T4 GPU (Triton kernel)
@@ -110,14 +112,14 @@ Reproduce everything: see [`notebooks/moe_engine_v032_T4_validation.ipynb`](note
 | N=2048, H=1024, E=64, K=2 | 0.236       | 4.832            | **20.4×** |
 | N=4096, H=2048, E=64, K=4 | 0.056       | 4.454            | **80.1×** |
 
-GPU speedup scales **superlinearly** — the single-HBM-pass Triton advantage becomes fully realised as the matrix size grows relative to the T4’s L2 cache.
+Speedup in this table is versus the CPU reference path on the T4 host. There is no GPU baseline comparison yet.
 
 ### GPU router throughput chart (v0.3.2, T4, real measurements)
 
 ![Router throughput GPU v0.3.2](benchmarks/charts/router_throughput_gpu_v0_3_2.png)
 
 *Forward-only (blue) and forward+backward (orange) throughput on T4 GPU (Triton kernel) vs CPU reference path (green dashed). Log scale.  
-Source: `gpu_results.json`, June 2026 T4 validation run.*
+Source: `benchmarks/gpu_results_t4.json`, June 2026 T4 validation run.*
 
 > **Note:** If the chart image is not yet present in `moe-engine/benchmarks/charts/`, run Section 9 of the validation notebook on a T4 and copy `router_throughput_gpu_v0_3_2.png` into that folder.
 
@@ -152,6 +154,8 @@ Source: `benchmarks/gpu_results_a100.json`, July 2026 validation run.*
 
 #### Router throughput — CPU vs A100
 
+Speedup here is versus the CPU reference path on the A100 host (0.175 M tok/s at N=4096 in this table, versus 0.056 M tok/s in the T4 table). There is no GPU baseline comparison yet.
+
 | Config | CPU (M tok/s) | A100 (M tok/s) | Speedup |
 |--------|:-------------:|:--------------:|:-------:|
 | N=512, H=256, E=16, K=2 | 1.168 | 2.031 | 1.7× |
@@ -167,6 +171,8 @@ Source: `benchmarks/gpu_results_a100.json`, July 2026 validation run.*
 | N=1024, H=512, E=32, K=2 | 0.456 | 1.097 | 2.4× |
 | N=2048, H=1024, E=64, K=2 | 0.312 | 2.034 | 6.5× |
 | N=4096, H=2048, E=64, K=4 | 0.101 | 3.721 | 37.0× |
+
+These A100 cells, including 58.7× and 37.0×, are the documented values. They were not reproduced from `benchmarks/gpu_results_a100.json` and are left unchanged.
 
 Reproduce with
 [`moe-engine/notebooks/moe_engine_A100_validation.ipynb`](notebooks/moe_engine_A100_validation.ipynb).
@@ -186,10 +192,11 @@ Reproduce with
 
 | Scenario              | Description                        | Runs | Pass Rate    |
 |-----------------------|------------------------------------|------|--------------|
-| **Scenario B**        | Storage stall (10s I/O delay)      | 10   | **100% ✅**  |
-| **Scenario A**        | Node kill + recovery (SIGKILL)     | 20   | **~85% ⚠️**  |
+| **Scenario B**        | Storage stall (10s I/O delay)      | 10   | **10/10**    |
+| **Scenario A**        | Node kill + recovery (SIGKILL)     | 20   | **~17/20**   |
 
-Scenario A remains flaky due to a Gloo `connectFullMesh` race in containerised environments. A proper fix (replace Gloo with NCCL in the chaos harness) is planned for v0.4.
+Scenario B's 10/10 result is from a manual run. The Chaos job is `workflow_dispatch` only and does not run on push CI.
+Scenario A recovers in ~17/20 runs (failures attributed to a Gloo race in containers). A change from Gloo to NCCL in the chaos harness is planned for v0.4.
 
 See **[`RESULTS.md`](RESULTS.md)** for every real number with exact reproduction commands and full telemetry samples.
 
@@ -199,7 +206,7 @@ See **[`RESULTS.md`](RESULTS.md)** for every real number with exact reproduction
 
 | Component                              | Status          | Detail |
 |----------------------------------------|-----------------|--------|
-| **Triton router — forward**            | ✅ CPU path in push CI | Fused matmul+softmax+topK+renorm; single HBM pass; SRAM 64×64; 80.1× over CPU at N=4096. The Triton GPU job is manual and was skipped on the latest push. |
+| **Triton router — forward**            | ✅ CPU path in push CI | Fused matmul+softmax+topK+renorm; single HBM pass; SRAM 64×64. 80.1× (T4) versus the CPU reference path at N=4096; no GPU baseline comparison yet. The Triton GPU job is manual and was skipped on the latest push. |
 | **Triton router — backward**           | ✅ CPU path in push CI | Analytic Jacobian; `atol=rtol=1e-5` vs fp64 ref; 30+ configs tested. The GPU job did not run on the latest push. |
 | **Token conservation invariant**       | ✅ CPU benchmark in push CI | `sum(dispatch_cnt) == N×K` every forward. The latest push benchmark reported `violations=0/100`. The GPU sweep is not part of push CI. |
 | **Expert load imbalance metric**       | ✅ Verified     | `max/mean` load per step; emitted in telemetry |
@@ -213,16 +220,16 @@ See **[`RESULTS.md`](RESULTS.md)** for every real number with exact reproduction
 | **Pipeline Parallelism (multi-proc)**  | ✅ v0.3         | `run_1f1b_distributed` with activation tagging; real `dist.send/recv`; 2-rank verified |
 | **MFU accounting**                     | ✅ v0.2         | MoE-sparse formula `(K/E)×P_expert`; streaming `MFUAccountant` |
 | **Pydantic `MoEConfig`**               | ✅ v0.3.2       | Validated hierarchy; env-var overrides; field-level errors; 38 tests, included in the Tier-0 count |
-| **Async two-tier checkpointing**       | ✅ CI-verified  | NVMe (`O_DIRECT`, atomic rename) → S3/MinIO mirror; background threads |
+| **Async two-tier checkpointing**       | ✅ CI-verified (CPU suite) | NVMe (`O_DIRECT`, atomic rename) → S3/MinIO mirror; background threads |
 | **TorchElastic recovery**              | ✅ CPU unit tests in push CI | Evict → reshard (round-robin) → reload. The SIGKILL chaos scenario is not part of push CI. |
-| **Structured JSONL + multi-sink telemetry** | ✅ Verified | Thread-safe; TensorBoard + Prometheus `/metrics` + WandB (gated, zero-cost when disabled) |
+| **Structured JSONL + multi-sink telemetry** | ✅ CPU tests | Thread-safe JSONL. Optional TensorBoard, Prometheus, and WandB sinks. A zero-cost claim for disabled sinks is not yet validated. |
 | **WandB integration**                  | ✅ v0.3         | `WANDB_API_KEY` env; `--wandb-project`; `log_config()` records full YAML |
 | **Docker + docker-compose**            | ✅ v0.2         | Multi-stage image; 1/4/8-GPU targets + monitoring stack. The Docker CI job is manual and was skipped on the latest push. |
 | **Kubernetes manifests**               | ✅ v0.2         | Single-node Job + multi-node Indexed Job with etcd rendezvous; PVC for checkpoints |
 | **Benchmark suite**                    | ✅ v0.2         | CPU + GPU sweeps; JSON/CSV output; chart generation |
 | **Typer CLI**                          | ✅ v0.3.2       | `moe train / benchmark / validate / info` |
 | **Chaos Scenario B (storage stall)**   | Manual          | Recorded 10/10 in RESULTS.md. The Chaos job is `workflow_dispatch` only and was skipped on the latest push. |
-| **Chaos Scenario A (node kill)**       | ⚠️ Flaky        | ~85% pass rate; Gloo race; fix planned v0.4 |
+| **Chaos Scenario A (node kill)**       | ⚠️ ~17/20       | Recovers in ~17/20 runs (failures attributed to a Gloo race in containers). |
 | **Nsight/CUPTI profiling**             | ❌ Planned v0.4 | Requires GPU hardware + sustained runs |
 | **Real sustained multi-node data**     | ❌ Planned v0.4 | Requires large cluster access |
 
@@ -312,7 +319,7 @@ except ConfigValidationError as e:
     print(e)   # Clear field-level error message
 ```
 
-See `configs/default.yaml` for a production-scale example (H=4096, E=64, dp=8, ep=8, etc.) and `pkg/utils/config.py` for the full schema.
+See `configs/default.yaml` for a production-scale shape (H=4096, E=64, dp=8, ep=8). That configuration has not been run. The schema is in `pkg/utils/config.py`.
 
 ---
 
@@ -343,9 +350,9 @@ See `configs/default.yaml` for a production-scale example (H=4096, E=64, dp=8, e
 }
 ```
 
-Sinks (zero cost when disabled):
+Sinks:
 - Always: structured JSONL
-- Optional: TensorBoard, Prometheus `/metrics` (10 gauges), WandB (only when `WANDB_API_KEY` is set)
+- Optional: TensorBoard, Prometheus `/metrics` (10 gauges), WandB (only when `WANDB_API_KEY` is set). A zero-cost claim for disabled sinks is not yet validated.
 
 ---
 
@@ -363,11 +370,14 @@ All five are validated in `test_kernels*.py` and `test_distributed_invariants.py
 
 ## Engineering Lessons (selected)
 
-- **Single-HBM-pass Triton router** reduces memory traffic by ~2.7× at large hidden/expert sizes compared with a naive three-pass pipeline.
-- **Dedicated CUDA stream + CUDA events for EP all-to-all** enables measurable and logged compute-comm overlap. At EP=8 this yields ~40% reduction in net collective cost.
-- **Activation tagging in multi-process PP** (`[stage_id, mb_index]` header before every activation tensor) makes 1F1B robust to restarts and out-of-order delivery — essential for elastic recovery.
-- **Pinned-host → NVMe (O_DIRECT, 256 MiB chunks, atomic rename) → S3** keeps the critical path cheap (only D2H copy is synchronous) and guarantees every checkpoint is either fully present or absent.
-- **Zero-cost disabled telemetry sinks** — WandB and Prometheus perform zero imports and zero network calls unless explicitly enabled. Critical for air-gapped training clusters.
+- **Activation tagging in multi-process PP** (`[stage_id, mb_index]` header before every activation tensor) is how 1F1B carries a stage id and a micro-batch index on each activation.
+- **Pinned-host → NVMe (O_DIRECT, 256 MiB chunks, atomic rename) → S3** is the checkpoint path exercised by the CPU tests.
+
+### Not yet validated
+
+- ~2.7× lower memory traffic for the single-HBM-pass router versus a three-pass pipeline.
+- ~40% reduction in collective cost at EP=8.
+- Zero-cost telemetry when WandB and Prometheus are disabled.
 
 More rationale lives in `docs/DESIGN.md` and the original engineering lessons section.
 
@@ -397,7 +407,7 @@ make test-gpu
 
 # Chaos tests (manual CI job; requires torchrun)
 make chaos-b          # Scenario B — recorded 10/10; not run on push CI
-make chaos-a          # Scenario A — expect ~85%
+make chaos-a          # Scenario A — recorded ~17/20
 ```
 
 `make test-cpu` runs the Tier-0 selection and the four differential files together.
@@ -422,7 +432,7 @@ moe-engine/                          # installable package root
 │
 ├── configs/
 │   ├── smoke.yaml                   # Tiny CPU-friendly config (H=32, E=4)
-│   └── default.yaml                 # Production-scale example (H=4096, E=64, dp=8, ep=8)
+│   └── default.yaml                 # Production-scale shape (H=4096, E=64, dp=8, ep=8); not run
 │
 ├── pkg/
 │   ├── kernels/moe_router.py        # Triton MoERouter (fwd + analytic bwd) + CPU fallback
@@ -489,7 +499,7 @@ Top-level repo files include this `README.md`, `RESULTS.md`, `roadmap.md`, `LICE
 
 Open in Colab with a T4 to reproduce:
 - All router throughput numbers and the two charts shown above
-- Full `gpu_results.json` generation
+- Full router-result JSON generation (committed as `benchmarks/gpu_results_t4.json`)
 - Chaos Scenario A/B pass rates
 - Production-scale Triton kernel sanity check (H=4096, E=64, K=2)
 
@@ -566,4 +576,4 @@ Contributions are welcome. Please open an issue first for larger changes so we c
 
 ---
 
-*This README is intentionally honest about verification scope (2-rank `mp.spawn`, single-T4 router validation, Chaos A still flaky) while clearly showing what has been built, measured, and engineered. Full hyperscale end-to-end validation requires sustained access to a large GPU cluster and is tracked as v0.4 work.*
+*Validation is currently single-GPU (T4, A100) and 2-rank CPU. Multi-node and 8+ GPU runs remain open. Scenario A recovers in ~17/20 runs (failures attributed to a Gloo race in containers). Scenario B is recorded at 10/10 via `workflow_dispatch` only.*

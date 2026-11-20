@@ -172,6 +172,8 @@ This confirms the Triton kernel compiles and runs on real GPU hardware. Expected
 
 With 4 × GPUs available locally:
 
+`configs/default.yaml` is a production-scale shape (H=4096, E=64, dp=8, ep=8). That configuration has not been run.
+
 ```bash
 torchrun --standalone --nproc_per_node=4 \
   train.py --config configs/default.yaml --max-steps 20
@@ -184,7 +186,7 @@ torchrun --standalone --nproc_per_node=4 \
 | File | Purpose |
 |------|---------|
 | `configs/smoke.yaml` | Toy config (H=32, E=4) — fast development |
-| `configs/default.yaml` | Production config (H=4096, E=64) — 64 GPUs |
+| `configs/default.yaml` | Production-scale shape (H=4096, E=64, dp=8, ep=8). Has not been run. |
 | `pkg/distributed/` | 7 focused modules + backward-compat shim |
 | `pkg/kernels/moe_router.py` | Triton fused router kernel |
 | `pkg/utils/config.py` | Pydantic MoEConfig (start here for config changes) |

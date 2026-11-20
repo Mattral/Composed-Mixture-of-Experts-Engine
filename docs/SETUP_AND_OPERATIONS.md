@@ -50,7 +50,7 @@ Training is configured via YAML. Two canonical configs ship with the repo:
 | Config | Purpose |
 |---|---|
 | `configs/smoke.yaml` | CPU-only 2-step smoke test (hidden=32, layers=2, experts=4) |
-| `configs/default.yaml` | H100-scale production config (hidden=4096, experts=64, dtype=bfloat16) |
+| `configs/default.yaml` | Production-scale shape (hidden=4096, experts=64, dp=8, ep=8, dtype=bfloat16). This configuration has not been run. |
 
 ### All configuration keys
 
@@ -181,6 +181,8 @@ for f in examples/0*.py; do python "$f"; done
 
 ## Single-Node Multi-GPU Launch
 
+`configs/default.yaml` is a production-scale shape (H=4096, E=64, dp=8, ep=8). That configuration has not been run. The commands below are launch examples.
+
 ```bash
 torchrun \
   --standalone \
@@ -299,10 +301,10 @@ checkpointing (no S3 upload). Loss of the node means loss of the checkpoint.
 # Baseline (no fault, verifies clean recovery path):
 GLOO_SOCKET_IFNAME=lo pytest tests/test_chaos.py -v -k "baseline"
 
-# Scenario B — storage stall (10s injected I/O latency, ✅ passes reliably):
+# Scenario B — storage stall (10s injected I/O latency). Recorded 10/10. workflow_dispatch only, not push CI.
 GLOO_SOCKET_IFNAME=lo pytest tests/test_chaos.py -v -k "scenario_b"
 
-# Scenario A — node kill + recovery (⚠️ ~85% pass rate; Gloo race):
+# Scenario A — node kill + recovery (recorded ~17/20; failures attributed to a Gloo race in containers). Not a push CI job.
 CHAOS_FAULT_TOLERANT=1 GLOO_SOCKET_IFNAME=lo \
   pytest tests/test_chaos.py -v -k "scenario_a"
 

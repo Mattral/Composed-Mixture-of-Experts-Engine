@@ -93,7 +93,7 @@ See `roadmap.md`'s "2-Rank CI Blind Spot" section for the full list. Two of thos
 # The Chaos CI job is workflow_dispatch only and did not run on the latest push.
 make chaos-b
 
-# Scenario A: node kill + recovery — expect ~85% (Gloo race, known)
+# Scenario A: node kill + recovery — recorded ~17/20 (failures attributed to a Gloo race in containers)
 make chaos-a
 ```
 
@@ -221,9 +221,10 @@ Fix: `export GLOO_SOCKET_IFNAME=lo` before running.
 
 ### Chaos Scenario A
 
-Approximately 85% pass rate due to a Gloo `connectFullMesh` socket race when
-restarting a rank after SIGKILL. This is environment-specific and not a code
-bug. Fix planned for v0.4 (switch chaos harness to NCCL).
+The recorded result is ~17 of 20 runs resuming. Failures are attributed to a
+Gloo `connectFullMesh` socket race when restarting a rank after SIGKILL in
+containers. This job is `workflow_dispatch` only and does not run on push CI.
+A switch of the chaos harness to NCCL is planned for v0.4.
 
 ---
 

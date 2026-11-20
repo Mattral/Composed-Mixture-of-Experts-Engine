@@ -13,7 +13,7 @@ commands are given beside every table.
 
 Hardware: **NVIDIA T4** (Turing, 16 GB HBM2, 65 TFLOPS FP32 / 130 TOPS INT8)  
 Runtime: Google Colab, CUDA 12.x, PyTorch 2.x, Triton 2.x  
-Source data: `gpu_results.json` (attached to this release)  
+Source data: `moe-engine/benchmarks/gpu_results_t4.json` (committed in the repo)  
 Reproduce:
 ```bash
 python benchmarks/run_benchmark.py --cuda --json benchmarks/gpu_results.json
@@ -26,7 +26,7 @@ This is the first sustained GPU validation of moe-engine. It confirms:
 2. Token conservation holds on CUDA: **violations=0/100** at N=512, H=128,
    E=32, K=2.
 3. Chaos Scenario B (storage stall): **10/10 runs passed** (100% pass rate).
-4. GPU speedup over CPU reference path reaches **80.1× at N=4096, H=2048**.
+4. Router speedup versus the CPU reference path is **80.1× at N=4096, H=2048** on this T4 host. There is no GPU baseline comparison yet. The CPU baseline in this file (0.056 M tok/s) is not the CPU baseline in the A100 table.
 
 ---
 
@@ -74,11 +74,7 @@ All numbers are real measurements from the same benchmark suite.
 | 2048 | 1024 | 64 | 2 |         0.236 |         4.832 |   **20.4×** |
 | 4096 | 2048 | 64 | 4 |         0.056 |         4.454 |   **80.1×** |
 
-The 80× speedup at N=4096, H=2048 is the most production-relevant point:
-it corresponds to a large-scale MoE layer at realistic hidden dimension and
-expert count. The scaling is superlinear because the Triton kernel's HBM
-bandwidth becomes increasingly effective at larger matrix sizes while the
-CPU fp64 reference path has no vectorization advantage at this scale.
+The 80.1× figure matches the ratio of the unrounded `tokens_per_sec` values in `gpu_results_t4.json` for this shape (4,454,377 / 55,599). It is versus the CPU reference path on that host. There is no GPU baseline comparison yet. Dividing the rounded table cells (4.454 / 0.056) gives about 79.5×.
 
 ---
 
@@ -177,7 +173,8 @@ pytest tests/test_kernels_numerics.py -v
 
 A 10-second injected I/O stall during async checkpoint commit. The async queue
 drains without deadlock; training resumes; a `latency_inject` event is emitted
-in telemetry.
+in telemetry. The recorded result is 10/10. This job is `workflow_dispatch`
+only and does not run on push CI.
 
 ```bash
 GLOO_SOCKET_IFNAME=lo pytest tests/test_chaos.py -v -k "scenario_b" -m chaos
@@ -185,13 +182,11 @@ GLOO_SOCKET_IFNAME=lo pytest tests/test_chaos.py -v -k "scenario_b" -m chaos
 
 | Scenario | Runs | Passed | **Pass Rate** |
 |----------|-----:|-------:|--------------:|
-| B (storage stall) | **10** | **10** | **100%** ✅ |
+| B (storage stall) | **10** | **10** | **10/10** |
 
 ### Scenario A: Node Kill + Recovery
 
-SIGKILL sent to one rank; TorchElastic restarts it; training resumes with
-expert resharding. Known flaky due to Gloo `connectFullMesh` race in
-containerised environments.
+SIGKILL sent to one rank. The recorded result is ~17 of 20 runs resuming. Failures are attributed to a Gloo `connectFullMesh` race in containerised environments. This job does not run on push CI.
 
 ```bash
 CHAOS_FAULT_TOLERANT=1 GLOO_SOCKET_IFNAME=lo \
@@ -200,12 +195,12 @@ CHAOS_FAULT_TOLERANT=1 GLOO_SOCKET_IFNAME=lo \
 
 | Scenario | Runs | Passed | **Pass Rate** | Status |
 |----------|-----:|-------:|--------------:|--------|
-| A (node kill) | 20 | ~17 | **~85%** ⚠️ | Known Gloo race; non-blocking in CI |
+| A (node kill) | 20 | ~17 | **~17/20** | Failures attributed to a Gloo race in containers. Not a push CI job. |
 
-**Root cause:** `connectFullMesh` in the Gloo CPU backend races with socket
-cleanup after SIGKILL. This cannot be fixed without switching to NCCL
-(GPU-only). Planned for v0.4. Do not treat Scenario A failures as regressions
-until the NCCL migration is complete.
+**Attributed cause:** Failures are attributed to `connectFullMesh` in the Gloo
+CPU backend racing with socket cleanup after SIGKILL. The recorded result is
+~17 of 20 runs. A switch to NCCL (GPU-only) is planned for v0.4. Do not treat
+Scenario A failures as regressions until that migration is complete.
 
 ---
 

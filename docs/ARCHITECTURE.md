@@ -8,12 +8,15 @@
 ## Purpose
 
 `moe-engine` is a research-grade training runtime for large Mixture-of-Experts
-language models at hyperscale (10K+ GPUs). It is not a model definition — it
-is the infrastructure layer that distributes, checkpoints, and recovers training
-across thousands of GPUs under continuous node failure.
+language models. The design target is large clusters. It is not a model
+definition. It is the infrastructure layer: distribution, checkpointing, and
+recovery code.
 
-The central constraint: **at hyperscale, nodes die continuously**. Every design
-decision flows from that premise.
+Validation is currently single-GPU (T4, A100) and 2-rank CPU. Multi-node and
+8+ GPU runs remain open.
+
+The design premise: at the target scale, nodes die continuously. Every design
+decision flows from that premise. That scale has not been run.
 
 ---
 
@@ -26,7 +29,7 @@ decision flows from that premise.
 | **Token conservation invariant** | ✅ CPU benchmark in push CI | `sum(dispatch_cnt) == N×K` asserted every forward. The latest push benchmark reported `violations=0/100`. The GPU sweep is not part of push CI. |
 | **Expert load imbalance metric** | ✅ v0.2 | `max_load / mean_load` tracked per step; logged to telemetry |
 | **Router z-loss** | ✅ v0.2 | Auxiliary regularisation signal; emitted per step |
-| **DP+EP device mesh** | ✅ CI-verified | `init_device_mesh` (PyTorch 2.5+); degenerate 1-rank fallback |
+| **DP+EP device mesh** | ✅ CI-verified (CPU suite) | `init_device_mesh` (PyTorch 2.5+); degenerate 1-rank fallback |
 | **EP all-to-all (dispatch + combine)** | ✅ CPU differential job | Non-blocking `all_to_all_single` on Gloo (243 passed). Dedicated CUDA-stream overlap is not part of push CI. |
 | **Compute-comm overlap** | ✅ | Expert FFN runs on default stream while a2a is in flight |
 | **Comm/compute overlap ratio** | ✅ v0.3 | `dispatch_ms / expert_compute_ms`; emitted in `collective` telemetry block |
@@ -40,15 +43,15 @@ decision flows from that premise.
 | **Real CUDA telemetry** | ✅ v0.2 | CUDA events on dispatch + combine; `memory_stats()` peak GB |
 | **WandB integration** | ✅ v0.3 | `WandBSink`; active when `WANDB_API_KEY` set; `--wandb-project` flag; `log_config()` records hyperparameters |
 | **Pydantic MoEConfig** | ✅ v0.3.2 | Validated hierarchical config; env-var overrides; `ConfigValidationError` with field paths |
-| **Async two-tier checkpointing** | ✅ CI-verified | Pinned host → NVMe (O_DIRECT, 256 MB chunks, atomic rename) → S3 |
-| **TorchElastic state machine** | ✅ CI-verified | Evict → reshard (round-robin) → reload → resume |
+| **Async two-tier checkpointing** | ✅ CI-verified (CPU suite) | Pinned host → NVMe (O_DIRECT, 256 MB chunks, atomic rename) → S3 |
+| **TorchElastic state machine** | ✅ CPU unit tests in push CI | Evict → reshard (round-robin) → reload. The SIGKILL chaos scenario is not part of push CI. |
 | **Etcd rendezvous** | ✅ v0.2 | `ElasticTrainerHarness` backend selector; c10d (<100 nodes) / etcd (>100) |
 | **Prometheus metrics** | ✅ v0.3 | Optional in-process `/metrics` endpoint; 10 gauges (incl. `expert_compute_ms`, `comm_compute_overlap_ratio`) |
 | **Docker + docker-compose** | ✅ v0.2 | Multi-stage image; 1/4/8-GPU compose targets; monitoring stack. The Docker CI job is `workflow_dispatch` only and was skipped on the latest push. |
 | **Kubernetes manifests** | ✅ v0.2 | Single-node Job + multi-node Indexed Job; PVC; etcd rendezvous |
 | **Benchmark suite** | ✅ v0.2 | `benchmarks/run_benchmark.py`; CPU+GPU sweeps; JSON/CSV output |
 | **Chaos: storage stall (Scenario B)** | Manual | 10s injected stall. The Chaos job is `workflow_dispatch` only and was skipped on the latest push. The recorded result in RESULTS.md is 10/10. |
-| **Chaos: node kill + recovery (Scenario A)** | ⚠️ Flaky | ~85% pass rate; Gloo `connectFullMesh` timeout on 4-rank restart |
+| **Chaos: node kill + recovery (Scenario A)** | ⚠️ ~17/20 | Recovers in ~17 of 20 runs (failures attributed to a Gloo race in containers). Not a push CI job. |
 | **Nsight/CUPTI integration** | ❌ Planned v0.4 | Requires GPU hardware |
 | **Real multi-node benchmark data** | ❌ Planned v0.4 | Requires sustained cluster access |
 
@@ -415,8 +418,8 @@ Each module is independently importable and testable without a GPU.
 All telemetry values come from real measurements: CUDA events for collective
 latency, `torch.cuda.memory_stats()` for peak memory, `time.perf_counter()` for
 CPU-path timing, actual elapsed wall-clock time for step duration.
-There are no placeholder or fabricated numbers in the runtime or documentation
-(all GPU numbers in RESULTS.md come from `gpu_results.json`, a real T4 run).
+The T4 router table in RESULTS.md comes from `moe-engine/benchmarks/gpu_results_t4.json`.
+Claims marked not yet validated are not measurements. The A100 table cells in the README were not reproduced from `moe-engine/benchmarks/gpu_results_a100.json` and are left unchanged.
 
 **Fail-fast on invariants.**
 Token conservation, index bounds, weight normalisation, config constraints, and

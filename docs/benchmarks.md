@@ -65,7 +65,8 @@ structured JSON to `benchmarks/` on exit.
 python train.py --config configs/smoke.yaml --smoke --profile
 # → writes benchmarks/run_<unix_ts>_rank0.json
 
-# Multi-GPU run (4 ranks, local node) with profiling
+# Multi-GPU run (4 ranks, local node) with profiling.
+# configs/default.yaml is a production-scale shape (H=4096, E=64, dp=8, ep=8) and has not been run.
 torchrun --standalone --nproc_per_node=4 \
   train.py --config configs/default.yaml --max-steps 100 --profile
 # → rank 0 writes benchmarks/run_<unix_ts>_rank0.json
@@ -479,7 +480,7 @@ deterministic and fast. Real GPU throughput numbers require at least Tier 1.
 The June 2026 T4 validation confirmed the Triton kernel is functionally correct
 at production-like shapes. These numbers are in `moe-engine/benchmarks/BENCHMARKS.md`.
 
-**Headline: 80.1× GPU speedup over CPU reference at N=4096, H=2048, E=64, K=4.**
+**Headline: 80.1× versus the CPU reference path at N=4096, H=2048, E=64, K=4 on the T4 host. There is no GPU baseline comparison yet. The CPU baseline in this table is 0.056 M tok/s, which differs from the A100 table's 0.175 M tok/s.**
 
 | Config | CPU (M tok/s) | T4 (M tok/s) | Speedup |
 |--------|:---:|:---:|:---:|
@@ -488,10 +489,7 @@ at production-like shapes. These numbers are in `moe-engine/benchmarks/BENCHMARK
 | N=2048, H=1024, E=64, K=2 | 0.236 | 4.832 | 20.4× |
 | N=4096, H=2048, E=64, K=4 | 0.056 | 4.454 | **80.1×** |
 
-These numbers are from a single T4 card (65 TFLOPS BF16 peak). On H100 SXM5
-(989 TFLOPS BF16 peak), with the same kernel, the raw throughput should scale
-approximately linearly with TFLOPS, giving an estimated T4→H100 multiplier
-of ~15×.
+These numbers are from a single T4 card (65 TFLOPS BF16 peak). An estimated T4→H100 multiplier of ~15×, from the ratio of the stated peak BF16 TFLOPS (65 on T4, 989 on H100 SXM5), is not a measurement. H100 has not been run.
 
 Reproduce with the T4 validation notebook:
 ```
@@ -513,5 +511,4 @@ If you run a benchmark on real hardware, contribute the results to
 6. **Caveats:** numa binding, CPU affinity, any non-default environment settings
 
 All GPU numbers in `BENCHMARKS.md` currently come from the T4 validation run.
-Multi-GPU H100 / A100 numbers will be added in v0.4 when sustained cluster
-access is available.
+Single-GPU A100 router cells are in the README. They were not reproduced from `moe-engine/benchmarks/gpu_results_a100.json` and were left unchanged. Multi-node and 8+ GPU runs remain open.

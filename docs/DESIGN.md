@@ -28,7 +28,7 @@ tensors that never leave the GPU.
 
 **Solution:** A single Triton kernel tiles across the expert dimension `E` in
 SRAM (64×64 floats = 16 KiB, fitting in L1 cache on all Ampere/Hopper SKUs).
-All four operations execute in one pass. HBM traffic is reduced by ~2.7×.
+All four operations execute in one pass. A ~2.7× reduction in HBM traffic versus a three-pass pipeline is not yet validated.
 
 **Top-K implementation: selection sort vs bitonic sort.**  
 For K ∈ {1, 2, 4} and E ≤ 256, K-step selection sort is strictly faster than
@@ -134,8 +134,8 @@ tensors derived from `dispatch_cnt` per rank.
 Dispatch runs on `_CommStream` (high priority). A `torch.cuda.Event` records
 the dispatch completion. Combine waits on that event before using expert outputs.
 This allows expert compute for locally-owned tokens and the dispatch collective
-to execute concurrently, with observed ~40% reduction in net collective overhead
-on NVLink-connected H100 nodes (at EP=8).
+to execute concurrently. An observed ~40% reduction in net collective overhead
+at EP=8 on NVLink-connected H100 nodes is not yet validated.
 
 **Token Conservation invariant:** `sum(dispatch_cnt) == N × K` is asserted
 every forward pass. This catches any routing bug immediately rather than letting
@@ -258,12 +258,12 @@ Single-process TP tests that only exercise `tp_size=1` give false confidence.
 and exercises real collectives. The routing quality tests cover 5 different
 random seeds. The elastic tests exercise real file I/O, not mocks.
 
-**Honest chaos test status.**  
-Scenario A (node kill) passes at ~85%. The root cause (Gloo `connectFullMesh`
-race on socket re-binding after SIGKILL) is documented and mitigated with
-exponential-backoff retry in `_safe_all_reduce` and `_safe_pg_reinit`. The fix
-requires either NCCL (GPU-only) or a serialised accept-side rendezvous. This is
-not glossed over in the roadmap or README.
+**Chaos test status.**
+Scenario A (node kill) recovers in ~17 of 20 runs. Failures are attributed to
+a Gloo `connectFullMesh` race on socket re-binding after SIGKILL in containers.
+The recorded mitigation is exponential-backoff retry in `_safe_all_reduce` and
+`_safe_pg_reinit`. A switch to NCCL is planned for v0.4. Scenario B is recorded
+at 10/10. The Chaos job is `workflow_dispatch` only and does not run on push CI.
 
 ---
 
@@ -282,7 +282,7 @@ not glossed over in the roadmap or README.
 | WandB integration | ❌ | ❌ | ✅ v0.3 (WandBSink) | ✅ (unchanged) |
 | Prometheus endpoint | ❌ | ✅ v0.2 (8 gauges) | ✅ v0.3 (10 gauges) | ✅ v0.3.2 (14 gauges) |
 | Docker + Kubernetes | ❌ | ✅ v0.2 | ✅ v0.3 (unchanged) | ✅ (unchanged) |
-| Chaos A fix | ❌ | ⚠️ mitigated ~85% | ⚠️ unchanged; root fix v0.4 | ⚠️ unchanged; root fix v0.4 |
+| Chaos A | ❌ | ⚠️ ~17/20, attributed | ⚠️ ~17/20, attributed | ⚠️ ~17/20, attributed; NCCL planned v0.4 |
 | Config system | flat dict | flat dict | flat dict | ✅ v0.3.2 Pydantic v2, 38 tests |
 | Module architecture | monolith | monolith | monolith | ✅ v0.3.2 split into 7 modules |
 | Model registry | ❌ | ❌ | ❌ | ✅ v0.3.2 `@register_model` |

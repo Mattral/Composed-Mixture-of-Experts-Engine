@@ -73,7 +73,7 @@ prometheus-client      # /metrics endpoint (--prometheus-port)
 | `RDZV_ENDPOINT` | ✅ | — | `host:port` for rendezvous |
 | `RDZV_ID` | ✅ | — | Unique run identifier |
 | `MAX_RESTARTS` | No | `10` | TorchElastic max restarts |
-| `CONFIG` | No | `configs/default.yaml` | Path to YAML config |
+| `CONFIG` | No | `configs/default.yaml` | Path to YAML config. The production-scale shape (H=4096, E=64, dp=8, ep=8) has not been run. |
 
 ### For S3 / MinIO checkpoint tier
 
@@ -246,6 +246,8 @@ checkpointing is used.
 ---
 
 ## Multi-Node via `scripts/launch.sh`
+
+`configs/default.yaml` is a production-scale shape (H=4096, E=64, dp=8, ep=8). That configuration has not been run.
 
 ```bash
 # 32-node, 8 GPU/node = 256 GPUs total

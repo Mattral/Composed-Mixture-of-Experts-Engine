@@ -5,6 +5,8 @@
 
 moe-engine is built around a single constraint: **at 10K+ GPUs, nodes die
 continuously**. Every design decision is derived from that premise.
+Validation is currently single-GPU (T4, A100) and 2-rank CPU. Multi-node and
+8+ GPU runs remain open.
 
 ---
 
@@ -93,13 +95,14 @@ Summary" section in `roadmap.md` is not a weakness — it is evidence that the
 system is understood and its boundaries are known.
 
 Specifically:
-- Chaos Scenario A passes at ~85%, not 100%. This is documented with its root
-  cause, current mitigation, and the correct fix.
+- Chaos Scenario A recovers in ~17 of 20 runs. Failures are attributed to a
+  Gloo race in containers. Scenario B is recorded at 10/10 via `workflow_dispatch`
+  only, not on push CI.
 - Pipeline parallelism `run_1f1b_distributed` was explicitly deferred from v0.2
   to v0.3 and delivered in v0.3 with full dist.send/recv and mp.spawn verification.
   The deferral was documented, not hidden — which is why the delivery was straightforward.
-- GPU benchmark numbers are illustrative until we have sustained cluster access.
-  The CPU numbers are real and reproducible.
+- Documented single-GPU router numbers are versus the CPU reference path.
+  There is no GPU baseline comparison yet. Multi-node and 8+ GPU runs remain open.
 
 ### 7. Observability is a first-class feature
 
@@ -151,6 +154,6 @@ These principles are instantiated in the codebase today:
 | Correct collective per pattern | `all_reduce` in `RowParallelLinear`; structural test enforces it |
 | Consistent TP sharding | Both `w_gate` and `w_up` are `ColumnParallelLinear` in `_SwiGLUExpert` |
 | Real collective tests | `test_column_row_parallel_2rank_numerically_correct` (mp.spawn, Gloo) |
-| Honest documentation | `roadmap.md §Honest Status Summary`; Scenario A documented as ~85% |
+| Honest documentation | `roadmap.md §Honest Status Summary`; Scenario A recorded as ~17 of 20 runs |
 | Observability first | `routing.expert_load_imbalance`, `router_z_loss`, `collective.expert_compute_ms`, `collective.comm_compute_overlap_ratio` in every StepRecord; WandB sink active when `WANDB_API_KEY` set |
 | Link, don't duplicate | Test names cited in `docs/testing.md`; function names in `SYSTEM_DESIGN.md` |

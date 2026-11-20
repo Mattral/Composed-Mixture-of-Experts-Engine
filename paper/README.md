@@ -1,7 +1,8 @@
 # moe-engine Papers (v3, July 2026)
 
-Two documents, both grounded in the verified facts in `RESULTS.md` and
-`docs/SYSTEM_DESIGN.md` as of v0.3.3 — no invented numbers.
+Superseded by the repository README and the Documentation entry in `CHANGELOG.md`: the papers' fault-tolerance wording, superlinear speedup wording, Scenario A pass-rate wording (~85% stated as the rate, with the Gloo race stated as the cause), and test-count wording (148→348). The `.tex` sources and compiled PDFs are unchanged apart from a superseded note at the top of each `.tex` file. Current status is single-GPU (T4, A100) and 2-rank CPU. Multi-node and 8+ GPU runs remain open.
+
+Two documents. Numbers below are the claims as written in the papers. Where a claim changed, the README and `CHANGELOG.md` are the current text.
 
 ## `preprint_v3/` — Version 3 Preprint
 
@@ -13,8 +14,7 @@ voice of `moe-engine-preprint-v2.pdf`. Reports:
 - The v0.3.2/v0.3.3 architectural refactor (monolith → 8 modules)
 - The Pydantic silent-degradation CI bug, reported as a case study
 - Expert capacity enforcement (Switch Transformer / GShard style)
-- Full evaluation section with real T4 numbers (80.1× speedup, Chaos B
-  100%, token conservation 0/100)
+- Full evaluation section with T4 numbers (80.1× versus the CPU reference path at N=4096; no GPU baseline comparison yet; the T4 host CPU baseline in that table is 0.056 M tok/s. Chaos B 10/10 is a manual result, not push CI. Token conservation 0/100)
 - Honest limitations section (multi-node data, Chaos A, capacity at scale)
 
 **Files:**
@@ -59,9 +59,9 @@ Every number in both documents traces to a file in this repository:
 
 | Claim | Source |
 |---|---|
-| 80.1× GPU speedup at N=4096 | `RESULTS.md`, `benchmarks/BENCHMARKS.md`, `benchmarks/gpu_results.json` |
-| Chaos B 10/10 (100%) | `RESULTS.md`, `tests/test_chaos.py` |
-| Chaos A ~85% | `roadmap.md`, `docs/SYSTEM_DESIGN.md` Known Limitations |
+| 80.1× versus the CPU reference path at N=4096 (T4). No GPU baseline comparison yet. | `RESULTS.md`, `moe-engine/benchmarks/gpu_results_t4.json`. The paper text also says the speedup increases super-linearly. That wording is superseded by the README and `CHANGELOG.md`. |
+| Chaos B 10/10 (100%) | `RESULTS.md`. Manual run. The Chaos job is `workflow_dispatch` only and does not run on push CI. |
+| Chaos A ~85% in the paper text | Current docs: ~17 of 20 runs. Failures are attributed to a Gloo race in containers. The paper's ~85% and root-cause wording is superseded by the README and `CHANGELOG.md`. |
 | Tier-0: 416 passed, 3 skipped, 16 deselected, 1 xfailed. Differential: 243 passed. 28 files, 685 collected items. The 38 config tests are inside the Tier-0 count. | `docs/SYSTEM_DESIGN.md`, `docs/testing.md`. GPU, Docker, and Chaos jobs are manual and were skipped on the latest push. |
 | `constexpr` defect | `docs/adr/ADR-001-triton-router-kernel.md` |
 | Pydantic silent-degradation bug | `pkg/utils/config.py` history, this session's CI-fix work |
