@@ -13,7 +13,7 @@ Claim wording in the docs now matches what the repository shows. No new measurem
 - **Chaos.** Scenario A is recorded as recovering in ~17 of 20 runs. Failures are attributed to a Gloo race in containers. Scenario B is recorded at 10/10 from a manual run. The Chaos job is `workflow_dispatch` only and does not run on push CI.
 - **CI.** The GPU, Docker, and Chaos jobs are `workflow_dispatch` only and were skipped on the latest push. Push CI is the CPU suite (Tier-0 416 passed, 3 skipped, 16 deselected, 1 xfailed; differential 243 passed, run 41009438945). mypy is `continue-on-error` and reported errors on that run.
 - **Validation scope.** Current validation is single-GPU (T4, A100) and 2-rank CPU. Multi-node and 8+ GPU runs remain open.
-- **Paper and preprint.** `paper/ieee_paper/ieee_paper.tex`, `paper/preprint_v3/preprint_v3.tex`, and the Zenodo preprint still contain the earlier fault-tolerance, superlinear, Scenario A, and test-count wording. Those claims are superseded by this entry and the README. The compiled PDFs were not regenerated. `docs/history-rewrite.md` keeps one line that the commit history was rewritten, plus the SHA map.
+- A preprint was previously deposited at 10.5281/zenodo.20688837 and is superseded by the current docs.
 
 ## Unreleased — M2: MoE semantics (October 2026)
 

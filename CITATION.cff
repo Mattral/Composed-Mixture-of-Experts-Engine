@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: Please cite this software using the metadata below.
+type: software
+title: Composed Mixture-of-Experts Engine
+version: 0.3.3
+repository-code: https://github.com/Mattral/Composed-Mixture-of-Experts-Engine
+url: https://github.com/Mattral/Composed-Mixture-of-Experts-Engine
+license: Apache-2.0
+authors:
+  - family-names: Myet
+    given-names: Min Htet

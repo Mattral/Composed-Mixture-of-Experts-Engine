@@ -15,15 +15,6 @@
 
 </div>
 
-> **Associated Publication**  
-> This repository is accompanied by the preprint:  
-> **moe-engine: A Fault-Tolerant Runtime for Hyperscale Mixture-of-Experts Training**  
-> Min Htet Myet, June 2026  
-> [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20688837.svg)](https://doi.org/10.5281/zenodo.20688837)  
-> [Read on Zenodo](https://zenodo.org/records/20688837) · [PDF](https://zenodo.org/records/20688837/files/moe-engine-preprint-v2.pdf)
->
-> Superseded by this README and the Documentation entry in `CHANGELOG.md`: the preprint's fault-tolerance wording, its superlinear speedup wording, its Scenario A pass-rate wording, and its test-count wording.
-
 > **v0.3.2 (June 2026)**: Fixed Triton kernel compile-time crash that prevented all real-GPU runs since v0.2 (undetected by CPU-only CI). Added real dense-baseline measurements. Fixed `train.py` config crash. See `benchmarks/BENCHMARKS.md` for full patch notes.
 
 ---
@@ -547,22 +538,6 @@ See [`roadmap.md`](roadmap.md) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md
 | T4 validation notebook          | Full reproduction of GPU numbers & charts            |
 | `deploy/`                       | Docker & Kubernetes manifests (single + multi-node)  |
 | Issues / Discussions            | Questions, bug reports, feature requests             |
-
----
-
-## Citation
-
-If you use `moe-engine` in research, please cite the preprint:
-
-```bibtex
-@misc{myet2026moeengine,
-  author = {Min Htet Myet},
-  title  = {moe-engine: A Fault-Tolerant Runtime for Hyperscale Mixture-of-Experts Training},
-  year   = {2026},
-  url    = {https://github.com/Mattral/Composed-Mixture-of-Experts-Engine},
-  note   = {v0.3.2 preprint. Zenodo: https://doi.org/10.5281/zenodo.20688837}
-}
-```
 
 ---
 
