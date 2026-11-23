@@ -21,7 +21,7 @@
 
 ## What this is
 
-`moe-engine` is a **research-grade infrastructure runtime** for training large Mixture-of-Experts (MoE) language models. The design target is large clusters. Validation today covers the router kernel on single GPUs (T4, A100), and EP, TP, SP and FSDP2 data parallelism on CPU with Gloo at 2 and 4 processes, compared against a dense single-device reference in push CI. Pipeline parallelism across processes does not work yet. Multi-GPU, NCCL and multi-node runs remain open. See [Status](#what-is-actually-built).
+`moe-engine` is a **research-grade infrastructure runtime** for training large Mixture-of-Experts (MoE) language models. The design target is large clusters. Validation today covers the router kernel on single GPUs (T4, A100), and EP, TP, SP and FSDP2 data parallelism on CPU with Gloo at 2 and 4 processes, compared against a dense single-device reference in push CI. Pipeline parallelism runs across 2 and 3 processes on CPU/Gloo and matches a dense reference in tests that no CI job runs yet. Multi-GPU, NCCL and multi-node runs remain open. See [Status](#what-is-actually-built).
 
 **This is not a model definition.** It is the systems layer (Triton kernels + 4D parallelism + checkpoint and recovery code + observability) that a real MoE model runs on.
 
@@ -29,7 +29,7 @@ Documented router speedup at N=4096, H=2048, E=64, K=4 is **80.1× (T4) / 56.0×
 
 Core capabilities:
 - Fused **Triton router kernel** (single HBM pass, analytic backward pass). Push CI runs the CPU path. The Triton GPU job is `workflow_dispatch` only and was skipped on the latest push.
-- **4D parallelism** — Data (FSDP2) × Expert (all-to-all) × Tensor (Column/RowParallel + Sequence Parallel) × Pipeline (1F1B with activation tagging). DP, EP, TP and SP are tested across processes in push CI. Pipeline parallelism is tested as single-process scheduling; its 2-process tests fail.
+- **4D parallelism** — Data (FSDP2) × Expert (all-to-all) × Tensor (Column/RowParallel + Sequence Parallel) × Pipeline (1F1B with activation tagging). DP, EP, TP and SP are tested across processes in push CI. Pipeline parallelism matches a dense reference at 2 and 3 processes in tests run outside CI.
 - **Training objective**: the mean over the global batch's loss-bearing tokens, independent of the dp/ep/tp layout and the gradient-accumulation count (ADR-011)
 - Runtime invariant checks (token conservation, NaN guards, index validity)
 - Scenario A (node kill) recovers in ~17/20 runs (failures attributed to a Gloo race in containers). Scenario B (storage stall) is recorded at 10/10 and runs via `workflow_dispatch` only, not on push CI.
@@ -84,7 +84,7 @@ Core capabilities:
 - **DP** — FSDP2 per-parameter sharding via DTensor along the data axis. Expert weights are sharded over DP as well (expert-data-parallel, ADR-011). Gradients are summed over DP and divided once by the global token count. Tested at dp=2 on CPU/Gloo.
 - **EP** — Expert Parallelism: each rank owns `E / ep_size` experts; non-blocking `all_to_all_single` dispatch + combine on a dedicated high-priority CUDA stream with compute overlap. The all-to-all is autograd-aware and tested at ep=2 and ep=4 on CPU/Gloo; the CUDA-stream path has not been run with ep > 1.
 - **TP** — Tensor Parallelism on expert FFNs (`ColumnParallelLinear` / `RowParallelLinear`) + Sequence Parallelism, including non-divisible sequence lengths. The fused `next_weight` path applies a replicated weight to the local sequence shard with zero collectives (ADR-007).
-- **PP** — Pipeline Parallelism with `PipelineStage` + 1F1B schedule and activation tagging. Single-process scheduling is tested. Multi-process `run_1f1b_distributed` is open: its 2-process tests fail (see the status table).
+- **PP** — Pipeline Parallelism with `PipelineStage` + 1F1B schedule and activation tagging. Single-process scheduling is in push CI. Multi-process `run_1f1b_distributed` matches a dense reference for outputs and every stage's gradients at 2 and 3 processes; those tests run outside CI (see the status table).
 
 See `docs/ARCHITECTURE.md` for the detailed internal data-flow diagram (Triton router internals, dedicated-stream mechanics, token lifecycle, and per-layer forward/backward pass).
 
@@ -194,7 +194,7 @@ See **[`RESULTS.md`](RESULTS.md)** for every real number with exact reproduction
 
 ## What is Actually Built
 
-Status as of 2026-11-23 (v0.3.3, CPU torch 2.14.1). ✅ means a test or recorded run shows it, and the Evidence column says which. "Push CI" is the `test-cpu` (Tier-0), `test-differential`, `test-config` and `benchmark` jobs in `.github/workflows/ci.yml`. The `docker`, `test-gpu` and `chaos-b` jobs are `workflow_dispatch` only and have no recorded run in this repository's Actions history. "Manual" means a run outside CI, named in the row.
+Status as of 2026-11-23 (main after v0.3.3, CPU torch 2.14.1). ✅ means a test or recorded run shows it, and the Evidence column says which. "Push CI" is the `test-cpu` (Tier-0), `test-differential`, `test-config` and `benchmark` jobs in `.github/workflows/ci.yml`. The `docker`, `test-gpu` and `chaos-b` jobs are `workflow_dispatch` only and have no recorded run in this repository's Actions history. "Manual" means a run outside CI, named in the row.
 
 | Component | Status | Evidence | Detail |
 |---|---|---|---|
@@ -212,7 +212,7 @@ Status as of 2026-11-23 (v0.3.3, CPU torch 2.14.1). ✅ means a test or recorded
 | **Global-mean objective + gradient clipping** | ✅ CPU/Gloo | Push CI: `test_differential.py` (`test_layout_*`, `clip-*`, 7 layouts), `test_train_step.py` | Mean over the global batch's loss-bearing tokens; one global grad norm over DP, EP and TP shards (ADR-011, F22, F14). |
 | **Capacity dropping** | ✅ | Push CI: `test_capacity_dropping.py` (Tier-0), EP capacity cases (differential) | Per expert across top-k slots, slot-major, dropped before dispatch (ADR-011, F12). Opt-in via `capacity_dropping`. |
 | **Pipeline Parallelism — scheduling** | ✅ single process | Push CI: `test_pipeline_parallel.py` (25 single-process cases) | `PipelineStage`, `run_1f1b` warmup / steady / cooldown phases. |
-| **Pipeline Parallelism — multi-process** | ❌ Open | Manual, 2026-11-23, Linux: both `test_pp_multiprocess_*` tests fail | `run_1f1b_distributed` over `dist.send/recv` with activation tagging. The last stage runs 0 of the expected micro-batches, and stage 0 then reports `Connection closed by peer`. ADR-010 reports a hang on Windows. |
+| **Pipeline Parallelism — multi-process** | ✅ CPU/Gloo, 2 and 3 stages | Manual, 2026-11-23, Linux: 4 `test_pp_multiprocess_*` tests pass (5 repeats). No CI job runs them | `run_1f1b_distributed` over `dist.send/recv`. Outputs and every stage's weight gradients match a dense reference, including a stage that changes the activation width. Fixed after v0.3.3 (see CHANGELOG). Not run on Windows since ADR-010 reported a hang there. |
 | **MFU accounting** | ✅ | Push CI: `test_mfu.py`, `test_mfu_v02.py` | MoE-sparse formula `(K/E)×P_expert`; streaming `MFUAccountant`. |
 | **Pydantic `MoEConfig`** | ✅ | Push CI: `test_config.py` (38, in Tier-0 and the config job) | Validated hierarchy; env-var overrides; field-level errors. |
 | **Async two-tier checkpointing** | ✅ CPU | Push CI: `test_elastic.py`, `test_elastic_v02.py`. Manual: `test_smoke_e2e.py` (S3 tier under moto) | Local tier (chunked writes, atomic rename) and `file://` remote tier in push CI. The S3/MinIO tier is tested only in `test_smoke_e2e.py`, which no CI job runs. |
@@ -266,7 +266,7 @@ make test-cpu
 ```
 `make test-cpu` is wider than the push CI Tier-0 job: it does not ignore `test_differential.py`, `test_comm_ops.py`, `test_grad_sync.py`, or `test_train_step.py`.
 
-Tier-0 selection: `417 passed, 3 skipped, 15 deselected, 1 xfailed`, including the 38 config tests. Differential job: `243 passed`. Both counted on 2026-11-23 with CPU torch 2.14.1 at the commit that adds this line.
+Tier-0 selection: `417 passed, 3 skipped, 17 deselected, 1 xfailed`, including the 38 config tests. Differential job: `243 passed`. Both counted on 2026-11-23 with CPU torch 2.14.1 at the commit that adds this line.
 
 ### 5. Using the Typer CLI
 ```bash
@@ -366,7 +366,7 @@ All five are checked in `test_kernels*.py` and `test_router.py` (push CI). The 2
 
 ## Engineering Lessons (selected)
 
-- **Activation tagging in multi-process PP** (`[stage_id, mb_index]` header before every activation tensor) is how 1F1B carries a stage id and a micro-batch index on each activation. The multi-process path is open (see the status table).
+- **Activation tagging in multi-process PP** (`[stage_id, mb_index, dtype, ndim, shape]` header before every activation tensor) is how 1F1B carries a stage id and a micro-batch index on each activation. The header also carries dtype and shape, so a receiving stage needs no advance knowledge of the activation.
 - **Pinned-host → NVMe (O_DIRECT, 256 MiB chunks, atomic rename) → S3** is the checkpoint path exercised by the CPU tests.
 
 ### Not yet validated
@@ -382,7 +382,7 @@ More rationale lives in `docs/DESIGN.md` and the original engineering lessons se
 ## Test Suite
 
 ```bash
-# CI Tier-0 CPU job — 417 passed, 3 skipped, 15 deselected, 1 xfailed
+# CI Tier-0 CPU job — 417 passed, 3 skipped, 17 deselected, 1 xfailed
 # (includes the 38 config tests; counted 2026-11-23)
 pytest tests/ \
   --ignore=tests/test_chaos.py \
@@ -398,8 +398,8 @@ pytest tests/ \
 GLOO_SOCKET_IFNAME=lo pytest tests/test_differential.py tests/test_comm_ops.py \
   tests/test_grad_sync.py tests/test_train_step.py
 
-# Multi-process tests the Tier-0 name filter deselects (15). No CI job runs them.
-# 2026-11-23, Linux: 13 passed, 2 failed (the two pipeline-parallel tests)
+# Multi-process tests the Tier-0 name filter deselects (17). No CI job runs them.
+# 2026-11-23, Linux: 17 passed
 GLOO_SOCKET_IFNAME=lo pytest tests/ \
   --ignore=tests/test_chaos.py --ignore=tests/test_smoke_e2e.py \
   --ignore=tests/test_differential.py --ignore=tests/test_comm_ops.py \
@@ -417,7 +417,7 @@ make chaos-b          # Scenario B — recorded 10/10; not run on push CI
 make chaos-a          # Scenario A — recorded ~17/20
 ```
 
-Platform scope: the multi-process tests are run on Linux (the differential job on GitHub's ubuntu-22.04 runners; the 15 deselected tests on WSL Ubuntu, 2026-11-23). ADR-010 reports that the multi-process pipeline-parallel tests hang on Windows; that has not been re-checked.
+Platform scope: the multi-process tests are run on Linux (the differential job on GitHub's ubuntu-22.04 runners; the 17 deselected tests on WSL Ubuntu, 2026-11-23). ADR-010 reported that the multi-process pipeline-parallel tests hung on Windows, before the 2026-11-23 fix; they have not been run on Windows since.
 
 `make test-cpu` runs the Tier-0 selection and the four differential files together.
 
@@ -426,7 +426,7 @@ Key test files (CI job in brackets):
 - `test_differential.py` — EP, TP, SP, FSDP2 and composite layouts vs a dense single-device reference: outputs, every gradient, post-step parameters; 2 and 4 processes [differential]
 - `test_comm_ops.py`, `test_grad_sync.py`, `test_train_step.py` — collective VJPs, gradient sync and init broadcast, tp=2 train step [differential]
 - `test_router_losses.py`, `test_capacity_dropping.py` — router auxiliary losses, capacity dropping [Tier-0]
-- `test_tensor_parallel.py`, `test_sequence_parallel_v03.py`, `test_pipeline_parallel.py`, `test_moe_layer.py` — single-process cases [Tier-0]; `*_2rank` and `*_multiprocess` cases [none; run manually]. The two `test_pp_multiprocess_*` cases fail
+- `test_tensor_parallel.py`, `test_sequence_parallel_v03.py`, `test_pipeline_parallel.py`, `test_moe_layer.py` — single-process cases [Tier-0]; `*_2rank` and `*_multiprocess` cases [none; run manually, all pass]. The `test_pp_multiprocess_*_grads_match_dense` cases compare 2- and 3-stage gradients with a dense reference
 - `test_distributed_invariants.py` — 2-process token conservation and backward [none; passes when run manually]
 - `test_elastic.py`, `test_elastic_v02.py` — local checkpoint tier, `file://` remote tier, resharding, harness [Tier-0]
 - `test_config.py` — 38 tests for `MoEConfig` [Tier-0 and the config job]
@@ -485,7 +485,7 @@ moe-engine/                          # installable package root
 │   ├── docker/                      # Multi-stage Dockerfile + docker-compose (smoke/4gpu/8gpu + monitoring)
 │   └── k8s/                         # namespace, pvc, single-node Job, multi-node IndexedJob + etcd
 │
-├── tests/                           # 28 test modules, 685 collected items (2026-11-23)
+├── tests/                           # 28 test modules, 687 collected items (2026-11-23)
 │   ├── test_kernels*.py
 │   ├── test_*parallel*.py
 │   ├── test_elastic*.py + test_chaos.py
@@ -547,8 +547,7 @@ See `benchmarks/BENCHMARKS.md` for the v0.3.2 patch notes and [`CHANGELOG.md`](C
 ## Roadmap (v0.4 priorities)
 
 See [`roadmap.md`](roadmap.md) and [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full plan. High-priority items:
-- Multi-process pipeline parallelism (`run_1f1b_distributed`): make the two failing 2-process tests pass
-- A CI job for the 15 multi-process tests the Tier-0 name filter deselects
+- A CI job for the 17 multi-process tests the Tier-0 name filter deselects (they pass when run directly)
 - Replace Gloo with NCCL in chaos harness → address Scenario A failures
 - Real 8-GPU+ benchmark data and end-to-end MFU validation
 - Nsight/CUPTI roofline integration
@@ -580,7 +579,7 @@ ADRs are dated records and are not edited after acceptance. Where an ADR's statu
 | [ADR-001](docs/adr/ADR-001-triton-router-kernel.md) | June 2026 | Fused Triton router kernel |
 | [ADR-002](docs/adr/ADR-002-async-two-tier-checkpointing.md) | June 2026 | Async two-tier checkpointing |
 | [ADR-003](docs/adr/ADR-003-pydantic-config.md) | June 2026 | Pydantic v2 configuration |
-| [ADR-004](docs/adr/ADR-004-4d-parallelism-composition.md) | June 2026 | 4D parallelism composition. Its "2-rank TP/PP verified" rows were corrected for TP by ADR-008; PP is still open |
+| [ADR-004](docs/adr/ADR-004-4d-parallelism-composition.md) | June 2026 | 4D parallelism composition. Its "2-rank TP/PP verified" rows were corrected for TP by ADR-008; PP was fixed on 2026-11-23 (CHANGELOG) |
 | [ADR-005](docs/adr/ADR-005-gpu-architecture-portability.md) | July 2026 | GPU architecture portability (T4 vs A100), fallback telemetry |
 | [ADR-006](docs/adr/ADR-006-device-coercion-correction.md) | July 2026 | Device coercion in the fp64 reference path |
 | [ADR-007](docs/adr/ADR-007-sequence-parallel-correctness-and-nondivisible-length.md) | August 2026 | SP correctness, non-divisible sequence length, 2-rank CI coverage |
@@ -599,4 +598,4 @@ Contributions are welcome. Please open an issue first for larger changes so we c
 
 ---
 
-*Status as of 2026-11-23 (v0.3.3). Router kernel validated on single GPUs (T4, A100). EP, TP, SP and FSDP2 at dp=2 tested on CPU/Gloo at 2 and 4 processes in push CI. Multi-process pipeline parallelism, multi-GPU, NCCL and multi-node runs are open. Chaos results (Scenario A ~17/20, Scenario B 10/10) are recorded manual runs.*
+*Status as of 2026-11-23 (v0.3.3). Router kernel validated on single GPUs (T4, A100). EP, TP, SP and FSDP2 at dp=2 tested on CPU/Gloo at 2 and 4 processes in push CI. Pipeline parallelism at 2 and 3 processes matches a dense reference in tests run outside CI. Multi-GPU, NCCL and multi-node runs are open. Chaos results (Scenario A ~17/20, Scenario B 10/10) are recorded manual runs.*

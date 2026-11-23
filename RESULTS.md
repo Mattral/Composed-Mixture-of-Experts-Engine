@@ -217,7 +217,7 @@ pytest tests/ \
   --ignore=tests/test_train_step.py \
   -m cpu \
   -k "not (2rank or multiprocess or distributed_invariants)"
-# → 417 passed, 3 skipped, 15 deselected, 1 xfailed
+# → 417 passed, 3 skipped, 17 deselected, 1 xfailed
 # The 38 config tests are inside the 417 passed.
 # 3 skipped: Triton GPU path, plus two CUDA-only tests in test_gpu_portability.py (ADR-006).
 # 1 xfailed: documented statistical edge case in test_routing_quality.py, seed=2.
@@ -241,7 +241,7 @@ GLOO_SOCKET_IFNAME=lo pytest tests/test_differential.py tests/test_comm_ops.py \
 | `test_properties.py` | 9 | Tier-0 CPU | ✅ Hypothesis property-based tests — new in v0.3.2 |
 | `test_gpu_portability.py` | 22 | Tier-0 CPU / Tier-1 GPU | ✅ (2 skips: real/multi CUDA — see ADR-006) — new in v0.3.3 |
 | `test_tensor_parallel.py` | 25 | Tier-0 CPU / Tier-2 2-rank | ✅ ADR-008: fixed ColumnParallelLinear's gather-dimension bug and _SwiGLUExpert's composition bug (broken at any real tp_size>1) |
-| `test_pipeline_parallel.py` | 27 | Tier-0 CPU / Tier-2 2-rank | ✅ |
+| `test_pipeline_parallel.py` | 29 | Tier-0 CPU / Tier-2 2-rank | ✅ |
 | `test_sequence_parallel_v03.py` | 26 | Tier-0 CPU / Tier-2 2-rank | ✅ ADR-007: fixed a broken fused-path algorithm + a batch-corrupting gather bug, added non-divisible sequence length support |
 | `test_distributed.py` | 5 | Tier-0 CPU | ✅ |
 | `test_distributed_invariants.py` | 2 | Tier-2 4-process Gloo | ✅ ADR-009: fixed three compounding DistributedMoELayer dispatch bugs |
@@ -257,11 +257,11 @@ GLOO_SOCKET_IFNAME=lo pytest tests/test_differential.py tests/test_comm_ops.py \
 Per-file counts above are full `pytest --collect-only` totals (including
 2-rank `mp.spawn` tests and GPU-only tests skipped without CUDA) where
 those files were re-counted. The current Tier-0 summary is
-**417 passed, 3 skipped, 15 deselected, 1 xfailed**. That job also ignores
+**417 passed, 3 skipped, 17 deselected, 1 xfailed**. That job also ignores
 `test_differential.py`, `test_comm_ops.py`, `test_grad_sync.py`, and
 `test_train_step.py`. Those four files are the differential job:
 **243 passed**. The 38 config tests are inside the Tier-0 passed count.
-Full collection is 685 items in 28 files. Summing the table is not that total.
+Full collection is 687 items in 28 files. Summing the table is not that total.
 
 > Note (found during the July 2026 handoff audit, not fixed here to avoid
 > scope creep on an otherwise-unrelated pass): this table's per-file counts
@@ -432,7 +432,7 @@ investigation. Two "2-Rank CI Blind Spot" items remain open
 (`test_pipeline_parallel.py`'s pair) — see `roadmap.md`.
 
 **Current push CI (measured on this tree):** Tier-0
-`417 passed, 3 skipped, 15 deselected, 1 xfailed`; differential job
+`417 passed, 3 skipped, 17 deselected, 1 xfailed`; differential job
 `243 passed`. The 38 config tests are inside the Tier-0 count. The GPU,
 Docker, and Chaos jobs are `workflow_dispatch` only and were skipped on
 the latest push. The rows above are the release-by-release history, not

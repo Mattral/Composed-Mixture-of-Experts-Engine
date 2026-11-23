@@ -5,7 +5,7 @@
 # Job tiers and when they run:
 #
 #   lint          every push + PR          ruff + mypy
-#   test-cpu      every push + PR          Tier-0: 417 passed, 3 skipped, 15 deselected, 1 xfailed
+#   test-cpu      every push + PR          Tier-0: 417 passed, 3 skipped, 17 deselected, 1 xfailed
 #   test-differential every push + PR      243 passed (not part of test-cpu)
 #   test-config   every push + PR          38 passed (also included in test-cpu)
 #   benchmark     every push + PR          CPU benchmark + conservation

@@ -41,7 +41,7 @@ pytest tests/ \
   -k "not (2rank or multiprocess or distributed_invariants)" \
   -q
 
-# 417 passed, 3 skipped, 15 deselected, 1 xfailed
+# 417 passed, 3 skipped, 17 deselected, 1 xfailed
 # The 3 skips are the Triton GPU path and two CUDA-only tests in
 # test_gpu_portability.py. The xfail is seed=2 in test_routing_quality.py.
 # The 38 config tests are included in the 417 passed.
@@ -67,7 +67,7 @@ pytest tests/test_kernels.py tests/test_kernels_numerics.py -m gpu -v
 ### Tier 2: Multi-process (2-rank mp.spawn)
 
 The Tier-0 job filters `2rank or multiprocess or distributed_invariants`
-out of its invocation (15 deselected). The differential job does not use
+out of its invocation (17 deselected). The differential job does not use
 that filter. It runs `test_differential.py`, `test_comm_ops.py`,
 `test_grad_sync.py`, and `test_train_step.py` (243 passed) and does not
 include the named tests in this section. Run those named tests manually
@@ -78,14 +78,15 @@ GLOO_SOCKET_IFNAME=lo pytest tests/ \
   -k "2rank or multiprocess or distributed_invariants" -v
 ```
 
-Status on 2026-11-23 (WSL Ubuntu, CPU torch 2.14.1): 13 passed, 2 failed.
-The TP (`test_tensor_parallel.py`), SP (`test_sequence_parallel_v03.py`),
-EP layer (`test_moe_layer.py`) and `test_distributed_invariants.py` cases
-pass. The two `test_pipeline_parallel.py::test_pp_multiprocess_*` cases fail:
-the last pipeline stage runs no micro-batches. See `roadmap.md`, "Multi-process
-tests outside push CI", for the per-test table and the cause. These tests have
-been run on Linux for this status; ADR-010 reports that the pipeline pair hangs on
-Windows, which has not been re-checked.
+Status on 2026-11-23 (WSL Ubuntu, CPU torch 2.14.1): 17 passed.
+These cover TP (`test_tensor_parallel.py`), SP (`test_sequence_parallel_v03.py`),
+the EP layer (`test_moe_layer.py`), `test_distributed_invariants.py`, and four
+pipeline-parallel cases (`test_pipeline_parallel.py::test_pp_multiprocess_*`),
+two of which compare 2- and 3-stage outputs and gradients with a dense
+reference. The pipeline cases failed until the F16 fix on 2026-11-23; see
+`roadmap.md`, "Multi-process tests outside push CI". This status is from Linux.
+ADR-010 reported that the old pipeline tests hung on Windows; they have not
+been run on Windows since the fix.
 
 ### Tier 3: Chaos (fault injection)
 
@@ -115,7 +116,7 @@ make chaos-a
 | `test_kernels_numerics.py` | 0/1 | 31 | `atol=rtol=1e-5` vs fp64 ref; 30 `(H,E,K)` configs |
 | `test_routing_quality.py` | 0 | 16 | Load imbalance, z-loss; stochastic seed sweep |
 | `test_tensor_parallel.py` | 0/2 | 25 | Column/Row parallel at tp=1 incl. gather_output modes (ADR-008); 2-rank checks |
-| `test_pipeline_parallel.py` | 0/2 | 27 | 1F1B scheduling (25, Tier-0); 2-rank `mp.spawn` activation flow (2, deselected; both fail) |
+| `test_pipeline_parallel.py` | 0/2 | 29 | 1F1B scheduling (25, Tier-0); 2- and 3-stage `mp.spawn` activation flow and gradients vs dense (4, deselected; all pass) |
 | `test_sequence_parallel_v03.py` | 0/2 | 26 | SP scatter/gather incl. non-divisible-length padding; fused `next_weight` path (ADR-007) |
 | `test_distributed.py` | 0 | 5 | `DistributedMoELayer` expert-to-rank mapping |
 | `test_distributed_invariants.py` | 2 | 2 | Token conservation + backward NaN (4-process Gloo) — ✅ ADR-009 |
@@ -135,7 +136,7 @@ make chaos-a
 
 Counts are `pytest --collect-only` items, including parametrized cases. Summing this table is not a passing total: Tier-0 deselects 16 items, skips 3, and xfails 1, and it does not run the differential, smoke, or chaos files.
 
-**Tier-0 job: 417 passed, 3 skipped, 15 deselected, 1 xfailed.** The 38 `test_config.py` items are inside that passed count. **Differential job: 243 passed.** Full collection is 685 items in 28 files.
+**Tier-0 job: 417 passed, 3 skipped, 17 deselected, 1 xfailed.** The 38 `test_config.py` items are inside that passed count. **Differential job: 243 passed.** Full collection is 687 items in 28 files.
 
 ---
 

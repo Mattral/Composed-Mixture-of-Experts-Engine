@@ -147,7 +147,7 @@ python train.py --config configs/smoke.yaml --smoke
 ## Running the Full Test Suite
 
 ```bash
-# CI Tier-0 job: 417 passed, 3 skipped, 15 deselected, 1 xfailed
+# CI Tier-0 job: 417 passed, 3 skipped, 17 deselected, 1 xfailed
 # (includes 38 config tests). Differential job: 243 passed.
 # `make test-cpu` also runs the differential files.
 make test-cpu

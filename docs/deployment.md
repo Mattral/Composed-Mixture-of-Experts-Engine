@@ -332,7 +332,7 @@ python train.py --config configs/smoke.yaml --smoke
 
 # 3. CPU tests. This command matches `make test-cpu` (wider than CI Tier-0).
 #    The CI Tier-0 job also ignores the four differential files and reports
-#    417 passed, 3 skipped, 15 deselected, 1 xfailed.
+#    417 passed, 3 skipped, 17 deselected, 1 xfailed.
 #    The differential job reports 243 passed.
 pytest tests/ -m cpu \
   -k "not (2rank or multiprocess or distributed_invariants)" \

@@ -4,11 +4,25 @@ All notable changes to this project are recorded here. Verification claims
 state the environment they were run in; nothing below was run on a GPU, with
 NCCL, or across multiple hosts unless it says so.
 
+## Unreleased — Pipeline parallelism (2026-11-23)
+
+### Fixed
+- **F16 — multi-process pipeline parallelism.** `PipelineStage.run_1f1b_distributed` did not run across processes. Three defects, each enough to stop it:
+  - Non-first stages took the micro-batch count from their own, empty, `micro_batches` list and scheduled nothing. The first stage now passes the count down the pipeline before the schedule.
+  - Non-first stages sized receive buffers from `micro_batches[0]`. The activation header now carries `[stage_id, mb_index, dtype, ndim, shape]`; the receiver checks the stage and micro-batch index and allocates from the header, so a stage may change the activation shape.
+  - The last stage looked up losses with a wrong offset and skipped the early micro-batches, and every non-first stage stashed the received tensor from before `requires_grad_`, so no input gradient was ever sent upstream. Losses are indexed by micro-batch, the stashed input is the gradient-tracking leaf, and a stage whose input received no gradient sends zeros so its predecessor never blocks.
+
+### Added
+- `tests/test_pipeline_parallel.py::test_pp_multiprocess_2stage_grads_match_dense` and `test_pp_multiprocess_3stage_shape_change_grads_match_dense`: outputs and every stage's weight gradients against a dense single-process reference, at 2 stages and at 3 stages with a width change. Both fail on the previous code.
+
+### Verification
+CPU + Gloo, torch 2.14.1+cpu, WSL Ubuntu, Python 3.12: all 4 `test_pp_multiprocess_*` tests pass, in 5 repeated runs. All 17 tests the Tier-0 name filter deselects pass. Tier-0 is `417 passed, 3 skipped, 17 deselected, 1 xfailed`. No CI job runs the multi-process pipeline tests. Not verified: Windows (ADR-010 reported a hang there before this fix), NCCL, GPU, pipeline parallelism combined with DP/EP/TP or used from `train.py`.
+
 ## Unreleased — Documentation (2026-11-23)
 
 The README, `roadmap.md`, `docs/testing.md` and `docs/ARCHITECTURE.md` were checked against a fresh CPU run of every test file (torch 2.14.1, Gloo) and against `.github/workflows/ci.yml`. Other docs that repeat the Tier-0 count or the CLI commands were updated to match.
 
-- **Test label.** `test_mock_dist.py::test_all_to_all_2ranks` runs in one process (threads over `MockDistEnv`), but the Tier-0 name filter for multi-process tests deselected it, so no CI job ran it. It is renamed `test_all_to_all_two_threads`. Tier-0 is now `417 passed, 3 skipped, 15 deselected, 1 xfailed`. The differential job is unchanged at `243 passed`. No test logic changed.
+- **Test label.** `test_mock_dist.py::test_all_to_all_2ranks` runs in one process (threads over `MockDistEnv`), but the Tier-0 name filter for multi-process tests deselected it, so no CI job ran it. It is renamed `test_all_to_all_two_threads`. Tier-0 was then `417 passed, 3 skipped, 15 deselected, 1 xfailed` (17 deselected after the pipeline tests below were added). The differential job is unchanged at `243 passed`. No test logic changed.
 - **Pipeline parallelism.** The two `test_pp_multiprocess_*` tests fail on Linux; multi-process pipeline parallelism is now listed as open in the README, which had marked it 2-rank verified. The cause is described in `roadmap.md`. ADR-010 reports a hang on Windows; that was not re-checked.
 - **Sequence parallelism.** The fused `next_weight` path is described as zero collectives for a replicated weight (ADR-007), replacing "halves collectives" in the README and `docs/ARCHITECTURE.md`.
 - **FSDP2.** Expert weights are described as sharded over DP (expert-data-parallel, ADR-011), replacing "excluded from sharding".

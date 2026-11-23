@@ -113,8 +113,10 @@ steady-state. For `m = p` (common case), bubble = 50% → 33%.
 multi-process schedule with real `dist.send` / `dist.recv` on the PP group.
 Activation tagging: every micro-batch is tagged with a `(stage_id, mb_index)`
 header tensor sent immediately before the activation, allowing receivers to
-match micro-batches without shared state. Verified by a 2-rank `mp.spawn` test
-(`test_pp_multiprocess_2stage_activation_flow`).
+match micro-batches without shared state. The multi-process path did not work
+until the F16 fix (2026-11-23), which also added dtype and shape to the header.
+Since then the `test_pp_multiprocess_*` tests pass, including 2- and 3-stage
+gradient comparisons with a dense reference; no CI job runs them.
 
 The single-process `run_1f1b` fast-path is preserved for tests and smoke runs.
 

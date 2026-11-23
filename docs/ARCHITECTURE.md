@@ -38,7 +38,7 @@ decision flows from that premise. That scale has not been run.
 | **Sequence Parallelism** | ✅ CPU/Gloo, sp=2 (differential job) | `scatter/gather_sequence_parallel`; active when `tp_size > 1`; non-divisible sequence lengths (ADR-007) |
 | **SP `next_weight` fusion** | ✅ manual 2-rank tests | A replicated weight applied to the local sequence shard needs zero collectives (ADR-007, which replaced the earlier "halves collectives" design). The `*_2rank` tests pass when run manually; no CI job runs them |
 | **Pipeline Parallelism (single-process)** | ✅ push CI | `PipelineStage` + 1F1B schedule; warmup/steady/drain phases; 25 single-process tests in `test_pipeline_parallel.py` |
-| **Pipeline Parallelism (multi-process)** | ❌ Open | `run_1f1b_distributed`; `dist.send`/`dist.recv` on PP group; activation tagging. Both 2-process tests fail (2026-11-23, Linux): the last stage runs no micro-batches. See `roadmap.md` |
+| **Pipeline Parallelism (multi-process)** | ✅ CPU/Gloo, manual tests | `run_1f1b_distributed`; `dist.send`/`dist.recv` on PP group; activation header with stage, micro-batch, dtype and shape. Outputs and every stage's gradients match a dense reference at 2 and 3 stages (F16 fix, 2026-11-23). No CI job runs these tests. See `roadmap.md` |
 | **MFU accounting** | ✅ v0.2 | MoE-sparse formula: `(K/E)×P_expert`; `MFUAccountant` streaming tracker |
 | **Real CUDA telemetry** | ✅ v0.2 | CUDA events on dispatch + combine; `memory_stats()` peak GB |
 | **WandB integration** | ✅ v0.3 | `WandBSink`; active when `WANDB_API_KEY` set; `--wandb-project` flag; `log_config()` records hyperparameters |

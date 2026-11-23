@@ -54,7 +54,7 @@ help:
 # CPU suite. Wider than CI's Tier-0 job, which also ignores
 # test_differential.py, test_comm_ops.py, test_grad_sync.py, and
 # test_train_step.py. That narrower job last reported:
-#   417 passed, 3 skipped, 15 deselected, 1 xfailed
+#   417 passed, 3 skipped, 17 deselected, 1 xfailed
 # The four differential files, as their own job, last reported 243 passed.
 # The 38 config tests are inside the Tier-0 count.
 # ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ test-cpu:
 	  -k "not (2rank or multiprocess or distributed_invariants)" \
 	  -q $(PYTEST_OPTS)
 	@echo ""
-	@echo "==> Done. CI Tier-0: 417 passed, 3 skipped, 15 deselected, 1 xfailed."
+	@echo "==> Done. CI Tier-0: 417 passed, 3 skipped, 17 deselected, 1 xfailed."
 	@echo "    Differential files alone: 243 passed. This target runs both selections."
 
 # ---------------------------------------------------------------------------
