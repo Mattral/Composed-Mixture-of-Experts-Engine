@@ -10,10 +10,16 @@ multi-process PipelineStage class that supports real distributed execution.
 Design decisions
 ----------------
 Activation tagging
-    Every micro-batch carries an explicit mb_index tag embedded as a 2-element
-    int64 header tensor.  The header is sent immediately before the activation
-    tensor, allowing the receiver to match micro-batches across restarts
-    without shared state.
+    Every micro-batch carries an int64 header sent immediately before the
+    activation tensor: ``[stage_id, mb_index, dtype_code, ndim, *shape]``,
+    padded to a fixed length.  The receiver checks the stage and micro-batch
+    index and allocates its buffer from the header, so non-first stages need
+    neither the input micro-batches nor the activation shape in advance.
+
+Micro-batch count
+    Only the first stage holds the micro-batches.  Before the schedule starts,
+    ``run_1f1b_distributed`` passes the count ``m`` down the pipeline, stage by
+    stage, so every stage runs the same number of forwards and backwards.
 
 Buffer management
     Forward activations are stashed in ``_activation_stash`` (dict keyed by
@@ -21,7 +27,7 @@ Buffer management
     Entries are deleted after their backward to bound memory usage.
 
 Tag protocol
-    Send:  [header: Tensor[2, int64]] then [activation: Tensor[...]]
+    Send:  [header: Tensor[_HEADER_LEN, int64]] then [activation: Tensor[...]]
     Recv:  mirrors send.
     Both use blocking send/recv for simplicity; a future optimisation can
     replace these with isend/irecv + handle list (NCCL async pipe).
@@ -70,6 +76,19 @@ class PipelineStage:
     #       GRAD_TAG_BASE + mb_index for gradients.
     _SEND_TAG_BASE = 1000
     _GRAD_TAG_BASE = 1500
+    _COUNT_TAG = 999
+    # Header: [stage_id, mb_index, dtype_code, ndim, d0 .. d{_MAX_NDIM-1}]
+    _MAX_NDIM = 8
+    _HEADER_LEN = 4 + _MAX_NDIM
+    _DTYPES: Tuple[torch.dtype, ...] = (
+        torch.float32,
+        torch.float64,
+        torch.float16,
+        torch.bfloat16,
+        torch.int64,
+        torch.int32,
+        torch.bool,
+    )
 
     def __init__(
         self,
@@ -128,31 +147,77 @@ class PipelineStage:
         next_rank = self._next_rank()
         if next_rank is None:
             return
-        header = torch.tensor([self.stage_id, mb_index], dtype=torch.long)
+        if tensor.dim() > self._MAX_NDIM:
+            raise ValueError(
+                f"Stage {self.stage_id}: activation has {tensor.dim()} dims; "
+                f"at most {self._MAX_NDIM} are supported"
+            )
+        if tensor.dtype not in self._DTYPES:
+            raise ValueError(f"Stage {self.stage_id}: unsupported activation dtype {tensor.dtype}")
+        header = torch.zeros(self._HEADER_LEN, dtype=torch.long)
+        header[0] = self.stage_id
+        header[1] = mb_index
+        header[2] = self._DTYPES.index(tensor.dtype)
+        header[3] = tensor.dim()
+        if tensor.dim():
+            header[4 : 4 + tensor.dim()] = torch.tensor(tensor.shape, dtype=torch.long)
         tag = self._SEND_TAG_BASE + mb_index
         dist.send(header, dst=next_rank, group=self._pp_group, tag=tag)
-        dist.send(tensor.contiguous(), dst=next_rank, group=self._pp_group, tag=tag + 1)
+        dist.send(tensor.detach().contiguous(), dst=next_rank, group=self._pp_group, tag=tag + 1)
 
     def _recv_activation(
         self,
-        shape: Tuple[int, ...],
-        dtype: torch.dtype,
-        device: torch.device,
-        mb_index: int,
+        shape: Optional[Tuple[int, ...]] = None,
+        dtype: Optional[torch.dtype] = None,
+        device: Optional[torch.device] = None,
+        mb_index: int = 0,
     ) -> torch.Tensor:
-        """Receive activation tensor from the previous stage."""
+        """Receive activation tensor from the previous stage.
+
+        The buffer's shape and dtype come from the header the sender attached.
+        ``shape`` and ``dtype`` are optional; if given, they must match it.
+        """
         prev_rank = self._prev_rank()
         if prev_rank is None:
             raise RuntimeError(
                 f"Stage {self.stage_id}: no previous stage to receive activation from"
             )
         tag = self._SEND_TAG_BASE + mb_index
-        # Receive and validate header (stage_id, mb_index)
-        header = torch.zeros(2, dtype=torch.long)
+        header = torch.zeros(self._HEADER_LEN, dtype=torch.long)
         dist.recv(header, src=prev_rank, group=self._pp_group, tag=tag)
-        buf = torch.empty(shape, dtype=dtype, device=device)
+        h = header.tolist()
+        if h[0] != self.stage_id - 1 or h[1] != mb_index:
+            raise RuntimeError(
+                f"Stage {self.stage_id}: expected activation (stage {self.stage_id - 1}, "
+                f"micro-batch {mb_index}), got header (stage {h[0]}, micro-batch {h[1]})"
+            )
+        recv_dtype = self._DTYPES[h[2]]
+        recv_shape = tuple(h[4 : 4 + h[3]])
+        if shape is not None and tuple(shape) != recv_shape:
+            raise RuntimeError(
+                f"Stage {self.stage_id}: expected activation shape {tuple(shape)}, "
+                f"header says {recv_shape}"
+            )
+        if dtype is not None and dtype != recv_dtype:
+            raise RuntimeError(
+                f"Stage {self.stage_id}: expected activation dtype {dtype}, header says {recv_dtype}"
+            )
+        buf = torch.empty(recv_shape, dtype=recv_dtype, device=device or torch.device("cpu"))
         dist.recv(buf, src=prev_rank, group=self._pp_group, tag=tag + 1)
         return buf
+
+    def _exchange_micro_batch_count(self, local_count: int) -> int:
+        """Pass the first stage's micro-batch count down the pipeline.
+
+        The first stage sends ``local_count``; every other stage receives the
+        count from its predecessor and forwards it to its successor.
+        """
+        count = torch.tensor([local_count], dtype=torch.long)
+        if not self.is_first:
+            dist.recv(count, src=self._prev_rank(), group=self._pp_group, tag=self._COUNT_TAG)
+        if not self.is_last:
+            dist.send(count, dst=self._next_rank(), group=self._pp_group, tag=self._COUNT_TAG)
+        return int(count.item())
 
     def _send_gradient(self, grad: torch.Tensor, mb_index: int) -> None:
         """Send gradient to the previous stage."""
@@ -193,9 +258,7 @@ class PipelineStage:
         if self._multi_process:
             if not self.is_first:
                 micro_batch = self._recv_activation(
-                    micro_batch.shape,
-                    micro_batch.dtype,
-                    micro_batch.device,
+                    device=micro_batch.device,
                     mb_index=0,  # simple single-stream; mb_index managed by run_1f1b
                 )
             out = self.module(micro_batch) if self.module is not None else micro_batch
@@ -276,7 +339,8 @@ class PipelineStage:
         ----------
         micro_batches : list of Tensor
             Input micro-batches for the first stage.  Ignored on non-first
-            stages (they receive activations from predecessors).
+            stages: they receive activations from their predecessor, and the
+            micro-batch count is passed down from the first stage.
         loss_fn : callable, optional
             Loss applied on the last stage.  Signature: ``loss_fn(output) → scalar``.
             Defaults to ``output.sum()``.
@@ -300,7 +364,7 @@ class PipelineStage:
             )
 
         p = self.num_stages
-        m = len(micro_batches)
+        m = self._exchange_micro_batch_count(len(micro_batches))
         if loss_fn is None:
             loss_fn = lambda out: out.sum()  # noqa: E731
 
@@ -315,18 +379,13 @@ class PipelineStage:
             if self.is_first:
                 x = micro_batches[mb_idx]
             else:
-                x = self._recv_activation(
-                    shape=micro_batches[0].shape if micro_batches else (1,),
-                    dtype=micro_batches[0].dtype if micro_batches else torch.float32,
-                    device=device,
-                    mb_index=mb_idx,
-                )
-            fwd_inputs[mb_idx] = x
-            if self.module is not None:
+                x = self._recv_activation(device=device, mb_index=mb_idx)
+            if not self.is_first:
+                # A received activation becomes a leaf so its gradient can be
+                # sent back; stash the leaf itself, whose .grad backward fills.
                 x = x.detach().requires_grad_(x.is_floating_point())
-                out = self.module(x)
-            else:
-                out = x
+            fwd_inputs[mb_idx] = x
+            out = self.module(x) if self.module is not None else x
             fwd_outputs[mb_idx] = out
             if not self.is_last:
                 self._send_activation(out, mb_index=mb_idx)
@@ -336,24 +395,29 @@ class PipelineStage:
                 outputs.append(out)
             return out
 
+        def _send_input_grad(mb_idx: int, inp: Optional[torch.Tensor]) -> None:
+            # Every non-first stage must answer each micro-batch with a
+            # gradient, or its predecessor blocks in _recv_gradient.
+            if self.is_first or inp is None:
+                return
+            grad = inp.grad if inp.grad is not None else torch.zeros_like(inp)
+            self._send_gradient(grad, mb_index=mb_idx)
+
         def _do_backward(mb_idx: int) -> None:
             out = fwd_outputs.pop(mb_idx)
             inp = fwd_inputs.pop(mb_idx, None)
             if self.is_last:
-                # losses list is ordered; find the right one.
-                loss_offset = mb_idx - (m - len(losses))
-                if 0 <= loss_offset < len(losses):
-                    losses[loss_offset].backward(retain_graph=False)
-                if inp is not None and inp.grad is not None and not self.is_first:
-                    self._send_gradient(inp.grad, mb_index=mb_idx)
+                # Forwards run in micro-batch order, so losses[i] is micro-batch i.
+                loss = losses[mb_idx]
+                if loss.requires_grad:
+                    loss.backward(retain_graph=False)
             else:
                 grad_out = self._recv_gradient(
                     shape=out.shape, dtype=out.dtype, device=device, mb_index=mb_idx
                 )
                 if out.requires_grad:
                     out.backward(grad_out)
-                if inp is not None and inp.grad is not None and not self.is_first:
-                    self._send_gradient(inp.grad, mb_index=mb_idx)
+            _send_input_grad(mb_idx, inp)
 
         # Phase 1: Warmup — issue min(p-1, m) forwards.
         warmup_count = min(p - 1, m)

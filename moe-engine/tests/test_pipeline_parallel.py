@@ -267,5 +267,116 @@ def test_pp_multiprocess_correct_micro_batch_count():
     assert len(results[1]["outputs"]) == m
 
 
+# ---------------------------------------------------------------------------
+# Multi-process PP gradients vs a dense single-process reference
+# ---------------------------------------------------------------------------
+
+
+def _pp_stage_widths(num_stages: int, H: int) -> list:
+    """Per-stage (in, out) widths. With 3 stages the middle one widens to 2H,
+    so the activation shape changes between stages."""
+    if num_stages == 2:
+        return [(H, H), (H, H)]
+    return [(H, H), (H, 2 * H), (2 * H, H)]
+
+
+def _pp_build_stage(stage_id: int, num_stages: int, H: int) -> nn.Linear:
+    fan_in, fan_out = _pp_stage_widths(num_stages, H)[stage_id]
+    g = torch.Generator().manual_seed(100 + stage_id)
+    lin = nn.Linear(fan_in, fan_out, bias=True)
+    with torch.no_grad():
+        lin.weight.copy_(torch.randn(fan_out, fan_in, generator=g) * 0.3)
+        lin.bias.copy_(torch.randn(fan_out, generator=g) * 0.1)
+    return lin
+
+
+def _pp_micro_batches(m: int, B: int, H: int) -> list:
+    g = torch.Generator().manual_seed(7)
+    return [torch.randn(B, H, generator=g) for _ in range(m)]
+
+
+def _pp_loss(out: torch.Tensor) -> torch.Tensor:
+    return (out**2).sum()
+
+
+def _pp_grad_worker(rank: int, world_size: int, port: int, result_queue, H: int, m: int, B: int):
+    os.environ["MASTER_ADDR"] = "127.0.0.1"
+    os.environ["MASTER_PORT"] = str(port)
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    error, grads, outputs = None, {}, []
+    try:
+        topo = build_topology(
+            dp_size=1, ep_size=1, tp_size=1, pp_size=world_size, device_type="cpu"
+        )
+        module = _pp_build_stage(rank, world_size, H)
+        stage = PipelineStage(stage_id=rank, num_stages=world_size, module=module, topology=topo)
+        mbs = _pp_micro_batches(m, B, H) if rank == 0 else []
+        out_list, _ = stage.run_1f1b_distributed(mbs, loss_fn=_pp_loss)
+        grads = {n: p.grad.clone() for n, p in module.named_parameters()}
+        outputs = [o.detach().clone() for o in out_list]
+    except Exception as exc:
+        error = f"rank {rank}: {type(exc).__name__}: {exc}"
+    result_queue.put({"rank": rank, "error": error, "grads": grads, "outputs": outputs})
+    dist.destroy_process_group()
+
+
+def _run_pp_grad_case(num_stages: int, H: int = 4, m: int = 5, B: int = 3):
+    port = _free_port()
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    procs = [
+        ctx.Process(target=_pp_grad_worker, args=(r, num_stages, port, q, H, m, B))
+        for r in range(num_stages)
+    ]
+    for p in procs:
+        p.start()
+    results = {}
+    for _ in range(num_stages):
+        r = q.get(timeout=120)
+        results[r["rank"]] = r
+    for p in procs:
+        p.join(timeout=60)
+        assert p.exitcode == 0, f"Worker {procs.index(p)} exited {p.exitcode}"
+    for rank in range(num_stages):
+        assert results[rank]["error"] is None, results[rank]["error"]
+
+    # Dense reference: the same stages composed in one process.
+    stages = [_pp_build_stage(s, num_stages, H) for s in range(num_stages)]
+    ref_outputs = []
+    for x in _pp_micro_batches(m, B, H):
+        y = x
+        for lin in stages:
+            y = lin(y)
+        _pp_loss(y).backward()
+        ref_outputs.append(y.detach())
+
+    last = results[num_stages - 1]["outputs"]
+    assert len(last) == m
+    for got, ref in zip(last, ref_outputs):
+        torch.testing.assert_close(got, ref, atol=1e-5, rtol=1e-4)
+    for s, lin in enumerate(stages):
+        for name, p in lin.named_parameters():
+            torch.testing.assert_close(
+                results[s]["grads"][name],
+                p.grad,
+                atol=1e-5,
+                rtol=1e-4,
+                msg=lambda msg, s=s, name=name: f"stage {s} {name}.grad: {msg}",
+            )
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="mp.spawn fork-safety on macOS CI")
+def test_pp_multiprocess_2stage_grads_match_dense():
+    """2-rank PP: outputs and every stage's weight gradients match a dense reference."""
+    _run_pp_grad_case(num_stages=2)
+
+
+@pytest.mark.skipif(sys.platform == "darwin", reason="mp.spawn fork-safety on macOS CI")
+def test_pp_multiprocess_3stage_shape_change_grads_match_dense():
+    """3-rank PP with a width change in the middle stage: outputs and gradients
+    match a dense reference (the receiver takes the shape from the header)."""
+    _run_pp_grad_case(num_stages=3)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
