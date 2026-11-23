@@ -166,8 +166,12 @@ class TestMoELayerWithMockTopology:
 
 
 class TestMockDistEnv:
-    def test_all_to_all_2ranks(self):
-        """Each of 2 ranks sends unique data; verify correct routing."""
+    def test_all_to_all_two_threads(self):
+        """Each of 2 threaded mock ranks sends unique data; verify correct routing.
+
+        In-process threads, not mp.spawn: named without "2rank" so the Tier-0
+        name filter for multi-process tests does not exclude it.
+        """
         world_size = 2
         N_per_rank = 4
         H = 8
