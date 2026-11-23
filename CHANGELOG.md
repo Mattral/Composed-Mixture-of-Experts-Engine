@@ -4,7 +4,25 @@ All notable changes to this project are recorded here. Verification claims
 state the environment they were run in; nothing below was run on a GPU, with
 NCCL, or across multiple hosts unless it says so.
 
-## Unreleased — Documentation
+## Unreleased — Documentation (2026-11-23)
+
+The README, `roadmap.md`, `docs/testing.md` and `docs/ARCHITECTURE.md` were checked against a fresh CPU run of every test file (torch 2.14.1, Gloo) and against `.github/workflows/ci.yml`. Other docs that repeat the Tier-0 count or the CLI commands were updated to match.
+
+- **Test label.** `test_mock_dist.py::test_all_to_all_2ranks` runs in one process (threads over `MockDistEnv`), but the Tier-0 name filter for multi-process tests deselected it, so no CI job ran it. It is renamed `test_all_to_all_two_threads`. Tier-0 is now `417 passed, 3 skipped, 15 deselected, 1 xfailed`. The differential job is unchanged at `243 passed`. No test logic changed.
+- **Pipeline parallelism.** The two `test_pp_multiprocess_*` tests fail on Linux; multi-process pipeline parallelism is now listed as open in the README, which had marked it 2-rank verified. The cause is described in `roadmap.md`. ADR-010 reports a hang on Windows; that was not re-checked.
+- **Sequence parallelism.** The fused `next_weight` path is described as zero collectives for a replicated weight (ADR-007), replacing "halves collectives" in the README and `docs/ARCHITECTURE.md`.
+- **FSDP2.** Expert weights are described as sharded over DP (expert-data-parallel, ADR-011), replacing "excluded from sharding".
+- **Kernel numerics count.** `test_kernels_numerics.py` has 31 cases; docs that said "30 configs" now say 31 cases.
+- **Evidence per row.** Each row of the README status table names the CI job, test file, manual run or ADR behind it. Rows without a test now say so: CUDA-stream overlap, Docker, Kubernetes, the CLI. The `docker`, `test-gpu` and `chaos-b` jobs have no recorded `workflow_dispatch` run.
+- **Multi-process tests outside CI.** 15 tests remain deselected by the Tier-0 name filter and run in no CI job: 13 pass and 2 (pipeline) fail. The README, `roadmap.md` and `docs/testing.md` list them and the command to run them.
+- **CLI.** `pyproject.toml` declares no console script, so `moe ...` is not installed. The README now uses `python scripts/cli.py ...`.
+- **Versions and lists.** The README banner names v0.3.3 (pre-release, 2026-11-20). The M1, M2 and documentation entries below are grouped under v0.3.3, the tag that contains them. `roadmap.md` gains a section for the October 2026 correctness work. The README lists all eleven ADRs.
+
+## v0.3.3 — 2026-11-20 (pre-release)
+
+Everything since v0.3.2. The August 2026 tensor-parallel, sequence-parallel and dispatch fixes are recorded in ADR-007, ADR-008 and ADR-009; the CI fixes and load-balancing work in `roadmap.md`.
+
+### Documentation (November 2026)
 
 Claim wording in the docs now matches what the repository shows. No new measurements were added. Workflows, Makefiles, and compose files were not changed.
 
@@ -17,7 +35,7 @@ Claim wording in the docs now matches what the repository shows. No new measurem
 - **Scale notes.** The 10K-GPU sentence in `moe-engine/pkg/elastic/fault_monitor.py` is a design target. That scale has not been run.
 - A preprint was previously deposited at 10.5281/zenodo.20688837 and is superseded by the current docs.
 
-## Unreleased — M2: MoE semantics (October 2026)
+### M2: MoE semantics (October 2026)
 
 Findings F5, F12, F14, F18, F22 and the new F23–F27 from the October 2026
 correctness audit; see
@@ -25,7 +43,7 @@ correctness audit; see
 CPU + Gloo only (Windows 11, WSL Ubuntu 24.04, GitHub ubuntu-22.04),
 torch 2.14.1.
 
-### Changed
+#### Changed
 - **F22 — training objective.** The objective is now the mean over the
   global batch's loss-bearing tokens, independent of the (dp, ep, tp/sp)
   layout, of per-rank token counts and of the gradient-accumulation count.
@@ -81,7 +99,7 @@ torch 2.14.1.
   a tp = 2 step is tested against a dense reference. The data is still
   synthetic.
 
-### Removed
+#### Removed
 - **F27 — `.github/workflows/signal-correctness.yml`.** It was invalid YAML
   from the day it was added (`37d3215`, 2026-02-24): an unquoted
   `name: Alternative: ...` on line 25. GitHub could not parse it, so it never
@@ -95,7 +113,7 @@ torch 2.14.1.
     of the three lines exists any more and grepping source text is not a
     behavioural check.
 
-### Fixed
+#### Fixed
 - **F23 — biased router.** `MoERouter(bias=True)` recomputed its routing
   under `no_grad`, so its combine weights carried no gradient.
 - **F24 — FSDP2 without mixed precision.** `apply_fsdp2` passed
@@ -110,7 +128,7 @@ torch 2.14.1.
   with tp > 1 SP-region weights were never summed over TP. `apply_fsdp2` now
   restores the marks.
 
-### Added
+#### Added
 - `tests/test_differential.py::test_layout_*`: one global batch with unequal
   loss masks and 2 micro-batches, run under single, dp2, ep2, sp2, dp2×ep2,
   dp2×sp2 and ep2×sp2 and compared against a dense global-mean reference
@@ -120,13 +138,13 @@ torch 2.14.1.
   auxiliary-loss values and gradients against a dense reference,
   aggregation over every layer, and config defaults (F5).
 
-## Unreleased — M1: correct gradients under EP/TP/SP (October 2026)
+### M1: correct gradients under EP/TP/SP (October 2026)
 
 Fixes from the October 2026 correctness audit. Before this, **training was
 wrong whenever any parallelism dimension was > 1**: see
 [ADR-010](docs/adr/ADR-010-backward-correctness-and-replicated-gradients.md).
 
-### Fixed
+#### Fixed
 - **F1 — EP backward.** Expert parameters received no gradient and the MoE
   layer's input gradient was 84–100% wrong under expert parallelism. EP
   dispatch/combine now use an autograd-aware all-to-all
@@ -152,7 +170,7 @@ wrong whenever any parallelism dimension was > 1**: see
 - **F20 — Gloo interface.** Importing `pkg.elastic.fault_monitor` no longer
   forces `GLOO_SOCKET_IFNAME=lo` process-wide.
 
-### Added
+#### Added
 - `tests/test_differential.py`: distributed-vs-dense-reference tests
   (outputs, every parameter gradient, input gradients, post-step params) with
   distinct per-rank seeds; strict-xfail markers tied to finding IDs.
@@ -162,12 +180,12 @@ wrong whenever any parallelism dimension was > 1**: see
 - CI job `test-differential` running the multi-process Gloo tests on standard
   GitHub runners.
 
-### Verification
+#### Verification
 CPU + Gloo, torch 2.14.1+cpu: all 134 differential cases pass on Windows 11
 (Python 3.11.9) and WSL Ubuntu 24.04 (Python 3.12.3), and in CI on
 ubuntu-22.04 (Python 3.11).
 
-### Known limitations
+#### Known limitations
 - Pipeline parallelism (F16): both multi-process PP tests still fail (Linux:
   stage 1 receives 0 of 6 outputs; Windows: hang). Scheduled for M4.
 - A rank that raises for an unrelated reason before EP dispatch can still

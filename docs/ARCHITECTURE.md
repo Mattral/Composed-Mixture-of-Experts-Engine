@@ -28,17 +28,17 @@ decision flows from that premise. That scale has not been run.
 | **Triton router kernel — backward** | ✅ CPU path in push CI | Analytic ∂/∂logits through softmax→topK→renorm; `atol=rtol=1e-5` on the CPU reference path. The GPU job did not run on the latest push. |
 | **Token conservation invariant** | ✅ CPU benchmark in push CI | `sum(dispatch_cnt) == N×K` asserted every forward. The latest push benchmark reported `violations=0/100`. The GPU sweep is not part of push CI. |
 | **Expert load imbalance metric** | ✅ v0.2 | `max_load / mean_load` tracked per step; logged to telemetry |
-| **Router z-loss** | ✅ v0.2 | Auxiliary regularisation signal; emitted per step |
+| **Router auxiliary losses** | ✅ push CI | Tensor-valued z-loss and Switch load-balancing loss from every MoE layer (ADR-011, F5); before M2 the z-loss was a detached float that did not train the router. `test_router_losses.py`, differential `aux-*` layouts |
 | **DP+EP device mesh** | ✅ CI-verified (CPU suite) | `init_device_mesh` (PyTorch 2.5+); degenerate 1-rank fallback |
 | **EP all-to-all (dispatch + combine)** | ✅ CPU differential job | Non-blocking `all_to_all_single` on Gloo (243 passed). Dedicated CUDA-stream overlap is not part of push CI. |
-| **Compute-comm overlap** | ✅ | Expert FFN runs on default stream while a2a is in flight |
+| **Compute-comm overlap** | ❌ Not verified | Design: expert FFN on the default stream while the a2a runs on a dedicated CUDA stream. No test or GPU run with ep > 1 exercises it (ADR-010) |
 | **Comm/compute overlap ratio** | ✅ v0.3 | `dispatch_ms / expert_compute_ms`; emitted in `collective` telemetry block |
-| **FSDP2 sharding** | ✅ | `fully_shard` along DP axis; per-param DTensor; MixedPrecision |
-| **Tensor Parallelism** | ✅ v0.2 | `ColumnParallelLinear` + `RowParallelLinear`; both `w_gate` and `w_up` ColumnParallel; `all_reduce` in RowParallel; 2-rank mp.spawn verified |
-| **Sequence Parallelism** | ✅ v0.2 | `scatter/gather_sequence_parallel`; active when `tp_size > 1` |
-| **SP all-gather fusion** | ✅ v0.3 | `next_weight` param fuses backward all-gather with next projection matmul; halves SP collectives; 2-rank mp.spawn verified |
-| **Pipeline Parallelism (single-process)** | ✅ v0.2 | `PipelineStage` + 1F1B schedule; warmup/steady/drain phases; 13 unit tests |
-| **Pipeline Parallelism (multi-process)** | ✅ v0.3 | `run_1f1b_distributed`; real `dist.send`/`dist.recv` on PP group; activation tagging; 2-rank mp.spawn verified |
+| **FSDP2 sharding** | ✅ CPU/Gloo, dp=2 (differential job) | `fully_shard` along DP axis; per-param DTensor; MixedPrecision. Expert weights are sharded over DP too (expert-data-parallel, ADR-011); gradients are summed over DP |
+| **Tensor Parallelism** | ✅ v0.2 | `ColumnParallelLinear` + `RowParallelLinear`; both `w_gate` and `w_up` ColumnParallel; `all_reduce` in RowParallel. tp=2 in the push differential job; `*_2rank` tests pass when run manually (ADR-008) |
+| **Sequence Parallelism** | ✅ CPU/Gloo, sp=2 (differential job) | `scatter/gather_sequence_parallel`; active when `tp_size > 1`; non-divisible sequence lengths (ADR-007) |
+| **SP `next_weight` fusion** | ✅ manual 2-rank tests | A replicated weight applied to the local sequence shard needs zero collectives (ADR-007, which replaced the earlier "halves collectives" design). The `*_2rank` tests pass when run manually; no CI job runs them |
+| **Pipeline Parallelism (single-process)** | ✅ push CI | `PipelineStage` + 1F1B schedule; warmup/steady/drain phases; 25 single-process tests in `test_pipeline_parallel.py` |
+| **Pipeline Parallelism (multi-process)** | ❌ Open | `run_1f1b_distributed`; `dist.send`/`dist.recv` on PP group; activation tagging. Both 2-process tests fail (2026-11-23, Linux): the last stage runs no micro-batches. See `roadmap.md` |
 | **MFU accounting** | ✅ v0.2 | MoE-sparse formula: `(K/E)×P_expert`; `MFUAccountant` streaming tracker |
 | **Real CUDA telemetry** | ✅ v0.2 | CUDA events on dispatch + combine; `memory_stats()` peak GB |
 | **WandB integration** | ✅ v0.3 | `WandBSink`; active when `WANDB_API_KEY` set; `--wandb-project` flag; `log_config()` records hyperparameters |
@@ -93,7 +93,7 @@ train.py
 │   │                           RowParallelLinear    — shards input  [out, in//tp]
 │   │                           scatter_to_sequence_parallel(x, topo, next_weight=None)
 │   │                           gather_from_sequence_parallel(x, topo)
-│   │                           (fused next_weight path halves SP collectives — v0.3)
+│   │                           (fused next_weight path: zero collectives — ADR-007)
 │   │
 │   ├── expert_parallel.py      all_to_all_dispatch(tokens_sorted, send_counts, topo)
 │   │                           all_to_all_combine(expert_out, recv_cnts, send_cnts, topo)
@@ -108,7 +108,7 @@ train.py
 │   │                               — activation tagging: [stage_id, mb_index] header
 │   │
 │   ├── data_parallel.py        apply_fsdp2(model, topology, mixed_precision_dtype)
-│   │                           (expert weights excluded — already EP-sharded)
+│   │                           (expert weights sharded over DP too — ADR-011)
 │   │
 │   ├── moe_layer.py            _SwiGLUExpert(H, F, topology, dtype)
 │   │                           DistributedMoELayer(H, F, E, K, topology, …)
@@ -146,7 +146,7 @@ train.py
 │                               PrometheusExporter / WandBSink
 │
 ├── scripts/
-│   ├── cli.py                  typer CLI: moe train / benchmark / validate / info
+│   ├── cli.py                  typer CLI: python scripts/cli.py train / benchmark / validate / info
 │   ├── validate_config.py      Standalone YAML validator (used by make validate-config)
 │   ├── launch.sh               Multi-node torchrun launcher
 │   └── simulate_node_failure.sh  Manual chaos injection helper

@@ -217,8 +217,8 @@ pytest tests/ \
   --ignore=tests/test_train_step.py \
   -m cpu \
   -k "not (2rank or multiprocess or distributed_invariants)"
-# → 416 passed, 3 skipped, 16 deselected, 1 xfailed
-# The 38 config tests are inside the 416 passed.
+# → 417 passed, 3 skipped, 15 deselected, 1 xfailed
+# The 38 config tests are inside the 417 passed.
 # 3 skipped: Triton GPU path, plus two CUDA-only tests in test_gpu_portability.py (ADR-006).
 # 1 xfailed: documented statistical edge case in test_routing_quality.py, seed=2.
 
@@ -257,7 +257,7 @@ GLOO_SOCKET_IFNAME=lo pytest tests/test_differential.py tests/test_comm_ops.py \
 Per-file counts above are full `pytest --collect-only` totals (including
 2-rank `mp.spawn` tests and GPU-only tests skipped without CUDA) where
 those files were re-counted. The current Tier-0 summary is
-**416 passed, 3 skipped, 16 deselected, 1 xfailed**. That job also ignores
+**417 passed, 3 skipped, 15 deselected, 1 xfailed**. That job also ignores
 `test_differential.py`, `test_comm_ops.py`, `test_grad_sync.py`, and
 `test_train_step.py`. Those four files are the differential job:
 **243 passed**. The 38 config tests are inside the Tier-0 passed count.
@@ -432,7 +432,7 @@ investigation. Two "2-Rank CI Blind Spot" items remain open
 (`test_pipeline_parallel.py`'s pair) — see `roadmap.md`.
 
 **Current push CI (measured on this tree):** Tier-0
-`416 passed, 3 skipped, 16 deselected, 1 xfailed`; differential job
+`417 passed, 3 skipped, 15 deselected, 1 xfailed`; differential job
 `243 passed`. The 38 config tests are inside the Tier-0 count. The GPU,
 Docker, and Chaos jobs are `workflow_dispatch` only and were skipped on
 the latest push. The rows above are the release-by-release history, not

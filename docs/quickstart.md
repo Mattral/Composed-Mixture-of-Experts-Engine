@@ -121,14 +121,14 @@ pytest tests/ \
 Expected for that command:
 
 ```
-416 passed, 3 skipped, 16 deselected, 1 xfailed
+417 passed, 3 skipped, 15 deselected, 1 xfailed
 ```
 
-- **416 passed**, including the 38 config tests
+- **417 passed**, including the 38 config tests
 - **3 skipped**: Triton GPU path (no CUDA in this environment);
   plus two hardware-gated tests in `test_gpu_portability.py` that need a
   real CUDA GPU and 2+ CUDA devices respectively (see ADR-006)
-- **16 deselected** by the `-k` filter (`2rank`, `multiprocess`, `distributed_invariants`)
+- **15 deselected** by the `-k` filter (`2rank`, `multiprocess`, `distributed_invariants`)
 - **1 xfailed**: `test_routing_quality::test_uniform_init_lower_imbalance[2]`
 - The differential job is separate and reports **243 passed**
 - `make test-cpu` also runs the four differential files, so its summary is not the Tier-0 line above

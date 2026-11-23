@@ -1,16 +1,16 @@
 # moe-engine Roadmap
 
-**Last Updated:** July 2026  
-**Version:** v0.3.3  
-**Status:** P0, P1 complete. P2.2 (advanced load balancing) complete. Remaining P2 items require GPU cluster access.
+**Last Updated:** 2026-11-23  
+**Version:** v0.3.3 (pre-release, 2026-11-20)  
+**Status:** P0, P1 and the CPU-doable part of P2.2 are complete. The October 2026 correctness work (M0–M2, ADR-010, ADR-011) is in v0.3.3. Multi-process pipeline parallelism is open. Remaining P2 items require GPU cluster access.
 
 ## Legend
-- ✅ Complete + CI-verified
+- ✅ Complete; where it is tested is in the row or in the README status table
 - ⚠️ Partial / known issue
 - ❌ Not started
 - 🔜 In progress
 
-GPU, Docker, and Chaos jobs are `workflow_dispatch` only and were skipped on the latest push. Push CI is the CPU suite. mypy is `continue-on-error` and reported errors on that run.
+Push CI runs lint, the Tier-0 CPU suite, the multi-process differential suite (CPU/Gloo), the config tests and the CPU benchmark. The GPU, Docker and Chaos B jobs are `workflow_dispatch` only and have no recorded run in this repository's Actions history. mypy is `continue-on-error` and reports type errors.
 
 ---
 
@@ -33,17 +33,17 @@ Key fixes in v0.2.x:
 
 ---
 
-## v0.3 — PP Comms + SP Fusion + Overlap + T4 Validation ✅
+## v0.3 — PP Comms + SP Fusion + Overlap + T4 Validation ⚠️ (multi-process PP open)
 
 | Item | Status | Notes |
 |---|---|---|
-| PP `dist.send`/`recv` inter-stage wiring | ✅ | `run_1f1b_distributed`: real Gloo send/recv; activation tagging; 3-phase 1F1B |
-| PP 2-rank `mp.spawn` tests | ✅ | activation flow + micro-batch count verified |
-| SP `next_weight` all-gather fusion | ✅ | zero collectives (replicated-weight case), genuinely 2-rank verified — see ADR-007. Previously claimed "halves collectives; 2-rank verified"; the 2-rank test had never actually run in CI and the algorithm was wrong (spurious all_reduce). Also fixed in the same pass: `gather_from_sequence_parallel` was broken for any batch size > 1, uncovered while adding this coverage. |
+| PP `dist.send`/`recv` inter-stage wiring | ⚠️ | `run_1f1b_distributed`: Gloo send/recv; activation tagging; 3-phase 1F1B. Written, but does not run correctly across processes (next row) |
+| PP 2-rank `mp.spawn` tests | ❌ | Both fail on Linux (2026-11-23): the last stage runs 0 of the expected micro-batches. Not in any CI job. Open, see "Multi-process tests outside push CI" |
+| SP `next_weight` fusion | ✅ | Zero collectives for a replicated weight (ADR-007, August 2026). The v0.3 description, "halves collectives", was replaced by ADR-007, which removed an incorrect `all_reduce` and fixed `gather_from_sequence_parallel` for batch size > 1. The `*_2rank` tests pass when run manually; no CI job runs them. SP itself is in the push differential job |
 | Comm/compute overlap ratio telemetry | ✅ | `dispatch_ms / expert_compute_ms` in every step record |
 | WandB `WandBSink` + `log_config()` | ✅ | inactive when `WANDB_API_KEY` is absent. A zero-cost claim is not yet validated. |
 | Prometheus `/metrics` (10 gauges) | ✅ | optional, port-configurable |
-| T4 GPU validation | ✅ single-GPU router | 80.1× versus the CPU reference path at N=4096; no GPU baseline comparison yet. Chaos B 10/10 is a manual run (`workflow_dispatch` only, not push CI). |
+| T4 GPU validation | ✅ single-GPU router | 80.1× versus the CPU reference path at N=4096; no GPU baseline comparison yet. Chaos B 10/10 is a recorded manual run. |
 | Triton `K: tl.constexpr` fix (v0.3.2) | ✅ | Bug that prevented all real-GPU runs since v0.1 |
 | Real GPU numbers in all docs | ✅ | All "illustrative" entries replaced with real T4 measurements |
 
@@ -80,7 +80,7 @@ This release addressed all P0 and P1 items from MOE instructions v2.1.
 | `test_config.py` | ✅ | 38 tests in the current file; all 38 run inside the Tier-0 job |
 | `test_mock_dist.py` / `mock_dist.py` | ✅ | 17 tests; `MockTopology`, `MockDistEnv` |
 | `test_properties.py` | ✅ | 9 property-based tests (Hypothesis); token conservation, expert ownership, config invariants |
-| **Push CI pytest** | ✅ | Tier-0: 416 passed, 3 skipped, 16 deselected, 1 xfailed. Differential: 243 passed. The 38 config tests are inside the Tier-0 count. |
+| **Push CI pytest** | ✅ | Tier-0 and config jobs. Current counts (2026-11-23): Tier-0 417 passed, 3 skipped, 15 deselected, 1 xfailed; differential job 243 passed. The 38 config tests are inside the Tier-0 count. |
 | Real GPU data in all docs | ✅ | Committed T4 file is `moe-engine/benchmarks/gpu_results_t4.json` → `RESULTS.md`, `BENCHMARKS.md` |
 
 ### P0.3 — Basic DX ✅
@@ -88,7 +88,7 @@ This release addressed all P0 and P1 items from MOE instructions v2.1.
 | Item | Status | Detail |
 |---|---|---|
 | `Makefile` | ✅ | `test-cpu`, `test-gpu`, `smoke`, `benchmark`, `benchmark-gpu`, `validate-config`, `lint`, `chaos-a`, `chaos-b`, `clean` |
-| `scripts/cli.py` (Typer) | ✅ | `moe train / benchmark / validate / info` |
+| `scripts/cli.py` (Typer) | ✅ | `train / benchmark / validate / info`, run as `python scripts/cli.py ...`; no `moe` console script is declared |
 | `scripts/validate_config.py` | ✅ | Coloured output, exit code 1 on failure |
 | Config error messages | ✅ | Field-level path + actionable description |
 
@@ -107,14 +107,14 @@ This release addressed all P0 and P1 items from MOE instructions v2.1.
 |---|---|---|
 | Mocked collective backends | ✅ | `MockTopology` + `MockDistEnv` threading simulation |
 | Property-based tests (Hypothesis) | ✅ | 9 tests × 50 examples each |
-| CI updated to `-m cpu` | ✅ | `.github/workflows/ci.yml` with 6 jobs |
+| CI updated to `-m cpu` | ✅ | `.github/workflows/ci.yml` with 6 jobs at v0.3.2; 8 today, including `test-differential` (October 2026) |
 | Limited Hardware Guide | ✅ | `docs/LIMITED_HARDWARE_GUIDE.md` (220 lines) |
 
 ### P1.3 — Documentation ✅
 
 | Item | Status | Detail |
 |---|---|---|
-| ADRs | ✅ | ADR-001 (Triton), ADR-002 (checkpointing), ADR-003 (Pydantic), ADR-004 (4D parallelism) |
+| ADRs | ✅ | ADR-001 (Triton), ADR-002 (checkpointing), ADR-003 (Pydantic), ADR-004 (4D parallelism). ADR-005 to ADR-011 followed; see `docs/adr/README.md` |
 | Sequence diagrams | ✅ | 4 Mermaid diagrams in `docs/ARCHITECTURE.md` |
 | `docs/benchmarks.md` | ✅ | 517 lines; full MFU formula, routing metrics, collective latency |
 | `docs/testing.md` | ✅ | Four-tier model, markers, fixture reference |
@@ -131,10 +131,12 @@ This release addressed all P0 and P1 items from MOE instructions v2.1.
 
 ---
 
-## v0.3.3 — CI Hardening + Advanced Load Balancing ✅
+## v0.3.3 — CI Hardening, Load Balancing, Correctness Fixes ✅
 
-This release fixed real CI failures surfaced by GitHub Actions and closed
-the remaining CPU-doable P2.2 gap (advanced load balancing).
+Released 2026-11-20 as a pre-release. It covers everything since v0.3.2:
+the CI fixes and P2.2 load balancing below, the August 2026 TP/SP/dispatch
+fixes (ADR-007 to ADR-009), and the October 2026 correctness work
+(M0–M2, ADR-010 and ADR-011).
 
 ### CI fixes (root-caused, not patched)
 
@@ -152,25 +154,58 @@ the remaining CPU-doable P2.2 gap (advanced load balancing).
 
 | Item | Status | Detail |
 |---|---|---|
-| Expert capacity dropping | ✅ | `compute_capacity_drop_mask()` + `_cumcount()` in `moe_layer.py` — Switch Transformer / GShard-style first-come-first-served capacity enforcement; 25 dedicated tests |
-| `DistributedMoELayer.capacity_dropping` | ✅ | Opt-in flag, default `False` (zero behavior change unless explicitly enabled) |
+| Expert capacity dropping | ✅ | `moe_layer.py`. Since M2 (F12): per expert across top-k slots, slot-major priority, dropped before dispatch (ADR-011). 35 tests in `test_capacity_dropping.py` (Tier-0) plus EP cases in the differential job |
+| `DistributedMoELayer.capacity_dropping` | ✅ | Opt-in flag, default `False`. `cfg.model.capacity_dropping` reaches every layer since M2 |
 | `dropped_token_fraction` telemetry | ✅ | Wired through `StepRecord`, Prometheus gauge, `train.py` |
 | `configs/large_scale.yaml` | ✅ | E=256, top_k=8 fine-grained MoE config exercising capacity dropping + z-loss at scale; 5 dedicated config tests |
-| Aux z-loss weighting | ✅ (from v0.3.2) | `z_loss_weight` config field, wired into training loss |
+| Router auxiliary losses | ✅ (M2) | Before M2 the z-loss was a detached float read from block 0 and did not train the router (F5). It is now a tensor-valued z-loss plus a Switch load-balancing loss from every MoE layer (ADR-011); `test_router_losses.py` and differential `aux-*` layouts |
 
 ---
 
-## v0.4 — Scale Hardening (Planned, requires cluster)
+### Correctness audit fixes — M0, M1, M2 (October 2026) ✅
+
+An October 2026 audit compared the distributed paths against a dense
+single-device reference with distinct per-rank weights. Before these fixes,
+gradients were wrong whenever any parallel dimension was > 1. Details are in
+[ADR-010](docs/adr/ADR-010-backward-correctness-and-replicated-gradients.md),
+[ADR-011](docs/adr/ADR-011-layout-independent-global-mean-objective.md) and
+[`CHANGELOG.md`](CHANGELOG.md). All verification is CPU/Gloo.
+
+| Item | Status | Evidence |
+|---|---|---|
+| M0 — differential test harness and `test-differential` CI job | ✅ | `test_differential.py`, `test_comm_ops.py`, `test_grad_sync.py`, `test_train_step.py`: 243 passed (push CI and local, 2026-11-23) |
+| F1–F3 — autograd-aware EP, TP and SP collectives (`comm_ops.py`) | ✅ | Differential job; finite-difference VJP checks in `test_comm_ops.py` |
+| F4 — `E % ep_size != 0` without crash or hang | ✅ | Differential job (E=5, E=10 at ep=2 and ep=4; invalid-count cases) |
+| F21, F14-init — replicated-gradient sync, init broadcast | ✅ | `test_grad_sync.py` |
+| F20 — no import-time `GLOO_SOCKET_IFNAME` | ✅ | `test_elastic_v02.py` (Tier-0) |
+| F22 — global-mean objective over the global batch | ✅ | `test_layout_*` across single, dp2, ep2, sp2, dp2×ep2, dp2×sp2, ep2×sp2 |
+| F24, F25, F26 — FSDP2 fixes at dp = 2 | ✅ | `test_grad_sync.py`, dp2 layouts in the differential job |
+| F5 — router auxiliary losses | ✅ | `test_router_losses.py` (Tier-0), `aux-*` layouts |
+| F12 — capacity dropping before dispatch | ✅ | `test_capacity_dropping.py` (Tier-0), EP capacity cases |
+| F14 — global gradient-norm clipping; experts sharded over DP | ✅ | `clip-*` layouts; dp2×ep2 three-step replica test |
+| F18 — seeded, TP-consistent training batches | ✅ | `test_train_step.py` (tp = 2 step vs dense reference) |
+| F27 — remove the unparsable `signal-correctness.yml` | ✅ | Workflow removed |
+| F16 — multi-process pipeline parallelism | ❌ Open | See "Multi-process tests outside push CI" |
+
+Not verified by any of the above: GPU, NCCL, the CUDA-stream overlap path,
+dp > 2, multi-node.
+
+---
+
+## v0.4 — Scale Hardening (Planned)
 
 | Item | Priority | Status |
 |---|---|---|
-| **2-rank/multiprocess tests are excluded from every CI job — 3 of 5 pre-existing failures fixed (ADR-008, ADR-009), 2 remain (pipeline-parallel)** | **P0** | **⚠️ See "2-Rank CI Blind Spot" below** |
+| Multi-process pipeline parallelism (`run_1f1b_distributed`, F16) | **P0** | ❌ Both 2-process tests fail; see below |
+| CI job for the multi-process tests the Tier-0 name filter deselects | **P0** | ❌ 15 tests, run manually only (13 pass, 2 fail); see below |
 | Fix Chaos Scenario A (Gloo → NCCL in chaos harness) | P0 | ❌ Needs GPU |
-| Real 8-GPU+ benchmark data + MFU validation | P0 | ⚠️ Two single-GPU architectures validated (T4 June 2026, A100 July 2026 — see ADR-005); real multi-GPU/multi-node data still ❌, needs 2+ GPUs in one job |
+| Real 8-GPU+ benchmark data + MFU validation | P0 | ⚠️ Two single-GPU architectures validated (T4 June 2026, A100 July 2026 — see ADR-005); multi-GPU and multi-node data ❌, needs 2+ GPUs in one job |
+| GPU/NCCL run of the EP/TP/SP/FSDP2 paths and the CUDA-stream overlap | P0 | ❌ Needs GPU |
 | Nsight/CUPTI roofline integration | P1 | ❌ Needs GPU |
 | Expert capacity overflow **re-routing** (vs. dropping) | P1 | ❌ Dropping done (v0.3.3); re-routing to next-best expert needs real EP bandwidth data to tune |
 | Non-divisible sequence length in SP | P1 | ✅ ADR-007 |
-| Pipeline PP → end-to-end chaos scenarios | P1 | ❌ |
+| Pipeline PP → end-to-end chaos scenarios | P1 | ❌ Depends on multi-process PP |
+| Console-script entry point for the Typer CLI (`moe`) | P2 | ❌ `pyproject.toml` declares none; use `python scripts/cli.py` |
 | Direct CUDA-to-NVMe checkpoint streaming | P2 | ❌ |
 | Kubernetes operator (auto-scaling) | P2 | ❌ |
 | HuggingFace integration examples | P2 | ❌ |
@@ -178,79 +213,107 @@ the remaining CPU-doable P2.2 gap (advanced load balancing).
 
 ---
 
-### 2-Rank CI Blind Spot (found August 2026, see ADR-007, ADR-008, ADR-009)
+### Multi-process tests outside push CI (updated 2026-11-23)
 
-The Tier-0 job filters `2rank or multiprocess or distributed_invariants`
-out of its pytest invocation (16 deselected on the current tree). The
-differential job does not use that filter. It runs `tests/test_differential.py`,
-`tests/test_comm_ops.py`, `tests/test_grad_sync.py`, and
-`tests/test_train_step.py` (243 passed) and does not run the named tests
-below. No push job runs those named tests. Fixing the Sequence Parallelism
-bugs in ADR-007 required running them directly, which surfaced these
-failures. Three of five are now fixed (ADR-008, ADR-009); two remain open:
+The Tier-0 job deselects tests whose names match
+`2rank or multiprocess or distributed_invariants` (15 on the current tree).
+The differential job runs other multi-process tests
+(`test_differential.py`, `test_comm_ops.py`, `test_grad_sync.py`,
+`test_train_step.py`) and does not run these 15. No CI job runs them.
+Run them with:
 
-| Test | File | Symptom | Status |
+```bash
+cd moe-engine
+GLOO_SOCKET_IFNAME=lo pytest tests/ \
+  --ignore=tests/test_chaos.py --ignore=tests/test_smoke_e2e.py \
+  --ignore=tests/test_differential.py --ignore=tests/test_comm_ops.py \
+  --ignore=tests/test_grad_sync.py --ignore=tests/test_train_step.py \
+  -k "2rank or multiprocess or distributed_invariants" -v
+```
+
+Result on 2026-11-23 (WSL Ubuntu, Python 3.12, CPU torch 2.14.1): 13 passed,
+2 failed.
+
+| Test | File | Status | History |
 |---|---|---|---|
-| `test_column_row_parallel_2rank_numerically_correct` | `test_tensor_parallel.py` | `ColumnParallelLinear`'s `all_gather_into_tensor` concatenated along the wrong dimension, and had no way to skip gathering before feeding a `RowParallelLinear` — the latter also broke `_SwiGLUExpert`, the real expert FFN, at any `tp_size>1` | ✅ Fixed, ADR-008 |
-| `test_pp_multiprocess_2stage_activation_flow` | `test_pipeline_parallel.py` | Worker crash. Observed symptom: an IPv6/IPv4 `localhost` socket addressing error (`Address family not supported by protocol`) — looks different in kind from anything found in ADR-007/008/009, not assumed to share a root cause | ❌ Open |
-| `test_pp_multiprocess_correct_micro_batch_count` | `test_pipeline_parallel.py` | Expected 6 micro-batch outputs, got 0 | ❌ Open |
-| `test_token_conservation_distributed` | `test_distributed_invariants.py` | `RuntimeError: Split sizes doesn't match total dim 0 size` — traced to `DistributedMoELayer`'s EP dispatch: `send_counts` overcounted whenever a token's `top_k` experts spanned multiple EP ranks, dispatch items weren't grouped by their actual destination, and local expert selection assumed perfectly balanced routing (this last part reproduces even at `ep_size=1`, no distributed setup at all — the most severe of the three) | ✅ Fixed, ADR-009 |
-| `test_distributed_backward_no_nan` | `test_distributed_invariants.py` | Same root cause as above | ✅ Fixed, ADR-009 |
+| `test_column_row_parallel_2rank_numerically_correct` | `test_tensor_parallel.py` | ✅ Passes | Fixed in ADR-008 |
+| `test_column_parallel_gather_output_true_2rank`, `..._false_2rank`, `..._false_bias_true_raises_2rank` | `test_tensor_parallel.py` | ✅ Pass | Added in ADR-008 |
+| `test_swiglu_expert_2rank_numerically_correct` | `test_tensor_parallel.py` | ✅ Passes | Added in ADR-008 |
+| `test_sp_fused_2rank_numerically_correct`, `test_sp_fused_2rank_no_collective_used` | `test_sequence_parallel_v03.py` | ✅ Pass | Fixed / added in ADR-007 |
+| `test_sp_nondivisible_2rank_round_trip`, `test_sp_fewer_tokens_than_ranks_2rank`, `test_sp_gather_2rank_batch_dimension_not_corrupted` | `test_sequence_parallel_v03.py` | ✅ Pass | Added in ADR-007 |
+| `test_moe_layer_2rank_matches_per_token_reference` | `test_moe_layer.py` | ✅ Passes | Added in ADR-009 |
+| `test_token_conservation_distributed`, `test_distributed_backward_no_nan` | `test_distributed_invariants.py` | ✅ Pass | Fixed in ADR-009 |
+| `test_pp_multiprocess_2stage_activation_flow` | `test_pipeline_parallel.py` | ❌ Fails | Rank 0: Gloo `Connection closed by peer` after rank 1 exits early |
+| `test_pp_multiprocess_correct_micro_batch_count` | `test_pipeline_parallel.py` | ❌ Fails | `assert 0 == 6`: the last stage produces no outputs |
 
-ADR-004's claim of *"✅ 2-rank PP mp.spawn verified"* is not currently true
-of the code as it stands (the TP claim, also false, is now corrected by
-ADR-008). This table is deliberately just the error signatures for the two
-still-open items, not root-cause fixes — the pipeline-parallel pair is
-plausibly its own investigation, comparable in scope to ADR-007/008/009.
-**Recommended next priority.**
+The two pipeline failures share one cause. `run_1f1b_distributed` takes the
+micro-batch count from `len(micro_batches)`, and non-first stages receive an
+empty list, so the last stage schedules zero micro-batches and exits while
+stage 0 is still sending. ADR-010 reports that these tests hang on Windows;
+that has not been re-checked.
+
+Until 2026-11-23 a sixteenth test, `test_mock_dist.py::test_all_to_all_2ranks`,
+was also deselected by the name filter although it runs in a single process
+(threads over `MockDistEnv`). It is now `test_all_to_all_two_threads` and runs
+in Tier-0.
+
+ADR-004's table lists "2-rank PP mp.spawn verified". ADRs are not edited;
+this section is the current status.
 
 ---
 
-## Honest Status Summary (July 2026)
+## Status Summary (2026-11-23)
 
-**Fully proven at single-rank / CPU:**
-- All routing invariants (conservation, NaN, bounds, normalisation)
-- All parallelism scheduling logic (1F1B, TP/EP/PP/SP)
-- Config validation, async checkpointing, telemetry, fault state machine
-- Expert capacity dropping (`_cumcount`, `compute_capacity_drop_mask`) — 25 tests
-- Push CI pytest: Tier-0 `416 passed, 3 skipped, 16 deselected, 1 xfailed` (includes 38 config tests); differential job `243 passed`
-- ruff check and `ruff format --check` passed on the latest push (74 files already formatted). mypy is `continue-on-error` and reported errors on that run; the lint job still succeeded
+**Push CI (CPU), every push and PR:**
+- Routing invariants (conservation, NaN, bounds, normalisation), router
+  numerics vs an fp64 reference, single-process 1F1B scheduling, config
+  validation, checkpointing (local and `file://` tiers), telemetry, fault
+  state machine, capacity dropping, router auxiliary losses
+- Tier-0: `417 passed, 3 skipped, 15 deselected, 1 xfailed` (includes the
+  38 config tests)
+- Differential job (multi-process, Gloo): `243 passed`. EP, TP, SP, FSDP2 at
+  dp = 2 and their combinations at 2 and 4 processes match a dense
+  single-device reference for outputs, every gradient and post-step
+  parameters
+- ruff check and `ruff format --check` pass. mypy is `continue-on-error` and
+  reports type errors
 
-**Proven at 2-rank `mp.spawn` on CPU:**
-- TP numerical correctness (Column/RowParallel)
-- SP fused all-gather
-- PP inter-stage `dist.send`/`recv` with activation tagging
+**Manual runs on CPU (not in any CI job):**
+- 13 of the 15 deselected multi-process tests pass; the two
+  pipeline-parallel tests fail (see above)
+- `test_smoke_e2e.py` (3 passed), including the S3 tier under moto
+- Chaos Scenario B: recorded 10/10 (`RESULTS.md`), and 10/10 again on
+  2026-11-23 on a laptop CPU; the `chaos-b` job has no recorded run
+- Chaos Scenario A: recorded ~17/20, failures attributed to a Gloo race in
+  containers
 
-**Proven on single T4 GPU** (June 2026, Google Colab):
+**Single T4 GPU** (June 2026, Google Colab):
 - Triton kernel compiles and runs at H ∈ {256, 512, 1024, 2048}, E ∈ {16, 32, 64}
-- 80.1× versus the CPU reference path at N=4096; no GPU baseline comparison yet. The T4 host CPU baseline in that table is 0.056 M tok/s.
+- 80.1× versus the CPU reference path at N=4096; no GPU baseline comparison
+  yet. The T4 host CPU baseline in that table is 0.056 M tok/s.
 - Token conservation: `violations=0/100` on CUDA
-- Chaos Scenario B: recorded 10/10. The Chaos job is `workflow_dispatch` only and does not run on push CI.
 
-**Proven on single A100-SXM4-80GB GPU** (July 2026, Lightning AI Studio,
-`torch==2.8.0+cu128` — see ADR-005 for full writeup):
-- Same unmodified Triton kernel source runs correctly on a second, newer
-  GPU generation (Ampere, `sm_80`) after three fixes: a `MIN_TRITON_DIM=16`
-  dimension guard, explicit device placement in the fp64 reference path,
-  and a single-source-of-truth fix for `used_triton` telemetry (previously
-  capable of misreporting which path actually ran)
-- 56.0× versus the CPU reference path at N=4096 (router forward-only); no GPU baseline comparison yet. The A100 table's CPU baseline is 0.183 M tok/s, which differs from the T4 host's 0.056 M tok/s.
-  38.4× at the same config for forward+backward. These cells are the rounded `tokens_per_sec` values in `moe-engine/benchmarks/gpu_results_a100.json`. The smaller forward rows are 1.80×, 5.65×, and 11.80×.
-- Router throughput measured across 4 configs from N=512 to N=4096 (see
-  `benchmarks/gpu_results_a100.json`, `RESULTS.md`)
+**Single A100-SXM4-80GB GPU** (July 2026, Lightning AI Studio,
+`torch==2.8.0+cu128`; ADR-005):
+- The same Triton kernel source runs on Ampere (`sm_80`) after three fixes:
+  a `MIN_TRITON_DIM=16` dimension guard, explicit device placement in the
+  fp64 reference path, and a single source of truth for `used_triton`
+  telemetry
+- 56.0× versus the CPU reference path at N=4096 (router forward-only); no GPU
+  baseline comparison yet. The A100 table's CPU baseline is 0.183 M tok/s.
+  38.4× at the same config for forward+backward. The smaller forward rows are
+  1.80×, 5.65× and 11.80×. Cells are the rounded `tokens_per_sec` values in
+  `moe-engine/benchmarks/gpu_results_a100.json`.
 
-**NOT yet proven:**
-- End-to-end MFU at 8+ GPUs — needs a genuine multi-process/multi-GPU
-  notebook (single-GPU notebooks, T4 and A100 alike, exercise exactly one
-  GPU each regardless of a config's requested topology)
-- Scenario A recovers in ~17/20 runs (failures attributed to a Gloo race in containers). The chaos harness has not been run on NCCL.
+**Not yet verified:**
+- Multi-process pipeline parallelism
+- Anything on NCCL or with more than one GPU, including the CUDA-stream
+  compute/communication overlap
+- End-to-end MFU at 8+ GPUs. The single-GPU notebooks (T4 and A100) exercise
+  one GPU each, whatever topology a config requests
+- Scenario A on NCCL
 - Production throughput at H=4096 with EP=8, DP=8
-- E=256 fine-grained MoE at real hardware scale (config validated, wiring
-  tested at toy dimensions; full-scale GPU throughput not yet measured —
-  this is specifically what Section 14 of the A100 notebook was for)
-- Real EP all-to-all bandwidth (needed before capacity **re-routing**, as
-  opposed to the dropping already shipped in v0.3.3, can be tuned
-  sensibly)
-- Whether H100 (Hopper, `sm_90`) surfaces a fourth architecture-specific
-  issue in the same family as the first three, or runs clean — genuinely
-  unknown, empty row in ADR-005's support matrix
+- E=256 fine-grained MoE at hardware scale (config validated, wiring tested at
+  toy dimensions)
+- Real EP all-to-all bandwidth (needed to tune capacity re-routing)
+- H100 (Hopper, `sm_90`): no run yet; empty row in ADR-005's support matrix

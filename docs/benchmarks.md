@@ -100,11 +100,11 @@ The profile JSON contains:
 ### CLI shortcut
 
 ```bash
-# Via the typer CLI (installed with pip install -e ".[dev]")
-moe benchmark --cuda --json benchmarks/gpu_results.json
+# Via the typer CLI (no `moe` console script is installed; run the module file)
+python scripts/cli.py benchmark --cuda --json benchmarks/gpu_results.json
 
 # Validate config before benchmarking
-moe validate configs/default.yaml
+python scripts/cli.py validate configs/default.yaml
 ```
 
 ---
@@ -354,7 +354,7 @@ torch version, CUDA version, Triton version
 ```
 
 The `--profile` flag captures most of this automatically in the JSON output.
-`moe info` prints the software versions.
+`python scripts/cli.py info` prints the software versions.
 
 ### 4. Run for at least 100 steps after warmup
 

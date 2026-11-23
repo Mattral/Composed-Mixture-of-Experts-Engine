@@ -147,7 +147,7 @@ python train.py --config configs/smoke.yaml --smoke
 ## Running the Full Test Suite
 
 ```bash
-# CI Tier-0 job: 416 passed, 3 skipped, 16 deselected, 1 xfailed
+# CI Tier-0 job: 417 passed, 3 skipped, 15 deselected, 1 xfailed
 # (includes 38 config tests). Differential job: 243 passed.
 # `make test-cpu` also runs the differential files.
 make test-cpu
@@ -161,7 +161,7 @@ pytest tests/test_config.py -v
 # Property-based invariant tests (Hypothesis, 9 tests × 50 examples):
 pytest tests/test_properties.py -v
 
-# Numerics-only (Triton vs fp64 reference, 30 configs):
+# Numerics-only (Triton vs fp64 reference, 31 cases):
 python tests/run_numerics_tests.py
 
 # Reproduce any number in RESULTS.md or BENCHMARKS.md:

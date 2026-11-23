@@ -60,7 +60,7 @@ make format                       # ruff format auto-fix
 |---------|:-----------------:|-----------|
 | Pydantic MoEConfig system | ✅ 38 tests | `test_config.py` |
 | Router invariants (conservation, NaN, bounds) | ✅ 7 tests | `test_kernels.py` |
-| Numerical correctness vs fp64 ref | ✅ 30 configs | `test_kernels_numerics.py` |
+| Numerical correctness vs fp64 ref | ✅ 31 cases | `test_kernels_numerics.py` |
 | TP/PP/SP scheduling logic | ✅ 43 tests | `test_tensor_parallel.py`, `test_pipeline_parallel.py`, `test_sequence_parallel_v03.py` |
 | Async checkpointing (NVMe + S3 mock) | ✅ 17 tests | `test_elastic.py`, `test_elastic_v02.py` |
 | MFU accounting math | ✅ 21 tests | `test_mfu.py`, `test_mfu_v02.py` |
