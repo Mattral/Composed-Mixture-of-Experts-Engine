@@ -1,6 +1,6 @@
 # Deployment Guide
 
-**Version:** v0.3.3  
+**Version:** v0.3.4  
 **Last updated:** July 2026
 
 ---
@@ -136,13 +136,13 @@ torchrun \
 
 ```bash
 # GPU image (default target: runtime)
-docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.3 \
+docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.4 \
   --build-arg PYTORCH_VERSION=2.6.0 \
   --build-arg CUDA_VERSION=12.6 \
   moe-engine/
 
 # CPU-only image (for CI smoke-testing without a GPU image pull)
-docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.3-cpu \
+docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.4-cpu \
   --target runtime-cpu \
   moe-engine/
 ```

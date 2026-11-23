@@ -11,10 +11,12 @@
 [![GPU Validated](https://img.shields.io/badge/GPU-single--GPU%20router%20%28T4%2C%20A100%29-blue)](docs/adr/ADR-005-gpu-architecture-portability.md)
 [![Chaos B](https://img.shields.io/badge/Chaos%20B-recorded%2010%2F10%20%28manual%20run%29-yellow)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/blob/main/RESULTS.md#fault-tolerance--chaos-test-results)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/pulls)
-[![Version](https://img.shields.io/badge/version-v0.3.3-orange)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/releases)
+[![Version](https://img.shields.io/badge/version-v0.3.4-orange)](https://github.com/Mattral/Composed-Mixture-of-Experts-Engine/releases)
 
 </div>
 
+> **v0.3.4 (2026-11-24).** Multi-process pipeline parallelism works: 2- and 3-stage runs match a dense reference on CPU/Gloo (F16 fix; see [`CHANGELOG.md`](CHANGELOG.md)).
+>
 > **v0.3.3 (pre-release, 2026-11-20).** Includes the October 2026 correctness work: autograd-aware EP, TP and SP collectives, replicated-gradient sync, a layout-independent global-mean objective, router auxiliary losses, capacity dropping before dispatch, and global gradient-norm clipping ([ADR-010](docs/adr/ADR-010-backward-correctness-and-replicated-gradients.md), [ADR-011](docs/adr/ADR-011-layout-independent-global-mean-objective.md)). Each is checked against a dense single-device reference on CPU with Gloo. See [`CHANGELOG.md`](CHANGELOG.md).
 
 ---
@@ -194,7 +196,7 @@ See **[`RESULTS.md`](RESULTS.md)** for every real number with exact reproduction
 
 ## What is Actually Built
 
-Status as of 2026-11-23 (main after v0.3.3, CPU torch 2.14.1). ✅ means a test or recorded run shows it, and the Evidence column says which. "Push CI" is the `test-cpu` (Tier-0), `test-differential`, `test-config` and `benchmark` jobs in `.github/workflows/ci.yml`. The `docker`, `test-gpu` and `chaos-b` jobs are `workflow_dispatch` only and have no recorded run in this repository's Actions history. "Manual" means a run outside CI, named in the row.
+Status as of 2026-11-24 (v0.3.4, CPU torch 2.14.1). ✅ means a test or recorded run shows it, and the Evidence column says which. "Push CI" is the `test-cpu` (Tier-0), `test-differential`, `test-config` and `benchmark` jobs in `.github/workflows/ci.yml`. The `docker`, `test-gpu` and `chaos-b` jobs are `workflow_dispatch` only and have no recorded run in this repository's Actions history. "Manual" means a run outside CI, named in the row.
 
 | Component | Status | Evidence | Detail |
 |---|---|---|---|
@@ -212,7 +214,7 @@ Status as of 2026-11-23 (main after v0.3.3, CPU torch 2.14.1). ✅ means a test 
 | **Global-mean objective + gradient clipping** | ✅ CPU/Gloo | Push CI: `test_differential.py` (`test_layout_*`, `clip-*`, 7 layouts), `test_train_step.py` | Mean over the global batch's loss-bearing tokens; one global grad norm over DP, EP and TP shards (ADR-011, F22, F14). |
 | **Capacity dropping** | ✅ | Push CI: `test_capacity_dropping.py` (Tier-0), EP capacity cases (differential) | Per expert across top-k slots, slot-major, dropped before dispatch (ADR-011, F12). Opt-in via `capacity_dropping`. |
 | **Pipeline Parallelism — scheduling** | ✅ single process | Push CI: `test_pipeline_parallel.py` (25 single-process cases) | `PipelineStage`, `run_1f1b` warmup / steady / cooldown phases. |
-| **Pipeline Parallelism — multi-process** | ✅ CPU/Gloo, 2 and 3 stages | Manual, 2026-11-23, Linux: 4 `test_pp_multiprocess_*` tests pass (5 repeats). No CI job runs them | `run_1f1b_distributed` over `dist.send/recv`. Outputs and every stage's weight gradients match a dense reference, including a stage that changes the activation width. Fixed after v0.3.3 (see CHANGELOG). Not run on Windows since ADR-010 reported a hang there. |
+| **Pipeline Parallelism — multi-process** | ✅ CPU/Gloo, 2 and 3 stages | Manual, 2026-11-23, Linux: 4 `test_pp_multiprocess_*` tests pass (5 repeats). No CI job runs them | `run_1f1b_distributed` over `dist.send/recv`. Outputs and every stage's weight gradients match a dense reference, including a stage that changes the activation width. Fixed in v0.3.4 (see CHANGELOG). Not run on Windows since ADR-010 reported a hang there. |
 | **MFU accounting** | ✅ | Push CI: `test_mfu.py`, `test_mfu_v02.py` | MoE-sparse formula `(K/E)×P_expert`; streaming `MFUAccountant`. |
 | **Pydantic `MoEConfig`** | ✅ | Push CI: `test_config.py` (38, in Tier-0 and the config job) | Validated hierarchy; env-var overrides; field-level errors. |
 | **Async two-tier checkpointing** | ✅ CPU | Push CI: `test_elastic.py`, `test_elastic_v02.py`. Manual: `test_smoke_e2e.py` (S3 tier under moto) | Local tier (chunked writes, atomic rename) and `file://` remote tier in push CI. The S3/MinIO tier is tested only in `test_smoke_e2e.py`, which no CI job runs. |
@@ -540,7 +542,7 @@ Open in Colab with a T4 to reproduce:
 - `scripts/cli.py`: Typer CLI (`train`, `benchmark`, `validate`, `info`)
 - `notebooks/moe_engine_v032_T4_validation.ipynb`: complete 13-section validation notebook
 
-See `benchmarks/BENCHMARKS.md` for the v0.3.2 patch notes and [`CHANGELOG.md`](CHANGELOG.md) for v0.3.3.
+See `benchmarks/BENCHMARKS.md` for the v0.3.2 patch notes and [`CHANGELOG.md`](CHANGELOG.md) for v0.3.3 and v0.3.4.
 
 ---
 
@@ -598,4 +600,4 @@ Contributions are welcome. Please open an issue first for larger changes so we c
 
 ---
 
-*Status as of 2026-11-23 (v0.3.3). Router kernel validated on single GPUs (T4, A100). EP, TP, SP and FSDP2 at dp=2 tested on CPU/Gloo at 2 and 4 processes in push CI. Pipeline parallelism at 2 and 3 processes matches a dense reference in tests run outside CI. Multi-GPU, NCCL and multi-node runs are open. Chaos results (Scenario A ~17/20, Scenario B 10/10) are recorded manual runs.*
+*Status as of 2026-11-24 (v0.3.4). Router kernel validated on single GPUs (T4, A100). EP, TP, SP and FSDP2 at dp=2 tested on CPU/Gloo at 2 and 4 processes in push CI. Pipeline parallelism at 2 and 3 processes matches a dense reference in tests run outside CI. Multi-GPU, NCCL and multi-node runs are open. Chaos results (Scenario A ~17/20, Scenario B 10/10) are recorded manual runs.*

@@ -1,6 +1,6 @@
 # Contributing to moe-engine
 
-**Version:** v0.3.3  
+**Version:** v0.3.4  
 **Last updated:** July 2026
 
 moe-engine is a research-grade runtime for Mixture-of-Experts training.

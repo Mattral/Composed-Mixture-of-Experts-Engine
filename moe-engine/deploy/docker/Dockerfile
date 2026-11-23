@@ -1,5 +1,5 @@
 # ============================================================
-# moe-engine — multi-stage Docker image  (v0.3.3)
+# moe-engine — multi-stage Docker image  (v0.3.4)
 # ============================================================
 #
 # Tag conventions on Docker Hub (pytorch/pytorch):
@@ -17,21 +17,21 @@
 # runs fine on a driver supporting CUDA 12.x.
 #
 # Build (GPU, default):
-#   docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.3 \
+#   docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.4 \
 #       --build-arg PYTORCH_VERSION=2.6.0 \
 #       --build-arg CUDA_VERSION=12.6 .
 #
 # Build (CPU-only, for CI lint/test without GPU):
-#   docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.3-cpu \
+#   docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.4-cpu \
 #       --target runtime-cpu \
 #       --build-arg USE_GPU=0 .
 #
 # Run single-GPU smoke test:
-#   docker run --rm --gpus all moe-engine:v0.3.3 \
+#   docker run --rm --gpus all moe-engine:v0.3.4 \
 #       python train.py --config configs/smoke.yaml --smoke
 #
 # Run 8-GPU torchrun:
-#   docker run --rm --gpus all --ipc=host moe-engine:v0.3.3 \
+#   docker run --rm --gpus all --ipc=host moe-engine:v0.3.4 \
 #       torchrun --standalone --nproc_per_node=8 \
 #       train.py --config configs/default.yaml
 # ============================================================

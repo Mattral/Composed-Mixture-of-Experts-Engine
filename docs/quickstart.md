@@ -1,6 +1,6 @@
 # Quickstart
 
-**Version:** v0.3.3  
+**Version:** v0.3.4  
 **Last updated:** July 2026
 
 Get from zero to a running MoE training step in under 5 minutes — no GPU required.

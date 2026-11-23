@@ -1,6 +1,6 @@
 # Philosophy
 
-**Version:** v0.3.3  
+**Version:** v0.3.4  
 **Last updated:** July 2026
 
 moe-engine is built around a single constraint: **at 10K+ GPUs, nodes die

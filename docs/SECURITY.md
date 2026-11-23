@@ -1,6 +1,6 @@
 # Security and Secrets
 
-**Version:** v0.3.3  
+**Version:** v0.3.4  
 **Last updated:** July 2026
 
 This document describes the security boundaries of moe-engine and the
@@ -86,7 +86,7 @@ Every shard write produces a `.meta.json` file. As of schema version 2
   "rank": 0,
   "hostname": "gpu-node-07.internal",
   "ts": 1748901234.56,
-  "moe_engine_version": "0.3.3",
+  "moe_engine_version": "0.3.4",
   "torch_version": "2.6.0"
 }
 ```
@@ -212,7 +212,7 @@ The multi-stage `Dockerfile` (`deploy/docker/Dockerfile`, 3 stages —
 For hardened deployments, extend the Dockerfile:
 
 ```dockerfile
-FROM moe-engine:v0.3.3
+FROM moe-engine:v0.3.4
 RUN useradd -m -u 1000 trainer
 USER trainer
 ```

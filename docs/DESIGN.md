@@ -1,6 +1,6 @@
 # Design Rationale and Trade-offs
 
-**Version:** v0.3.3  
+**Version:** v0.3.4  
 **Last updated:** July 2026
 
 This document explains *why* each major design choice was made and what

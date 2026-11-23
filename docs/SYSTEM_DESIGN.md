@@ -1,6 +1,6 @@
 # System Design
 
-**Version:** v0.3.3
+**Version:** v0.3.4
 **Last updated:** July 2026
 
 This document describes the runtime system as it exists in the codebase.
@@ -468,7 +468,7 @@ Verify with the CI Tier-0 invocation: `pytest tests/ -m cpu -k "not (2rank or mu
 
 ---
 
-## Known Limitations (v0.3.3)
+## Known Limitations (v0.3.4)
 
 | Limitation | Root Cause | Planned Fix |
 |---|---|---|

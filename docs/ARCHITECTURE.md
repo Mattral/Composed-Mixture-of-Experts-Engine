@@ -1,6 +1,6 @@
 # Architecture Overview
 
-**Version:** v0.3.3  
+**Version:** v0.3.4  
 **Last updated:** July 2026
 
 ---

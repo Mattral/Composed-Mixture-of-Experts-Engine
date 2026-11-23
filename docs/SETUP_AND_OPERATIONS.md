@@ -1,6 +1,6 @@
 # Setup and Operations
 
-**Version:** v0.3.3  
+**Version:** v0.3.4  
 **Last updated:** July 2026
 
 ---
@@ -228,7 +228,7 @@ backend automatically based on this config value.
 
 ```bash
 # Build image (GPU, default target: runtime)
-docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.3 \
+docker build -f deploy/docker/Dockerfile -t moe-engine:v0.3.4 \
   --build-arg PYTORCH_VERSION=2.6.0 --build-arg CUDA_VERSION=12.6 .
 
 # CPU smoke test (no GPU required)

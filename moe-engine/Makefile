@@ -1,5 +1,5 @@
 # ===========================================================================
-# moe-engine Makefile  —  v0.3.3
+# moe-engine Makefile  —  v0.3.4
 # ===========================================================================
 # Run from: moe-engine/   (the directory containing pyproject.toml)
 #
@@ -33,7 +33,7 @@ CONFIG     ?= configs/smoke.yaml
 
 help:
 	@echo ""
-	@echo "moe-engine v0.3.3 — Make targets"
+	@echo "moe-engine v0.3.4 — Make targets"
 	@echo "=================================="
 	@echo "  test-cpu        CPU suite (wider than the CI Tier-0 job)"
 	@echo "  test-gpu        Tier-1 GPU suite (requires CUDA + Triton)"

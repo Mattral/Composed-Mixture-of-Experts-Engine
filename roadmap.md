@@ -1,8 +1,8 @@
 # moe-engine Roadmap
 
-**Last Updated:** 2026-11-23  
-**Version:** v0.3.3 (pre-release, 2026-11-20)  
-**Status:** P0, P1 and the CPU-doable part of P2.2 are complete. The October 2026 correctness work (M0–M2, ADR-010, ADR-011) is in v0.3.3. Multi-process pipeline parallelism was fixed on main after v0.3.3 (F16; its tests run outside CI). Remaining P2 items require GPU cluster access.
+**Last Updated:** 2026-11-24  
+**Version:** v0.3.4 (2026-11-24)  
+**Status:** P0, P1 and the CPU-doable part of P2.2 are complete. The October 2026 correctness work (M0–M2, ADR-010, ADR-011) is in v0.3.3. Multi-process pipeline parallelism was fixed in v0.3.4 (F16; its tests run outside CI). Remaining P2 items require GPU cluster access.
 
 ## Legend
 - ✅ Complete; where it is tested is in the row or in the README status table
@@ -185,10 +185,20 @@ gradients were wrong whenever any parallel dimension was > 1. Details are in
 | F14 — global gradient-norm clipping; experts sharded over DP | ✅ | `clip-*` layouts; dp2×ep2 three-step replica test |
 | F18 — seeded, TP-consistent training batches | ✅ | `test_train_step.py` (tp = 2 step vs dense reference) |
 | F27 — remove the unparsable `signal-correctness.yml` | ✅ | Workflow removed |
-| F16 — multi-process pipeline parallelism | ✅ Fixed 2026-11-23 (after v0.3.3) | 4 `test_pp_multiprocess_*` tests, run manually; see "Multi-process tests outside push CI" |
+| F16 — multi-process pipeline parallelism | ✅ Fixed in v0.3.4 (2026-11-23) | 4 `test_pp_multiprocess_*` tests, run manually; see "Multi-process tests outside push CI" |
 
 Not verified by any of the above: GPU, NCCL, the CUDA-stream overlap path,
 dp > 2, multi-node.
+
+---
+
+## v0.3.4 — Multi-process Pipeline Parallelism ✅
+
+Released 2026-11-24 as a tag. `run_1f1b_distributed` works across processes
+(F16): outputs and every stage's gradients match a dense reference at 2 and 3
+stages on CPU/Gloo. Details under "Multi-process tests outside push CI" below
+and in [`CHANGELOG.md`](CHANGELOG.md). The same release carries the
+2026-11-23 documentation pass.
 
 ---
 
